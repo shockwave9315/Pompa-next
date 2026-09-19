@@ -5,14 +5,19 @@ recorder thread; ``snapshot`` runs on API threads. One lock guards all
 in-memory state. Database I/O happens outside the lock so a slow or absent
 database never delays MQTT receive handling.
 
-Write buffer: closed rows queue in FIFO order. A flush claims the rows at the
-front (``_in_flight``); overflow never removes a claimed row, because its fate
-is unknown until the write returns. At most ``buffer_rows`` unclaimed rows are
-kept; beyond that the oldest unclaimed row is dropped at once, since it would
-be dropped whatever the write's outcome. When the write returns, claimed rows
-leave the buffer as written (success) or become ordinary queued rows again
-(failure) and the ``buffer_rows`` bound applies to the whole queue. Every
-``dropped_rows`` increment is therefore a row that was never persisted.
+Write buffer, two explicit parts:
+
+* ``_waiting``: closed rows never submitted to storage, FIFO, at most
+  ``buffer_rows``. On overflow the oldest waiting row is dropped and counted;
+  it was never submitted, so it cannot have been persisted by this recorder.
+* ``_protected``: the batch submitted to storage (at most ``buffer_rows``). A
+  failed write does not prove nothing was committed (the acknowledgement may be
+  lost), so the batch is retried unchanged and idempotently until a write
+  returns success. It is never dropped and never counted in ``dropped_rows``.
+
+A flush claims the whole waiting queue only when no protected batch exists.
+Transient memory is therefore at most ``buffer_rows`` protected plus
+``buffer_rows`` waiting rows. At most one flush runs at a time.
 """
 
 from __future__ import annotations
@@ -35,8 +40,9 @@ class Recorder:
         self.storage = storage
         self.buffer_rows = buffer_rows
         self._lock = threading.Lock()
-        self._buffer: deque[MinuteRow] = deque()
-        self._in_flight = 0  # rows at the front of _buffer claimed by the running flush
+        self._waiting: deque[MinuteRow] = deque()
+        self._protected: list[MinuteRow] = []
+        self._flushing = False
         self.dropped_rows = 0
         self.rows_closed = 0
         self.rows_written = 0
@@ -68,42 +74,56 @@ class Recorder:
     # ------------------------------------------------------------- recorder tick
 
     def tick(self, now: float) -> None:
-        """Close due minutes, bootstrap the schema if needed and flush the buffer."""
+        """Close due minutes, bootstrap the schema if needed and flush.
+
+        Writes the protected batch (a retry if one exists), then keeps claiming
+        and writing the waiting queue until it is empty or a write fails.
+        """
         with self._lock:
             self._advance(now)
-            if self._in_flight:
+            if self._flushing:
                 return  # one flush at a time (only a shutdown tick can overlap)
-            pending = list(self._buffer)
-            if self.schema_ready and not pending:
-                return
-            self._in_flight = len(pending)
-        written = False
+            self._flushing = True
+        try:
+            while True:
+                with self._lock:
+                    if not self._protected:
+                        self._protected = list(self._waiting)
+                        self._waiting.clear()
+                    batch = self._protected
+                if self.schema_ready and not batch:
+                    return
+                if not self._write(batch, now):
+                    return
+                with self._lock:
+                    self._protected = []
+                    self.rows_written += len(batch)
+                    if batch:
+                        self.last_written_minute = batch[-1].ts
+                if not batch:
+                    return
+        finally:
+            with self._lock:
+                self._flushing = False
+
+    def _write(self, batch: list[MinuteRow], now: float) -> bool:
+        """Database I/O, called without the lock. True only when the write returned success."""
         try:
             if not self.schema_ready:
                 self.storage.ensure_schema()
                 self.schema_ready = True
                 log.info("sample_1m schema ready")
-            self.storage.upsert(pending)
-            written = True
+            self.storage.upsert(batch)
         except StorageUnavailable as e:
             if self.db_last_error is None:
-                log.warning("database unavailable, %d row(s) buffered: %s", len(pending), e)
+                log.warning("database unavailable, %d row(s) held for retry: %s", len(batch), e)
             self.db_last_error, self.db_last_error_at = str(e), now
-        finally:
-            with self._lock:
-                if written:
-                    for _ in range(self._in_flight):
-                        self._buffer.popleft()
-                    self.rows_written += len(pending)
-                    if pending:
-                        self.last_written_minute = pending[-1].ts
-                self._in_flight = 0
-                self._enforce_capacity()
-        if written:
-            if self.db_last_error is not None:
-                log.info("database available again")
-            self.db_last_error = None
-            self.db_last_ok_at = now
+            return False
+        if self.db_last_error is not None:
+            log.info("database available again")
+        self.db_last_error = None
+        self.db_last_ok_at = now
+        return True
 
     # ------------------------------------------------------------- facts
 
@@ -139,9 +159,13 @@ class Recorder:
                     "last_written_minute": iso_utc(self.last_written_minute),
                     "rows_closed": self.rows_closed,
                     "rows_written": self.rows_written,
-                    "buffered_rows": len(self._buffer),
-                    "in_flight_rows": self._in_flight,
-                    "buffer_capacity": self.buffer_rows,
+                    # Submitted to storage, write not yet confirmed (may already be
+                    # persisted); retried until success, never dropped.
+                    "protected_rows": len(self._protected),
+                    # Closed, never submitted; bounded by waiting_capacity, oldest dropped.
+                    "waiting_rows": len(self._waiting),
+                    "waiting_capacity": self.buffer_rows,
+                    "flush_in_progress": self._flushing,
                     "dropped_rows": self.dropped_rows,
                     "schema_ready": self.schema_ready,
                     "db_last_ok_at": iso_utc(self.db_last_ok_at),
@@ -189,14 +213,9 @@ class Recorder:
         for row in self.accumulator.advance(t):
             self.rows_closed += 1
             self.last_row_minute = row.ts
-            self._buffer.append(row)
-        self._enforce_capacity()
+            self._waiting.append(row)
+            if len(self._waiting) > self.buffer_rows:
+                lost = self._waiting.popleft()
+                self.dropped_rows += 1
+                log.warning("waiting queue full, dropped never-submitted minute %s", iso_utc(lost.ts))
         return t
-
-    def _enforce_capacity(self) -> None:
-        """Drop the oldest unclaimed rows beyond ``buffer_rows`` (see module docstring)."""
-        while len(self._buffer) - self._in_flight > self.buffer_rows:
-            lost = self._buffer[self._in_flight]
-            del self._buffer[self._in_flight]
-            self.dropped_rows += 1
-            log.warning("write buffer full, dropped minute %s", iso_utc(lost.ts))

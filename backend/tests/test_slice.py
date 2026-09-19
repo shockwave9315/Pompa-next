@@ -104,7 +104,7 @@ def test_mqtt_to_history(storage):
     assert status["mqtt"]["lwt"]["retained"] is True
     assert status["mqtt"]["uncatalogued_topics"] == ["main/DHW_Target_Temp"]
     assert status["recorder"]["last_written_minute"] == "2027-01-15T08:04:00Z"
-    assert status["recorder"]["buffered_rows"] == 0
+    assert (status["recorder"]["protected_rows"], status["recorder"]["waiting_rows"]) == (0, 0)
     assert status["database"]["oldest_minute"] == "2027-01-15T08:01:00Z"
     assert status["database"]["newest_minute"] == "2027-01-15T08:04:00Z"
     xtop0 = next(s for s in status["sources"] if s["id"] == "XTOP0")

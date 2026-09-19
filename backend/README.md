@@ -31,15 +31,17 @@ Domain rules are in [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 | `DB_USER` / `DB_PASSWORD` / `DB_NAME` | required / empty / `pompa_next` | |
 | `API_HOST` / `API_PORT` | `0.0.0.0` / `8001` | |
 | `STALE_AFTER_SECONDS` | `600` | Stage 1 bootstrap value, 60–86400. Not an accepted policy. |
-| `WRITE_BUFFER_ROWS` | `60` | Closed minutes held in memory while MariaDB is unavailable. |
+| `WRITE_BUFFER_ROWS` | `60` | Bound on never-submitted waiting rows; one submitted batch of at most as many rows is held for retry on top of it. |
 | `LOG_LEVEL` | `INFO` | Logs are UTC. |
 
 ## API (Stage 1)
 
 - `GET /health` — process liveness only: `{"status": "ok"}`.
 - `GET /api/v1/status` — facts: MQTT connection/epoch/LWT/alive/last live message/parse rejects,
-  recorder process start/last closed and written minute, buffered and in-flight rows, drops
-  (a drop is always a row that was never persisted), database availability and
+  recorder process start/last closed and written minute, `protected_rows` (submitted batch whose
+  write is not yet confirmed; retried until success, never dropped), `waiting_rows` (never
+  submitted, at most `WRITE_BUFFER_ROWS`), `dropped_rows` (never-submitted rows dropped on
+  waiting-queue overflow), database availability and
   oldest/newest stored minute, and per-source measurement counters. No verdicts.
 - `GET /api/v1/history?from=…&to=…&bucket=1m[&series=a,b]` — exact `[from, to)`; both instants are
   ISO 8601 with an explicit offset and minute-aligned; at most 48 hours. Each bucket has `start`,

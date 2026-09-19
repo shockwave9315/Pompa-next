@@ -54,7 +54,8 @@ print(f"lwt               {m['lwt']}")
 print(f"recorder          process_start={r['process_start']} last_closed_minute={r['last_closed_minute']} "
       f"last_written_minute={r['last_written_minute']}")
 print(f"                  rows_closed={r['rows_closed']} rows_written={r['rows_written']} "
-      f"buffered_rows={r['buffered_rows']}/{r['buffer_capacity']} dropped_rows={r['dropped_rows']} "
+      f"protected_rows={r['protected_rows']} waiting_rows={r['waiting_rows']}/{r['waiting_capacity']} "
+      f"dropped_rows={r['dropped_rows']} "
       f"schema_ready={r['schema_ready']} db_last_error={r['db_last_error']}")
 print(f"database          available={d['available']} oldest={d['oldest_minute']} newest={d['newest_minute']} "
       f"error={d['error']}")

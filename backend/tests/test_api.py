@@ -54,7 +54,9 @@ def test_status_facts(client):
                                 "oldest_minute": Z.format(0), "newest_minute": Z.format(2)}
     assert body["mqtt"]["connected"] is False and body["mqtt"]["alive"] is False
     assert body["mqtt"]["stale_after_seconds"] == 600
-    assert body["recorder"]["buffered_rows"] == 0 and body["recorder"]["dropped_rows"] == 0
+    rec = body["recorder"]
+    assert (rec["protected_rows"], rec["waiting_rows"], rec["dropped_rows"]) == (0, 0, 0)
+    assert rec["waiting_capacity"] == 60 and rec["flush_in_progress"] is False
     assert len(body["sources"]) == 25
     # Facts only: no verdict tokens anywhere.
     for word in ("healthy", "degraded", "ready", "partial", "ok"):

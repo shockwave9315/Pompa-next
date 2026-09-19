@@ -68,7 +68,8 @@ def main() -> None:
             stop.set()
             thread.join(timeout=30)
             recorder.tick(time.time())  # last flush of already closed minutes
-            left = recorder.snapshot(time.time())["recorder"]["buffered_rows"]
+            facts = recorder.snapshot(time.time())["recorder"]
+            left = facts["protected_rows"] + facts["waiting_rows"]
             if left:
                 log.warning("shutdown with %d closed minute(s) not persisted", left)
 
