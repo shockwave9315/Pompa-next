@@ -235,6 +235,15 @@ def test_failed_hour_roll_keeps_the_range_contiguous(any_storage, monkeypatch):
 # ------------------------------------------------------------------ recorder orchestration
 
 
+def sessions_of(storage):
+    """Sessions opened so far; MariaDB counts connections through its own status counter."""
+    if hasattr(storage, "sessions"):
+        return storage.sessions
+    with storage._connection() as conn, conn.cursor() as cur:
+        cur.execute("SHOW GLOBAL STATUS LIKE 'Com_begin'")
+        return cur.fetchone()[1]
+
+
 def recorder_on(storage, start):
     ingest = Ingest(600)
     return Recorder(ingest, MinuteAccumulator(ingest, start), storage, 60)
@@ -310,3 +319,27 @@ def test_definite_failure_commits_nothing_and_retry_repairs(any_storage, monkeyp
     rec.tick(now + 2)
     assert rolled(any_storage)[(H0, "outside_temp")][3] == 40.0
     assert_exact(any_storage)
+
+
+def test_rollup_backlog_catches_up_over_ticks(any_storage):
+    """A long process gap leaves more closed hours than one tick may roll."""
+    persist(any_storage, [row(H0 + h * H + 60, outside_temp=float(h)) for h in range(40)])
+    rec = recorder_on(any_storage, H0 + 40 * H + 30)
+    rec.tick(H0 + 40 * H + 31)
+    assert until(any_storage) == H0 + 24 * H  # ROLL_HOURS_PER_TICK
+    rec.tick(H0 + 40 * H + 32)
+    assert until(any_storage) == H0 + 40 * H
+    assert_exact(any_storage)
+
+
+def test_idle_ticks_do_not_query_the_database(any_storage):
+    persist(any_storage, minutes(H0, 2 * 60))
+    rec = recorder_on(any_storage, H0 + 2 * H + 30)
+    rec.tick(H0 + 2 * H + 31)
+    assert until(any_storage) == H0 + 2 * H
+    with any_storage.session() as s:
+        s.minute_bounds()  # the sessions counted below are only the recorder's
+    before = sessions_of(any_storage)
+    for i in range(30):  # nothing closed and nothing written
+        rec.tick(H0 + 2 * H + 32 + i)
+    assert sessions_of(any_storage) == before

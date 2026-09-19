@@ -159,8 +159,7 @@ def test_recorder_purges_hourly_and_reports_facts(any_storage):
     assert facts["last_cutoff"] == "2027-01-15T16:00:00Z" and facts["error"] is None
     persist(any_storage, minutes(H0 + 10 * H, 60))
     rec.tick(now + 1)  # within the hour: no second purge run
-    assert rec.snapshot(now)["recorder"]["purge"]["last_run_at"] == rec.snapshot(now)["recorder"]["purge"]["last_run_at"]
-    assert rec.last_purge_at == now
+    assert rec.last_purge_at == now and rec.purged_rows == 8 * 60
     rec.tick(now + PURGE_INTERVAL_SECONDS + 1)
     assert rec.last_purge_at == now + PURGE_INTERVAL_SECONDS + 1
 

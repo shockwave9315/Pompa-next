@@ -24,6 +24,7 @@ from collections.abc import Sequence
 
 from .aggregation import (
     PAIRS, RECORDED, Stats, combine_maps, cop, coverage_percent, energy_kwh, fold_minutes, is_power,
+    minute_columns,
 )
 from .catalog import METRICS_BY_KEY, RECORDED_KEYS
 from .minute import iso_utc
@@ -81,7 +82,8 @@ def query(storage: Storage, start: int, end: int, bucket: str, series: Sequence[
                     f"bucket={resolved} needs raw minutes from {iso_utc(a)}, but raw minutes are retained"
                     f" only from {iso_utc(floor)}; the range is not rounded")
 
-        raw = [r for a, b in raw_spans for r in s.read_minutes(a, b)]
+        columns = minute_columns(needed)
+        raw = [r for a, b in raw_spans for r in s.read_minutes(a, b, columns)]
         rolled: dict[int, dict[str, Stats]] = {}
         for h, name, n, v_sum, v_min, v_max, v_last in s.read_rollup(roll_lo, roll_hi, needed):
             rolled.setdefault(h, {})[name] = Stats(n, v_sum, v_min, v_max, v_last)

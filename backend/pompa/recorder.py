@@ -61,8 +61,15 @@ class PurgeRefused(Exception):
 
 
 def rebuild_hour(session: Session, hour_ts: int) -> None:
-    """Replace one hour of ``rollup_1h`` with the ordered fold of its stored minutes."""
-    folded = fold_minutes(session.read_minutes(hour_ts, hour_ts + HOUR))
+    """Replace one hour of ``rollup_1h`` with the ordered fold of its stored minutes.
+
+    Only ever called for an hour that stores minutes: replacing a rolled hour
+    with an empty fold would delete evidence instead of correcting it.
+    """
+    rows = session.read_minutes(hour_ts, hour_ts + HOUR)
+    if not rows:
+        raise ValueError(f"refusing to rebuild hour {iso_utc(hour_ts)} from no stored minutes")
+    folded = fold_minutes(rows)
     session.replace_rollup_hour(hour_ts, [(k, s.n, s.sum, s.min, s.max, s.last)
                                           for k in SERIES if (s := folded.get(k)) is not None])
 

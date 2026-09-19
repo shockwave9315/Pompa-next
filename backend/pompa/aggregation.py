@@ -70,7 +70,16 @@ SERIES: tuple[str, ...] = RECORDED_KEYS + DERIVED_KEYS
 
 _CO_IN, _CO_OUT = "co_power_consumption", "co_power_production"
 _DHW_IN, _DHW_OUT = "dhw_power_consumption", "dhw_power_production"
-assert all(k in RECORDED_KEYS for k in (_CO_IN, _CO_OUT, _DHW_IN, _DHW_OUT))
+POWER_CHANNELS: tuple[str, ...] = (_CO_IN, _CO_OUT, _DHW_IN, _DHW_OUT)
+assert all(k in RECORDED_KEYS for k in POWER_CHANNELS)
+
+
+def minute_columns(series: Sequence[str]) -> tuple[str, ...]:
+    """The ``sample_1m`` columns a fold of ``series`` needs: its metrics plus paired power."""
+    columns = {s for s in series if s in RECORDED_KEYS}
+    if any(s.startswith("pair_") for s in series):
+        columns.update(POWER_CHANNELS)
+    return tuple(k for k in RECORDED_KEYS if k in columns)
 
 
 def derive(values: Mapping[str, float | None]) -> dict[str, float | None]:
@@ -78,10 +87,13 @@ def derive(values: Mapping[str, float | None]) -> dict[str, float | None]:
 
     A paired series exists only when all of its power channels are known in the
     same minute, so paired input and output always share contributing minutes.
+    A metric the caller did not read is absent, exactly like an unknown one, so
+    only the series a query actually folds may be taken from the result.
     """
-    out: dict[str, float | None] = {k: values[k] for k in RECORDED_KEYS}
+    out: dict[str, float | None] = {k: values.get(k) for k in RECORDED_KEYS}
     out[RECORDED] = 1.0
-    co_in, co_out, dhw_in, dhw_out = values[_CO_IN], values[_CO_OUT], values[_DHW_IN], values[_DHW_OUT]
+    co_in, co_out = values.get(_CO_IN), values.get(_CO_OUT)
+    dhw_in, dhw_out = values.get(_DHW_IN), values.get(_DHW_OUT)
     co = co_in is not None and co_out is not None
     dhw = dhw_in is not None and dhw_out is not None
     out["pair_co_in"], out["pair_co_out"] = (co_in, co_out) if co else (None, None)
