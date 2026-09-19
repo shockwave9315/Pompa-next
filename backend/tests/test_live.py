@@ -233,3 +233,87 @@ def test_concurrent_mqtt_updates_never_tear_a_snapshot():
         thread.join(timeout=30)
     assert not failures[:5]
     assert live.ingest.sources[XTOP0].value == float(T0 + 400)
+
+
+# --------------------------------------------------------------- adversarial
+
+
+def test_retained_real_zero_is_exposed_as_zero(live):
+    live.connect(T0).msg(T0 + 1, XTOP0, "0", retained=True)
+    assert selected(live.metric(CO_IN, T0 + 2)) == (0.0, "retained", "XTOP0")
+
+
+def test_retained_value_has_no_freshness_limit_but_carries_its_age(live):
+    live.connect(T0).msg(T0 + 1, XTOP0, "900", retained=True)
+    entry = live.metric(CO_IN, T0 + 10 * 86400)
+    assert entry["mode"] == "retained" and entry["received_at"] == Z.format(0, 1)
+
+
+def test_lwt_online_alone_does_not_resurrect_live_state(live):
+    live.connect(T0).publish(T0 + 1).lwt(T0 + 5, "Offline")
+    assert live.metric(CO_IN, T0 + 6) == NONE_ENTRY
+    live.lwt(T0 + 7, "Online")
+    assert live.metric(CO_IN, T0 + 8) == NONE_ENTRY
+    assert live.body(T0 + 8)["mqtt"]["alive"] is False
+    live.msg(T0 + 9, XTOP0, "900")
+    assert selected(live.metric(CO_IN, T0 + 10)) == (900.0, "live", "XTOP0")
+
+
+def test_a_live_mode_metric_always_implies_an_alive_connection(live):
+    """Freshness of a selected source cannot outlive the connection's own life."""
+    script = [
+        lambda t: live.connect(t),
+        lambda t: live.msg(t, XTOP0, "900"),
+        lambda t: live.msg(t, TOP16, "1000", retained=True),
+        lambda t: live.lwt(t, "Online"),
+        lambda t: live.disconnect(t),
+        lambda t: live.connect(t),
+        lambda t: live.msg(t, OUTLET, "35", retained=True),
+        lambda t: live.msg(t, OUTLET, "36"),
+        lambda t: live.lwt(t, "Offline"),
+        lambda t: live.lwt(t, "Online"),
+        lambda t: live.msg(t, XTOP0, "800"),
+    ]
+    for i, step in enumerate(script):
+        step(T0 + i * 30)
+        for offset in (1, 599, 601):
+            body = live.body(T0 + i * 30 + offset)
+            modes = {e["mode"] for e in body["metrics"].values()}
+            assert "live" not in modes or body["mqtt"]["alive"] is True
+            assert body["mqtt"]["alive"] is False or body["mqtt"]["connected"] is True
+
+
+def test_history_and_live_never_disagree_about_the_selected_source(live):
+    live.connect(T0).msg(T0, XTOP0, "900", retained=True).msg(T0 + 5, TOP16, "1000")
+    live.msg(T0 + 400, XTOP0, "950").msg(T0 + 500, TOP16, "1100")
+    for t in range(T0, T0 + 1300, 37):
+        entry = live.metric(CO_IN, t)
+        source = live.ingest.historical(CO_IN, t)
+        if source is None:
+            assert entry["mode"] in ("retained", "none")
+        else:
+            assert selected(entry) == (source.value, "live", source.source.id)
+
+
+def test_live_is_unaffected_by_recorder_maintenance_failures(live):
+    live.connect(T0).publish_every(T0, T0 + 600)
+    live.storage.fail_commit = 2
+    live.tick(T0 + 600)
+    assert live.recorder.db_last_error == "commit failed"
+    assert selected(live.metric(CO_IN, T0 + 601))[1:] == ("live", "XTOP0")
+    assert live.body(T0 + 601)["mqtt"]["alive"] is True
+
+
+def test_a_stale_source_falls_back_to_another_sources_retained_cache(live):
+    """Priority order applies to retained candidates too, even older ones."""
+    live.connect(T0).msg(T0, XTOP0, "900", retained=True).msg(T0 + 2, TOP16, "1100")
+    assert selected(live.metric(CO_IN, T0 + 3)) == (1100.0, "live", "TOP16")
+    entry = live.metric(CO_IN, T0 + 700)  # TOP16 is stale; only XTOP0's retained cache remains
+    assert selected(entry) == (900.0, "retained", "XTOP0")
+    assert entry["received_at"] == Z.format(0, 0)
+
+
+def test_an_invalid_preferred_source_falls_back_to_a_retained_lower_priority(live):
+    # -1 W is out of the power metric's valid range, so XTOP0 holds no value at all.
+    live.connect(T0).msg(T0 + 1, TOP16, "1000", retained=True).msg(T0 + 2, XTOP0, "-1")
+    assert selected(live.metric(CO_IN, T0 + 3)) == (1000.0, "retained", "TOP16")

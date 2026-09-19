@@ -164,3 +164,29 @@ def test_metrics_survives_database_outage(client, storage):
     r = client.get("/api/v1/metrics")
     assert r.status_code == 200 and storage.sessions == 0
     assert len(r.json()["metrics"]) == len(METRICS)
+
+
+# --------------------------------------------------------------- adversarial
+
+
+def test_history_fields_match_an_independent_derivation(body):
+    """A second, deliberately hand-written derivation of the same rule."""
+    for entry in body["metrics"]:
+        metric = METRICS_BY_KEY[entry["key"]]
+        expected = ["avg" if metric.kind == "mean" else "last", "min", "max", "minutes"]
+        if metric.group == "power" and metric.unit == "W":
+            expected.append("kwh")
+        assert entry["history_fields"] == expected
+        assert entry["energy"] is (metric.group == "power" and metric.unit == "W")
+
+
+def test_catalog_is_unaffected_by_mqtt_state(client, storage):
+    from conftest import RUNNING, Api
+
+    api = Api(storage=storage)
+    before = api.body("/api/v1/metrics", T0)
+    api.connect(T0).publish(T0 + 1).disconnect(T0 + 2)
+    assert api.body("/api/v1/metrics", T0 + 3) == before
+    api.connect(T0 + 4).publish(T0 + 5, RUNNING, retained=True)
+    assert api.body("/api/v1/metrics", T0 + 6) == before
+    assert before == client.get("/api/v1/metrics").json()
