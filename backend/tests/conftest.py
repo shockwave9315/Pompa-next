@@ -171,6 +171,70 @@ class FakeStorage:
         return (*tx.minute_bounds(), tx.rolled_until())
 
 
+class Api:
+    """Recorder, FakeStorage and a TestClient with an explicit clock.
+
+    MQTT events go through the recorder entry points, so tests exercise the
+    same lock and accumulation path as the network thread.
+    """
+
+    def __init__(self, stale=600, start=T0, storage=None):
+        from fastapi.testclient import TestClient
+
+        from pompa.api import create_app
+        from pompa.ingest import Ingest
+        from pompa.minute import MinuteAccumulator
+        from pompa.recorder import Recorder
+
+        self.storage = FakeStorage() if storage is None else storage
+        self.ingest = Ingest(stale)
+        self.recorder = Recorder(self.ingest, MinuteAccumulator(self.ingest, start), self.storage, 60)
+        self.now = float(start)
+        self.client = TestClient(create_app(self.recorder, self.storage, clock=lambda: self.now))
+
+    def connect(self, t):
+        self.recorder.on_connect(t)
+        return self
+
+    def disconnect(self, t):
+        self.recorder.on_disconnect(t)
+        return self
+
+    def lwt(self, t, payload, retained=False):
+        self.recorder.on_lwt(payload, retained, t)
+        return self
+
+    def msg(self, t, topic, payload, retained=False):
+        self.recorder.on_message(topic, payload, retained, t)
+        return self
+
+    def publish(self, t, snapshot=RUNNING, retained=False):
+        for topic, payload in snapshot.items():
+            self.msg(t, topic, payload, retained)
+        return self
+
+    def publish_every(self, start, end, step=10, snapshot=RUNNING):
+        t = start
+        while t < end:
+            self.publish(t, snapshot)
+            t += step
+        return self
+
+    def tick(self, t):
+        self.recorder.tick(t)
+        return self
+
+    def get(self, path, t=None, **params):
+        if t is not None:
+            self.now = float(t)
+        return self.client.get(path, params=params)
+
+    def body(self, path, t=None, **params):
+        r = self.get(path, t, **params)
+        assert r.status_code == 200, r.text
+        return r.json()
+
+
 @pytest.fixture
 def mariadb():
     """Real MariaDB storage; opt in with POMPA_TEST_DB_HOST (see backend/README.md)."""

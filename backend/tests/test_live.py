@@ -7,14 +7,10 @@ MQTT uses: lock, ingest mutation, minute accumulation.
 import threading
 
 import pytest
-from fastapi.testclient import TestClient
 
-from conftest import RUNNING, T0, FakeStorage
-from pompa.api import create_app
+from conftest import T0, Api
 from pompa.catalog import METRICS
-from pompa.ingest import Ingest
-from pompa.minute import MinuteAccumulator, iso_utc
-from pompa.recorder import Recorder
+from pompa.minute import iso_utc
 
 XTOP0 = "extra/Heat_Power_Consumption_Extra"
 TOP16 = "main/Heat_Power_Consumption"
@@ -26,42 +22,11 @@ NONE_ENTRY = {"value": None, "mode": "none", "source_id": None, "source_topic": 
 Z = "2027-01-15T08:{:02d}:{:02d}Z"  # T0 + m minutes + s seconds
 
 
-class Live:
-    """Recorder + API client with an explicit clock."""
-
-    def __init__(self, stale=600, start=T0):
-        self.storage = FakeStorage()
-        self.ingest = Ingest(stale)
-        self.recorder = Recorder(self.ingest, MinuteAccumulator(self.ingest, start), self.storage, 60)
-        self.now = float(start)
-        self.client = TestClient(create_app(self.recorder, self.storage, clock=lambda: self.now))
-
-    def connect(self, t):
-        self.recorder.on_connect(t)
-        return self
-
-    def disconnect(self, t):
-        self.recorder.on_disconnect(t)
-        return self
-
-    def lwt(self, t, payload, retained=False):
-        self.recorder.on_lwt(payload, retained, t)
-        return self
-
-    def msg(self, t, topic, payload, retained=False):
-        self.recorder.on_message(topic, payload, retained, t)
-        return self
-
-    def publish(self, t, snapshot=RUNNING, retained=False):
-        for topic, payload in snapshot.items():
-            self.msg(t, topic, payload, retained)
-        return self
+class Live(Api):
+    """``Api`` with live-specific readers."""
 
     def body(self, t):
-        self.now = float(t)
-        r = self.client.get("/api/v1/live")
-        assert r.status_code == 200, r.text
-        return r.json()
+        return super().body("/api/v1/live", t)
 
     def metric(self, key, t):
         return self.body(t)["metrics"][key]
