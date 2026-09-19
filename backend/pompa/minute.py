@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from .catalog import RECORDED, RECORDED_KEYS
 from .ingest import Ingest
@@ -25,6 +26,15 @@ class MinuteRow:
 
 def floor_minute(t: float) -> int:
     return math.floor(t / MINUTE) * MINUTE
+
+
+def iso_utc(t: float | None) -> str | None:
+    """API timestamp form: ISO 8601 UTC with ``Z``."""
+    if t is None:
+        return None
+    dt = datetime.fromtimestamp(t, timezone.utc)
+    spec = "seconds" if dt.microsecond == 0 else "milliseconds"
+    return dt.isoformat(timespec=spec).replace("+00:00", "Z")
 
 
 class MinuteAccumulator:
