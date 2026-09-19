@@ -287,6 +287,31 @@ class Recorder:
 
     # ------------------------------------------------------------- facts
 
+    def live(self, now: float) -> dict:
+        """Canonical live metric state for ``/api/v1/live``.
+
+        Pure in-memory reading under the same lock as MQTT mutation, so one
+        response can never mix values from before and after a message. No
+        database I/O and no state change: minutes are closed by ``tick``, never
+        by an API thread.
+        """
+        with self._lock:
+            ing = self.ingest
+            return {
+                "now": iso_utc(now),
+                "mqtt": {"connected": ing.connected, "alive": ing.alive_at(now), "epoch": ing.epoch},
+                "metrics": {
+                    key: {
+                        "value": v.value,
+                        "mode": v.mode,
+                        "source_id": v.source_id,
+                        "source_topic": v.source_topic,
+                        "received_at": iso_utc(v.received_at),
+                    }
+                    for key, v in ing.live_snapshot(now).items()
+                },
+            }
+
     def snapshot(self, now: float) -> dict:
         """Factual in-memory state for ``/api/v1/status``."""
         with self._lock:

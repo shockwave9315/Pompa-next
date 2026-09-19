@@ -76,6 +76,11 @@ def create_app(recorder: Recorder, storage: Storage, clock: Callable[[], float] 
     def health() -> dict:
         return {"status": "ok"}
 
+    @app.get("/api/v1/live")
+    def live() -> dict:
+        """In-memory only: unaffected by database availability."""
+        return recorder.live(clock())
+
     @app.get("/api/v1/status")
     def status() -> dict:
         now = clock()

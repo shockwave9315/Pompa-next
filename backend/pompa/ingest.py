@@ -22,6 +22,28 @@ LWT_OFFLINE = "Offline"
 MAX_UNCATALOGUED_TOPICS = 500
 
 
+@dataclass(frozen=True)
+class LiveValue:
+    """One metric's current canonical value and where it came from.
+
+    ``mode`` is protocol provenance, not a health verdict:
+
+    * ``live``: a confirmed fresh non-retained source of the current epoch.
+    * ``retained``: a cached retained delivery, exposed only because no
+      confirmed source exists. It never entered history.
+    * ``none``: nothing current to show; every field is ``None``.
+    """
+
+    value: float | None
+    mode: str
+    source_id: str | None
+    source_topic: str | None
+    received_at: float | None
+
+
+NO_LIVE = LiveValue(None, "none", None, None, None)
+
+
 @dataclass
 class SourceState:
     metric: Metric
@@ -182,6 +204,29 @@ class Ingest:
             if s.seen_live and s.value is not None and t < s.last_live_at + self.stale_after:
                 return s
         return None
+
+    def live(self, metric_key: str, t: float) -> LiveValue:
+        """Canonical current value: a confirmed source, else a retained cache, else nothing.
+
+        The confirmed path *is* ``historical``, so live display and historical
+        accumulation can never disagree about source priority, validity or
+        freshness. Only when it selects nothing may a retained delivery be
+        shown, labelled as such: it still proves no source life, sets no
+        ``seen_live`` and enters no minute. A stale non-retained value is not a
+        fallback — the latest delivery of a source is either its retained cache
+        or it is not.
+        """
+        s = self.historical(metric_key, t)
+        if s is not None:
+            return LiveValue(s.value, "live", s.source.id, s.source.topic, s.last_live_at)
+        for s in self._by_metric[metric_key]:
+            if s.last_retained and s.last_outcome is Outcome.VALID and s.last_value is not None:
+                return LiveValue(s.last_value, "retained", s.source.id, s.source.topic, s.last_received_at)
+        return NO_LIVE
+
+    def live_snapshot(self, t: float) -> dict[str, LiveValue]:
+        """Every catalog metric exactly once, in catalog order."""
+        return {m.key: self.live(m.key, t) for m in METRICS}
 
     def next_expiry_after(self, t: float) -> float | None:
         """Earliest moment after ``t`` at which a historical value stops being fresh."""
