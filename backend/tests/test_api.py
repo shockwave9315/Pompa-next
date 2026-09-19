@@ -1,5 +1,7 @@
 """HTTP contract: health, status facts, 1m history and error codes."""
 
+from datetime import date, timedelta
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -163,3 +165,34 @@ def test_history_database_unavailable_503(client, db):
     r = get_history(client, **{"from": Z.format(0), "to": Z.format(1)})
     assert r.status_code == 503
     assert client.get("/health").status_code == 200  # process liveness unaffected
+
+
+def test_history_accepts_calendar_dates_as_local_midnight(client):
+    body = get_history(client, **{"from": "2027-01-15", "to": "2027-01-16", "bucket": "1d",
+                                  "series": "outside_temp"}).json()
+    assert (body["from"], body["to"]) == ("2027-01-14T23:00:00Z", "2027-01-15T23:00:00Z")
+    assert [(b["start"], b["end"]) for b in body["buckets"]] == [("2027-01-14T23:00:00Z", "2027-01-15T23:00:00Z")]
+    assert body["buckets"][0]["expected_minutes"] == 542  # elapsed minutes only: the clock is at 08:02:30Z that day
+
+
+@pytest.mark.parametrize("day,edges,expected", [
+    ("2027-03-28", ("2027-03-27T23:00:00Z", "2027-03-28T22:00:00Z"), 1380),
+    ("2027-10-31", ("2027-10-30T22:00:00Z", "2027-10-31T23:00:00Z"), 1500),
+    ("2027-01-15", ("2027-01-14T23:00:00Z", "2027-01-15T23:00:00Z"), 1440),
+])
+def test_history_dst_days_through_the_api(db, day, edges, expected):
+    later = TestClient(create_app(Recorder(Ingest(600), MinuteAccumulator(Ingest(600), T0), db, 60), db,
+                                  clock=lambda: 1_900_000_000))  # 2030, long after every day under test
+    body = later.get("/api/v1/history", params={
+        "from": day, "to": (date.fromisoformat(day) + timedelta(days=1)).isoformat(),
+        "bucket": "1d", "series": "outside_temp"}).json()
+    assert [(b["start"], b["end"]) for b in body["buckets"]] == [edges]
+    assert body["buckets"][0]["expected_minutes"] == expected
+
+
+def test_history_cop_series_shape(client):
+    body = get_history(client, **{"from": Z.format(0), "to": Z.format(3), "bucket": "total",
+                                  "series": "cop_co"}).json()
+    cop = body["series"]["cop_co"]
+    assert set(cop) == {"label", "unit", "kind", "cop", "paired_minutes", "input_kwh", "output_kwh"}
+    assert cop["kind"] == "cop" and cop["paired_minutes"] == [0] and cop["cop"] == [None]
