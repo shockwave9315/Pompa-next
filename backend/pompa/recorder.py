@@ -157,7 +157,11 @@ class Recorder:
     # ------------------------------------------------------------- internals
 
     def _advance(self, t: float) -> float:
-        """Close minutes up to ``t``; returns ``t`` clamped to never go backwards."""
+        """Close minutes up to ``t``; returns ``t`` clamped to never go backwards.
+
+        After a wall-clock step backwards, events are applied at the cursor and
+        no minute closes until real time passes it again: a gap, never a duplicate.
+        """
         t = max(t, self.accumulator.cursor)
         for row in self.accumulator.advance(t):
             self.rows_closed += 1

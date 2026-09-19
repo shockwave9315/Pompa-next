@@ -15,6 +15,7 @@ from pompa.recorder import Recorder
 
 PREFIX = "panasonic_heat_pump"
 OK = SimpleNamespace(is_failure=False)
+LOST = SimpleNamespace(is_failure=True)
 
 
 @pytest.fixture(params=["fake", "mariadb"])
@@ -73,7 +74,7 @@ def test_mqtt_to_history(storage):
 
     # Connection drop at T0+150; the broker re-delivers retained state on reconnect.
     at(T0 + 150)
-    adapter._on_disconnect(client, None, None, OK, None)
+    adapter._on_disconnect(client, None, None, LOST, None)
     at(T0 + 155)
     adapter._on_connect(client, None, None, OK, None)
     deliver("LWT", "Online", retain=True)

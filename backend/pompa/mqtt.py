@@ -69,7 +69,8 @@ class MqttAdapter:
 
     def _on_disconnect(self, client, userdata, flags, reason_code, properties) -> None:
         self.recorder.on_disconnect(self.clock())
-        log.warning("MQTT disconnected: %s", reason_code)
+        log.log(logging.WARNING if reason_code.is_failure else logging.INFO,
+                "MQTT disconnected: %s", reason_code)
 
     def _on_message(self, client, userdata, msg) -> None:
         t = self.clock()

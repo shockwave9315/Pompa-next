@@ -45,8 +45,8 @@ class SourceState:
 
 
 class Ingest:
-    def __init__(self, stale_after: float):
-        self.stale_after = float(stale_after)
+    def __init__(self, stale_after: int):
+        self.stale_after = stale_after
         self.sources: dict[str, SourceState] = {
             topic: SourceState(metric, source) for topic, (metric, source) in SOURCE_BY_TOPIC.items()
         }
