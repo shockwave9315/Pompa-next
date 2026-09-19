@@ -343,3 +343,30 @@ def test_idle_ticks_do_not_query_the_database(any_storage):
     for i in range(30):  # nothing closed and nothing written
         rec.tick(H0 + 2 * H + 32 + i)
     assert sessions_of(any_storage) == before
+
+
+def test_killed_connection_mid_transaction_commits_nothing(mariadb):
+    """The server itself drops the transaction: raw minute and rollup are lost together."""
+    mariadb.ensure_schema()
+    persist(mariadb, [r for r in minutes(H0, 60) if r.ts != H0 + 30 * 60])
+    roll_all(mariadb)
+    before = rolled(mariadb)
+    late = row(H0 + 30 * 60, main_outlet_temp=-55.0)  # the minute missing from that hour
+
+    with pytest.raises(StorageUnavailable):
+        with mariadb.session() as s:
+            s._cur.execute("SELECT CONNECTION_ID()")
+            (connection_id,) = s._cur.fetchone()
+            s.upsert_minutes([late])
+            rebuild_hour(s, H0)  # the repair is in the same transaction
+            with mariadb._connection() as killer, killer.cursor() as cur:
+                cur.execute("KILL %s", (connection_id,))
+        # leaving the block tries to commit on a connection the server has closed
+
+    assert rolled(mariadb) == before
+    with mariadb.session() as s:
+        assert s.read_minutes(H0 + 30 * 60, H0 + 31 * 60) == []
+    persist(mariadb, [late])  # the retry writes both again
+    assert rolled(mariadb)[(H0, "main_outlet_temp")][2] == -55.0
+    assert rolled(mariadb)[(H0, "recorded")][0] == 60
+    assert_exact(mariadb)
