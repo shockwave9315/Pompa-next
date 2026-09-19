@@ -11,7 +11,7 @@ HeishaMon MQTT
   → React frontend
 ```
 
-Current status: **Stage 1 — Core Backend.** The backend records canonical minutes from MQTT into MariaDB and serves 1-minute history and status; see [backend/README.md](backend/README.md). No frontend yet.
+Current status: **Stage 2 — Historical Engine**, developed on a branch stacked on Stage 1. The backend records canonical minutes from MQTT into MariaDB, rolls them up hourly, and serves 1m/5m/1h/1d/total history with energy, COP and coverage facts; see [backend/README.md](backend/README.md). No frontend yet.
 
 Planned stack: Python 3.12, FastAPI, paho-mqtt, PyMySQL, MariaDB 11.4, React, Vite, and Docker Compose.
 

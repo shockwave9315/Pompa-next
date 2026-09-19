@@ -60,6 +60,10 @@ def test_status_facts(client):
     rec = body["recorder"]
     assert (rec["protected_rows"], rec["waiting_rows"], rec["dropped_rows"]) == (0, 0, 0)
     assert rec["waiting_capacity"] == 60 and rec["flush_in_progress"] is False
+    assert rec["retention_1m_days"] == 365
+    assert rec["rollup"] == {"last_rolled_hour": None, "last_rolled_at": None, "error": None, "error_at": None}
+    assert rec["purge"] == {"last_run_at": None, "last_cutoff": None, "last_deleted_rows": 0,
+                            "deleted_rows": 0, "error": None, "error_at": None}
     assert len(body["sources"]) == 25
     # Facts only: no verdict tokens anywhere.
     for word in ("healthy", "degraded", "ready", "partial", "ok"):

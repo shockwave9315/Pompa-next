@@ -2,7 +2,8 @@
 
 One Python 3.12 process: a paho-mqtt client, a recorder thread and a FastAPI
 server (one uvicorn worker). It records canonical minutes from HeishaMon MQTT
-into the MariaDB table `sample_1m` and serves them over `/api/v1`.
+into the MariaDB tables `sample_1m` and `rollup_1h` and serves history,
+aggregates and status over `/api/v1`.
 Domain rules are in [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 
 | Module | Responsibility |
@@ -11,9 +12,11 @@ Domain rules are in [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 | `pompa/catalog.py` | The 21 recorded metrics: topics, priority, unit, kind, sentinels, ranges. |
 | `pompa/ingest.py` | Connection epochs, LWT, retained vs live, `seen_live`, freshness, source selection. |
 | `pompa/minute.py` | `MinuteAccumulator` → `MinuteRow` (full-minute source life, time-weighted means). |
-| `pompa/recorder.py` | Serialises events, closes minutes, bounded write buffer, flush, status facts. |
-| `pompa/storage.py` | `sample_1m` DDL and parameterized PyMySQL queries. |
-| `pompa/history.py` | 1-minute history response from stored rows. |
+| `pompa/aggregation.py` | `Stats` algebra, derived series, energy, paired COP, coverage. |
+| `pompa/timegrid.py` | UTC/Europe/Warsaw alignment, buckets, `auto`, raw retention floor. |
+| `pompa/recorder.py` | Serialises events, closes minutes, write buffer, flush, rollup, purge, status facts. |
+| `pompa/storage.py` | `sample_1m`/`rollup_1h` DDL and parameterized PyMySQL queries, one transaction per session. |
+| `pompa/history.py` | Bucket composition from rollups and raw minutes. |
 | `pompa/mqtt.py` | paho adapter: subscribe `{prefix}/#`, reconnect, forward retain flag and LWT. |
 | `pompa/api.py` | `/health`, `/api/v1/status`, `/api/v1/history`. |
 | `pompa/main.py` | Process wiring and shutdown. |
@@ -32,23 +35,66 @@ Domain rules are in [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 | `API_HOST` / `API_PORT` | `0.0.0.0` / `8001` | |
 | `STALE_AFTER_SECONDS` | `600` | Stage 1 bootstrap value, 60–86400. Not an accepted policy. |
 | `WRITE_BUFFER_ROWS` | `60` | Bound on never-submitted waiting rows; one submitted batch of at most as many rows is held for retry on top of it. |
+| `RETENTION_1M_DAYS` | `365` | `sample_1m` retention, 0–36500; `0` disables purge. `rollup_1h` is kept indefinitely. |
 | `LOG_LEVEL` | `INFO` | Logs are UTC. |
 
-## API (Stage 1)
+## API
 
 - `GET /health` — process liveness only: `{"status": "ok"}`.
 - `GET /api/v1/status` — facts: MQTT connection/epoch/LWT/alive/last live message/parse rejects,
   recorder process start/last closed and written minute, `protected_rows` (submitted batch whose
   write is not yet confirmed; retried until success, never dropped), `waiting_rows` (never
   submitted, at most `WRITE_BUFFER_ROWS`), `dropped_rows` (never-submitted rows dropped on
-  waiting-queue overflow), database availability and
-  oldest/newest stored minute, and per-source measurement counters. No verdicts.
-- `GET /api/v1/history?from=…&to=…&bucket=1m[&series=a,b]` — exact `[from, to)`; both instants are
-  ISO 8601 with an explicit offset and minute-aligned; at most 48 hours. Each bucket has `start`,
-  `end`, `expected_minutes`, `recorded_minutes` (0 = no row) and `coverage_percent`. Series arrays
-  align with buckets; a `null` value with `recorded_minutes = 1` is a stored `NULL`.
-  Errors: 400 bad parameters, 422 bucket other than `1m` or range over 48 h, 503 database
-  unavailable.
+  waiting-queue overflow), configured retention, last rollup and purge outcomes, database
+  availability, oldest/newest stored minute, `rolled_until` and `raw_floor`. No verdicts.
+- `GET /api/v1/history?from=…&to=…[&bucket=…][&series=a,b]` — exact `[from, to)`, never rounded.
+
+`from` and `to` are ISO 8601 instants with an explicit offset (`Z`, `+02:00`) or `YYYY-MM-DD`
+calendar dates meaning local midnight in Europe/Warsaw; both must be whole minutes.
+
+| `bucket` | Alignment | Read from |
+|---|---|---|
+| `1m`, `5m` | UTC | `sample_1m` |
+| `1h` | UTC | `rollup_1h` for complete rolled hours, `sample_1m` for partial edges and unrolled hours |
+| `1d` | Europe/Warsaw calendar day (1380/1500 minutes across DST) | as `1h` |
+| `total` | the exact requested range | as `1h` |
+| `auto` (default) | ≤36 h → `1m`, ≤10 d → `5m`, ≤120 d → `1h`, longer → `1d`; promoted to `1h` when raw retention cannot serve minutes | — |
+
+Each bucket has `start`, `end`, `expected_minutes` (elapsed minutes of the bucket, never trimmed to
+recording start), `recorded_minutes` (0 = no row) and `coverage_percent`. Series arrays align with
+the bucket array; a `null` value with `recorded_minutes > 0` means the metric was unknown in
+recorded minutes. `series` accepts recorded metric keys plus `cop_co`, `cop_dhw` and `cop_total`;
+by default all of them are returned.
+
+| Series | Fields |
+|---|---|
+| `kind=mean` | `avg`, `min`, `max`, `minutes` |
+| `kind=last` | `last`, `min`, `max`, `minutes` |
+| power (W) | additionally `kwh` = Σ W / 60000 over the known minutes |
+| COP | `cop` = Σ paired out / Σ paired in, `paired_minutes`, `input_kwh`, `output_kwh` |
+
+Errors: 400 malformed parameters, 422 well-formed but unrepresentable (over 3000 buckets, a range
+or partial edge hour older than raw retention, instants outside 1970–2100), 503 database
+unavailable.
+
+## Rollup, late writes and purge
+
+`rollup_1h` holds one row per UTC hour and series (catalog metrics plus `recorded` and the paired
+power series) whenever that series has at least one known minute in the hour. `rolled_until` is
+`MAX(hour_ts) + 1 h`; hours are rolled in ascending order, one transaction each, so the rolled
+range stays contiguous.
+
+Minutes can arrive after their hour was rolled — a protected batch retried through a long outage, a
+minute closed while its hour was being rolled, a clock stepped back across a restart. Instead of a
+larger reprocessing window, every minute write rebuilds the rolled hours it touches inside the same
+transaction: raw minute and corrected rollup commit together or not at all, a lost acknowledgement
+leaves both committed, and retries are idempotent.
+
+Purge runs hourly in bounded steps (at most 24 whole hours per step) and deletes `sample_1m` rows
+below `min(floor_hour(now − RETENTION_1M_DAYS), rolled_until − 2 h, floor_hour(oldest pending
+minute))`, and only after proving per hour that the rollup accounts for every minute still stored
+there. Anything unproven, missing or failing deletes nothing. That same cutoff is the read path's
+raw floor, so queries never depend on minutes purge may already have removed.
 
 ## Tests
 
@@ -57,8 +103,8 @@ uv venv -p 3.12 .venv && uv pip install -p .venv/bin/python -r backend/requireme
 cd backend && ../.venv/bin/python -m pytest
 ```
 
-Storage and part of the slice test run against real MariaDB when `POMPA_TEST_DB_HOST` is set
-(they drop and recreate `sample_1m` in that database, so use a throwaway one):
+Storage, rollup, purge, history and slice tests run against real MariaDB when `POMPA_TEST_DB_HOST`
+is set (they drop and recreate `sample_1m` and `rollup_1h` there, so use a throwaway database):
 
 ```sh
 docker run -d --name pompa-next-testdb -e MARIADB_ROOT_PASSWORD=testroot \
@@ -75,7 +121,7 @@ MQTT client id `pompa-next` and port 8001. Nothing in `/opt/pompa` is touched.
 ```sh
 git clone https://github.com/shockwave9315/Pompa-next.git /opt/pompa-next
 cd /opt/pompa-next
-git checkout stage-1-core-backend
+git checkout stage-1-core-backend   # Stage 2 is not deployed
 cp .env.example .env && chmod 600 .env   # set MQTT_HOST, credentials, DB passwords
 docker compose up -d --build
 docker compose logs -f backend           # connection epochs, LWT, database state

@@ -187,7 +187,9 @@ CREATE TABLE rollup_1h (
 
 A row exists only when the series has at least one non-`NULL` minute in that hour. `v_last` is retained for every series and preserves end-of-bucket semantics for `kind=last`.
 There is no 5-minute table and no watermark table. `rolled_until` is derived as `MAX(hour_ts) + 3600` over the contiguous rolled range.
-Each closed hour is rebuilt idempotently in one transaction: delete its rollup rows, fold its minutes in timestamp order, then insert the result. The recorder reprocesses the most recent two hours so delayed buffered writes are included. Processing stops at the first failed hour, preserving a contiguous range.
+Each closed hour is rebuilt idempotently in one transaction: delete its rollup rows, fold its minutes in timestamp order, then insert the result. Hours are rolled in ascending order starting at `rolled_until`; processing stops at the first failed hour, preserving a contiguous range.
+
+A minute can still arrive after its hour was rolled: a protected batch retried through an outage longer than the rolled hour, a minute closed while its hour was being rolled, or a clock stepped back across a restart. No time window makes that safe, so minute persistence is the repair point: one transaction upserts the batch and rebuilds every touched hour below `rolled_until`. Raw minute and corrected rollup therefore commit together or not at all, a lost acknowledgement leaves both committed, and the idempotent retry reproduces the same state. Hours at or above `rolled_until` need no repair because they are not rolled yet.
 
 ## 9. Aggregation algebra
 
@@ -262,12 +264,14 @@ Purge runs hourly in bounded batches and is fail-closed:
 ```text
 cutoff = min(
   floor_hour(now - RETENTION_1M_DAYS days),
-  rolled_until - 2 hours
+  rolled_until - 2 hours,
+  floor_hour(oldest minute still waiting to be written)
 )
 delete sample_1m where ts < cutoff
 ```
 
-If no contiguous rollup exists, `rolled_until` is absent and purge deletes nothing. Purge cannot delete a minute from an unrolled hour or the rollup reprocessing window.
+If no contiguous rollup exists, `rolled_until` is absent and purge deletes nothing. Purge cannot delete a minute from an unrolled hour, from the two-hour margin below `rolled_until`, or from an hour a pending write can still enter and force a rebuild of.
+Each bounded step additionally proves per hour that the rollup accounts for exactly as many minutes as the hour still stores; any mismatch, missing rollup row or error deletes nothing. The same `cutoff` is the read path's raw floor, so no query ever depends on minutes that purge may already have removed.
 Activity/event timelines and minute-order cycle reconstruction are guaranteed only while raw `sample_1m` exists. Hourly flags preserve duration but not order.
 Compressor-start reconstruction from positive `operations_counter` steps across resets is likewise guaranteed only in the raw 1-minute retention window. A future feature requiring indefinite starts must explicitly add a persisted derived series; the core does not anticipate it.
 
@@ -317,7 +321,8 @@ Pompa Next starts a fresh namespace at `/api/v1`; this is not inherited legacy v
 | `GET /api/v1/status` | Factual MQTT, recorder, and storage status. |
 | `GET /health` | Process liveness for deployment. |
 
-Stage 1 implements the 1-minute subset of history plus status and health. Later stages extend the same history contract with `auto|1m|5m|1h|1d|total`, then add live and metrics before freezing the frontend contract.
+Stage 1 implements the 1-minute subset of history plus status and health. Stage 2 extends the same history contract with `auto|1m|5m|1h|1d|total`, derived energy and COP series; live and metrics follow before the frontend contract is frozen.
+Responses are limited to 3000 buckets and name both the requested and the resolved bucket. History series are the recorded metrics plus `cop_co`, `cop_dhw` and `cop_total`.
 
 History accepts `from`, `to`, `bucket`, and a series list. Response buckets contain start, end, expected minutes, recorded minutes, and coverage percent. Series arrays align exactly with bucket arrays and use `null` for absent values.
 
@@ -327,7 +332,7 @@ Period summary is `bucket=total`; daily reporting is `bucket=1d`. Separate daily
 
 Bad parameters return 400. Unrepresentable retained-history resolution or old partial-hour edges return 422. Database unavailability returns 503 for history while live may remain available.
 
-Status returns facts, not health verdicts: MQTT connection/LWT/alive/last-message and parse rejects; recorder last minute, buffer size, and drops; database availability, rolled boundary, oldest raw minute, and configured retention.
+Status returns facts, not health verdicts: MQTT connection/LWT/alive/last-message and parse rejects; recorder last minute, buffer size, drops, configured retention, and the last rollup and purge outcomes; database availability, rolled boundary, raw floor, and oldest/newest raw minute.
 
 ## 18. Live versus history
 
@@ -349,7 +354,7 @@ Live state does not survive restart. Historical state does. The current open min
 - Clock reversal cannot duplicate primary keys because minute writes upsert by `ts`.
 - Deployment enforces one worker. Idempotent writes reduce damage from accidental duplication but are not a multi-writer design.
 
-The waiting queue is shorter than the two-hour rollup reprocessing window, which is protected by the purge cutoff. A protected batch retried through a longer outage can be older than that window when it is finally written.
+A protected batch retried through a long outage can be older than any fixed reprocessing window when it is finally written. Correctness comes from the write transaction rebuilding the rolled hours it touches (§8) and from the purge cutoff never dropping below a pending minute's hour (§13), not from the size of a window.
 
 ## 20. Control boundary
 
@@ -388,7 +393,7 @@ Substantive stages deliver a complete vertical outcome and use a feature branch 
 5. Historical priority uses the first valid, `seen_live`, fresh source, so confirmed TOP may beat unconfirmed XTOP.
 6. The 600-second freshness value is temporary until at least 24 hours of measurement supports a policy.
 7. `rollup_1h` is exactly the time-ordered fold of its raw minutes, including `last`.
-8. Purge cannot delete an unrolled minute or the two-hour reprocessing window.
+8. A persisted minute below `rolled_until` is rebuilt into its rollup in the same transaction, and purge cannot delete an unrolled minute, the two-hour margin, a pending write's hour, or any hour whose rollup it cannot prove complete.
 9. Energy is `ΣW/60000`; period COP is `Σout/Σin` over paired minutes and is never an average of COP values.
 10. Coverage is expressed only as counts and percentages, without arbitrary completeness verdicts.
 11. All query intervals are exact `[from,to)`; an old unresolvable partial-hour edge returns 422 without rounding.

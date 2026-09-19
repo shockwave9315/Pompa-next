@@ -39,6 +39,10 @@ class FakeClient:
         self.subscriptions.append((topic, qos))
 
 
+def status_of(api):
+    return api.get("/api/v1/status").json()
+
+
 def test_mqtt_to_history(storage):
     clock = Clock(T0 + 30)  # process starts mid-minute
     settings = load_settings({"MQTT_HOST": "broker", "DB_HOST": "db", "DB_USER": "u"})
@@ -109,3 +113,35 @@ def test_mqtt_to_history(storage):
     assert status["database"]["newest_minute"] == "2027-01-15T08:04:00Z"
     xtop0 = next(s for s in status["sources"] if s["id"] == "XTOP0")
     assert xtop0["seen_live"] is False and xtop0["last_retained"] is True
+
+    # Keep publishing into the next UTC hour so that hour 08:00Z closes and is rolled up.
+    for t in range(T0 + 310, T0 + 3720, 10):
+        publish(t, after)
+    recorder.tick(at(T0 + 3720))
+    assert status_of(api)["database"]["rolled_until"] == "2027-01-15T09:00:00Z"
+    assert status_of(api)["recorder"]["rollup"]["last_rolled_hour"] == "2027-01-15T08:00:00Z"
+
+    hourly = api.get("/api/v1/history", params={
+        "from": "2027-01-15T08:00:00Z", "to": "2027-01-15T09:00:00Z", "bucket": "1h",
+        "series": "co_power_consumption,cop_co"}).json()
+    assert hourly["bucket"] == "1h"
+    # 60 minutes minus the two not recorded: before process start and across the disconnect.
+    bucket = hourly["buckets"][0]
+    assert (bucket["recorded_minutes"], bucket["expected_minutes"]) == (58, 60)
+    assert bucket["coverage_percent"] == 96.7
+    # Minute 1 came from XTOP0 (900 W); after the reconnect XTOP0 is only retained, so TOP16
+    # (1000 W) supplies the remaining 57 minutes. Production stays on live XTOP3 (3600 W).
+    consumed = 900.0 + 57 * 1000.0
+    power = hourly["series"]["co_power_consumption"]
+    assert power["minutes"] == [58] and power["kwh"] == [pytest.approx(consumed / 60000)]
+    cop = hourly["series"]["cop_co"]
+    assert cop["paired_minutes"] == [58]
+    assert cop["cop"][0] == pytest.approx(58 * 3600.0 / consumed, rel=1e-12)
+    assert cop["output_kwh"] == [pytest.approx(58 * 3600.0 / 60000)]
+
+    # The same hour read as one total bucket agrees with the rolled hourly bucket.
+    total = api.get("/api/v1/history", params={
+        "from": "2027-01-15T08:00:00Z", "to": "2027-01-15T09:00:00Z", "bucket": "total",
+        "series": "co_power_consumption,cop_co"}).json()
+    assert total["series"] == hourly["series"]
+    assert total["buckets"][0]["recorded_minutes"] == bucket["recorded_minutes"]

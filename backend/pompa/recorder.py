@@ -89,7 +89,7 @@ def roll_next_hour(storage: Storage, closed_before: int) -> int | None:
 
 
 def purge_step(storage: Storage, now: float, retention_days: int, pending_from: int | None,
-               max_hours: int = PURGE_HOURS_PER_STEP) -> tuple[int | None, int, bool]:
+               max_hours: int) -> tuple[int | None, int, bool]:
     """Delete at most ``max_hours`` whole hours of raw minutes below the safe cutoff.
 
     Returns ``(cutoff, deleted rows, more to delete)``; ``cutoff`` is ``None``
@@ -262,7 +262,8 @@ class Recorder:
         if self.retention_days == 0 or now < self._purge_next_at:
             return
         try:
-            cutoff, deleted, more = purge_step(self.storage, now, self.retention_days, pending_from)
+            cutoff, deleted, more = purge_step(self.storage, now, self.retention_days, pending_from,
+                                               PURGE_HOURS_PER_STEP)
         except (PurgeRefused, StorageUnavailable) as e:
             if self.purge_error != str(e):
                 log.warning("purge deleted nothing: %s", e)
