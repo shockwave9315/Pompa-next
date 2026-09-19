@@ -52,7 +52,7 @@ def test_status_facts(client):
     assert body["now"] == "2027-01-15T08:02:30Z"
     assert body["database"] == {"available": True, "error": None,
                                 "oldest_minute": Z.format(0), "newest_minute": Z.format(2),
-                                "rolled_until": None}
+                                "rolled_until": None, "raw_floor": None}
     assert body["mqtt"]["connected"] is False and body["mqtt"]["alive"] is False
     assert body["mqtt"]["stale_after_seconds"] == 600
     rec = body["recorder"]
@@ -68,7 +68,8 @@ def test_status_reports_database_unavailable(client, db):
     db.available = False
     body = client.get("/api/v1/status").json()
     assert body["database"] == {"available": False, "error": "fake outage",
-                                "oldest_minute": None, "newest_minute": None, "rolled_until": None}
+                                "oldest_minute": None, "newest_minute": None, "rolled_until": None,
+                                "raw_floor": None}
 
 
 def test_history_exact_1m(client):
@@ -103,7 +104,8 @@ def test_history_exact_1m(client):
 
 def test_history_defaults_to_all_recorded_series(client):
     body = get_history(client, **{"from": Z.format(0), "to": Z.format(1)}).json()
-    assert list(body["series"]) == list(RECORDED_KEYS)
+    assert list(body["series"]) == list(RECORDED_KEYS) + ["cop_co", "cop_dhw", "cop_total"]
+    assert (body["bucket"], body["requested_bucket"]) == ("1m", "auto")
 
 
 def test_history_accepts_explicit_offsets(client):
@@ -126,7 +128,9 @@ def test_history_empty_range_is_structural(client):
     {"to": Z.format(1)},
     {"from": "yesterday", "to": Z.format(1)},
     {"from": "2027-01-15T08:00:00", "to": Z.format(1)},  # naive
-    {"from": "2027-01-15", "to": "2027-01-16"},  # naive calendar dates
+    {"from": "2027-1-15", "to": "2027-01-16"},  # not a calendar date
+    {"from": "2027-02-30", "to": "2027-03-01"},  # no such day
+    {"from": "2027-01-15T08:00:00.5Z", "to": Z.format(1)},  # sub-second
     {"from": Z.format(1), "to": Z.format(1)},
     {"from": Z.format(2), "to": Z.format(1)},
     {"from": "2027-01-15T08:00:30Z", "to": Z.format(1)},  # not minute-aligned
@@ -140,19 +144,18 @@ def test_history_bad_parameters_400(client, params):
     assert r.status_code == 400, r.text
 
 
-@pytest.mark.parametrize("bucket", ["auto", "5m", "1h", "1d", "total"])
-def test_history_unsupported_bucket_422(client, bucket):
-    r = get_history(client, **{"from": Z.format(0), "to": Z.format(1), "bucket": bucket})
+def test_history_bucket_limit_is_not_truncated(client):
+    ok = get_history(client, **{"from": "2027-01-13T06:00:00Z", "to": "2027-01-15T08:00:00Z",
+                                "bucket": "1m", "series": "outside_temp"})
+    assert ok.status_code == 200 and len(ok.json()["buckets"]) == 3000
+    too_many = get_history(client, **{"from": "2027-01-13T05:59:00Z", "to": "2027-01-15T08:00:00Z",
+                                      "bucket": "1m"})
+    assert too_many.status_code == 422 and "3001" in too_many.json()["detail"]
+
+
+def test_history_outside_recordable_range_422(client):
+    r = get_history(client, **{"from": "1969-12-31T23:00:00Z", "to": Z.format(1)})
     assert r.status_code == 422
-    assert "Stage 1" in r.json()["detail"]
-
-
-def test_history_range_limit(client):
-    ok = get_history(client, **{"from": "2027-01-13T08:00:00Z", "to": "2027-01-15T08:00:00Z",
-                                "series": "outside_temp"})
-    assert ok.status_code == 200 and len(ok.json()["buckets"]) == 2880
-    too_long = get_history(client, **{"from": "2027-01-13T07:59:00Z", "to": "2027-01-15T08:00:00Z"})
-    assert too_long.status_code == 422
 
 
 def test_history_database_unavailable_503(client, db):

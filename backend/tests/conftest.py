@@ -39,6 +39,27 @@ IDLE = {
 
 
 
+def row(ts, **values):
+    """A MinuteRow; unspecified metrics are NULL."""
+    from pompa.catalog import RECORDED_KEYS
+    from pompa.minute import MinuteRow
+
+    return MinuteRow(ts, {k: values.get(k) for k in RECORDED_KEYS})
+
+
+def sample(ts, i):
+    """A varied minute: real zeros, NULLs and an unpaired power channel now and then."""
+    return row(ts, main_outlet_temp=30.0 + (i % 7) * 0.125, outside_temp=None if i % 5 == 0 else -2.5 + i % 3,
+               co_power_consumption=0.0 if i % 11 == 0 else 800.0 + i,
+               co_power_production=None if i % 13 == 0 else 3000.0 + 2 * i,
+               dhw_power_consumption=18.0, dhw_power_production=0.0 if i % 2 else 1500.0,
+               operating_mode=float(i % 4), operations_counter=7000.0 + i // 10)
+
+
+def minutes(start, count, step=60):
+    return [sample(start + step * i, i) for i in range(count)]
+
+
 class FakeSession:
     """Mirrors ``pompa.storage.Session`` over the dictionaries of a FakeStorage transaction."""
 

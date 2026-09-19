@@ -7,35 +7,17 @@ from contextlib import contextmanager
 
 import pytest
 
-from conftest import T0
+from conftest import T0, minutes, row
 from pompa import recorder as recorder_module
 from pompa.aggregation import SERIES, fold_minutes
-from pompa.catalog import RECORDED_KEYS
 from pompa.ingest import Ingest
-from pompa.minute import MinuteAccumulator, MinuteRow
+from pompa.minute import MinuteAccumulator
 from pompa.recorder import Recorder, persist, rebuild_hour, roll_next_hour
 from pompa.storage import StorageUnavailable
 
 H = 3600
 H0 = T0  # 2027-01-15T08:00:00Z, an hour boundary
 assert H0 % H == 0
-
-
-def row(ts, **values):
-    return MinuteRow(ts, {k: values.get(k) for k in RECORDED_KEYS})
-
-
-def sample(ts, i):
-    """A varied minute: real zeros, NULLs and an unpaired power channel now and then."""
-    return row(ts, main_outlet_temp=30.0 + (i % 7) * 0.125, outside_temp=None if i % 5 == 0 else -2.5 + i % 3,
-               co_power_consumption=0.0 if i % 11 == 0 else 800.0 + i,
-               co_power_production=None if i % 13 == 0 else 3000.0 + 2 * i,
-               dhw_power_consumption=18.0, dhw_power_production=0.0 if i % 2 else 1500.0,
-               operating_mode=float(i % 4), operations_counter=7000.0 + i // 10)
-
-
-def minutes(start, count, step=60):
-    return [sample(start + step * i, i) for i in range(count)]
 
 
 def rolled(storage):
