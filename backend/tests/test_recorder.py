@@ -1,6 +1,7 @@
 """Recorder: event coordination, bounded write buffer, outage and recovery."""
 
 import threading
+from contextlib import contextmanager
 
 from conftest import RUNNING, T0, FakeStorage
 from pompa.ingest import Ingest
@@ -70,13 +71,7 @@ class AckLostStorage(FakeStorage):
 
     def __init__(self):
         super().__init__()
-        self.lose_ack = True
-
-    def upsert(self, rows):
-        super().upsert(rows)
-        if self.lose_ack:
-            self.lose_ack = False
-            raise StorageUnavailable("ack lost")
+        self.fail_commit, self.ack_lost = 1, True
 
 
 def test_repeated_flush_is_safe():
@@ -203,10 +198,10 @@ def test_concurrent_events_and_ticks():
 
 
 class BlockingStorage(FakeStorage):
-    """upsert() records each submitted batch; the first call blocks until released.
+    """Records each submitted minute batch; the first write blocks until released.
 
-    ``outcome`` of that first call: "ok" writes, "fail" writes nothing and
-    raises, "ack_lost" writes and then raises. Later calls succeed at once.
+    ``outcome`` of that first write: "ok" commits, "fail" commits nothing and
+    raises, "ack_lost" commits and then raises. Later writes succeed at once.
     """
 
     def __init__(self, outcome="ok"):
@@ -215,19 +210,25 @@ class BlockingStorage(FakeStorage):
         self.batches = []
         self.started = threading.Event()
         self.release = threading.Event()
+        if outcome == "ack_lost":
+            self.fail_commit, self.ack_lost = 1, True
 
-    def upsert(self, rows):
-        self.batches.append([r.ts for r in rows])
-        if len(self.batches) > 1:
-            return super().upsert(rows)
-        self.started.set()
-        assert self.release.wait(5), "test never released the write"
-        if self.outcome == "fail":
-            self.upsert_calls += 1
-            raise StorageUnavailable("write failed")
-        super().upsert(rows)
-        if self.outcome == "ack_lost":
-            raise StorageUnavailable("ack lost")
+    @contextmanager
+    def session(self):
+        with super().session() as tx:
+            upsert = tx.upsert_minutes
+
+            def blocking_upsert(rows):
+                self.batches.append([r.ts for r in rows])
+                if len(self.batches) == 1:
+                    self.started.set()
+                    assert self.release.wait(5), "test never released the write"
+                    if self.outcome == "fail":
+                        raise StorageUnavailable("write failed")
+                upsert(rows)
+
+            tx.upsert_minutes = blocking_upsert
+            yield tx
 
 
 def minutes_ts(*offsets):

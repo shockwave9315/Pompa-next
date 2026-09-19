@@ -51,7 +51,8 @@ def test_status_facts(client):
     assert set(body) == {"now", "mqtt", "recorder", "database", "sources"}
     assert body["now"] == "2027-01-15T08:02:30Z"
     assert body["database"] == {"available": True, "error": None,
-                                "oldest_minute": Z.format(0), "newest_minute": Z.format(2)}
+                                "oldest_minute": Z.format(0), "newest_minute": Z.format(2),
+                                "rolled_until": None}
     assert body["mqtt"]["connected"] is False and body["mqtt"]["alive"] is False
     assert body["mqtt"]["stale_after_seconds"] == 600
     rec = body["recorder"]
@@ -67,7 +68,7 @@ def test_status_reports_database_unavailable(client, db):
     db.available = False
     body = client.get("/api/v1/status").json()
     assert body["database"] == {"available": False, "error": "fake outage",
-                                "oldest_minute": None, "newest_minute": None}
+                                "oldest_minute": None, "newest_minute": None, "rolled_until": None}
 
 
 def test_history_exact_1m(client):

@@ -70,11 +70,13 @@ def create_app(recorder: Recorder, storage: Storage, clock: Callable[[], float] 
         now = clock()
         facts = recorder.snapshot(now)
         try:
-            oldest, newest = storage.bounds()
+            oldest, newest, rolled_until = storage.facts()
             database = {"available": True, "error": None,
-                        "oldest_minute": iso_utc(oldest), "newest_minute": iso_utc(newest)}
+                        "oldest_minute": iso_utc(oldest), "newest_minute": iso_utc(newest),
+                        "rolled_until": iso_utc(rolled_until)}
         except StorageUnavailable as e:
-            database = {"available": False, "error": str(e), "oldest_minute": None, "newest_minute": None}
+            database = {"available": False, "error": str(e), "oldest_minute": None, "newest_minute": None,
+                        "rolled_until": None}
         return {
             "now": iso_utc(now),
             "mqtt": facts["mqtt"],
@@ -106,7 +108,8 @@ def create_app(recorder: Recorder, storage: Storage, clock: Callable[[], float] 
         if end - start > MAX_1M_RANGE_SECONDS:
             raise HTTPException(status_code=422, detail="bucket=1m range is limited to 48 hours in Stage 1")
         try:
-            rows = storage.read(start, end, keys)
+            with storage.session() as s:
+                rows = s.read_minutes(start, end, keys)
         except StorageUnavailable as e:
             raise HTTPException(status_code=503, detail=f"database unavailable: {e}") from None
         return build_1m(start, end, keys, rows, clock())
