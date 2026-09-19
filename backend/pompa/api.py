@@ -81,6 +81,11 @@ def create_app(recorder: Recorder, storage: Storage, clock: Callable[[], float] 
         """In-memory only: unaffected by database availability."""
         return recorder.live(clock())
 
+    @app.get("/api/v1/metrics")
+    def metrics() -> dict:
+        """Catalog-derived: unaffected by database and MQTT availability."""
+        return history_engine.catalog()
+
     @app.get("/api/v1/status")
     def status() -> dict:
         now = clock()

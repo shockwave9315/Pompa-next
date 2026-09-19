@@ -26,17 +26,70 @@ from .aggregation import (
     PAIRS, RECORDED, Stats, combine_maps, cop, coverage_percent, energy_kwh, fold_minutes, is_power,
     minute_columns,
 )
-from .catalog import METRICS_BY_KEY, RECORDED_KEYS
+from .catalog import METRICS, METRICS_BY_KEY, RECORDED_KEYS
 from .minute import iso_utc
 from .storage import Storage
 from .timegrid import (
-    HOUR, Unrepresentable, bucket_edges, ceil_hour, choose_auto, expected_minutes, floor_hour, raw_floor,
+    BUCKETS, HOUR, LOCAL_TZ_NAME, MAX_BUCKETS, Unrepresentable, bucket_edges, ceil_hour, choose_auto,
+    expected_minutes, floor_hour, raw_floor,
 )
 
 COP_SERIES: dict[str, str] = {f"cop_{name}": name for name in PAIRS}
 COP_LABELS = {"cop_co": "COP CO", "cop_dhw": "COP CWU", "cop_total": "COP łącznie"}
 HISTORY_SERIES: tuple[str, ...] = RECORDED_KEYS + tuple(COP_SERIES)
 HOURLY_BUCKETS = ("1h", "1d", "total")
+COP_FIELDS: tuple[str, ...] = ("cop", "paired_minutes", "input_kwh", "output_kwh")
+
+
+def history_fields(name: str) -> tuple[str, ...]:
+    """The value fields ``/api/v1/history`` returns for one series.
+
+    Both the history response and the ``/api/v1/metrics`` catalog are built
+    from this one function, so the published metadata cannot drift from the
+    data.
+    """
+    if name in COP_SERIES:
+        return COP_FIELDS
+    metric = METRICS_BY_KEY[name]
+    first = "avg" if metric.kind == "mean" else "last"
+    return (first, "min", "max", "minutes") + (("kwh",) if is_power(name) else ())
+
+
+def catalog() -> dict:
+    """The frontend-safe metric and COP catalog behind ``/api/v1/metrics``.
+
+    Derived entirely from the metric catalog, the history field lists and the
+    time grid constants: no second hand-maintained list of keys, labels, units,
+    groups, kinds or buckets exists.
+    """
+    return {
+        "timezone": LOCAL_TZ_NAME,
+        "history": {"buckets": list(BUCKETS), "max_buckets": MAX_BUCKETS},
+        "metrics": [
+            {
+                "key": m.key,
+                "label": m.label,
+                "unit": m.unit,
+                "group": m.group,
+                "kind": m.kind,
+                "history_fields": list(history_fields(m.key)),
+                "energy": is_power(m.key),
+            }
+            # Every canonical metric, in catalog order: exactly what /live reports.
+            # All of them are recorded today, so all of them have history fields.
+            for m in METRICS
+        ],
+        "cop": [
+            {
+                "key": name,
+                "label": COP_LABELS[name],
+                "unit": None,
+                "kind": "cop",
+                "history_fields": list(history_fields(name)),
+            }
+            for name in COP_SERIES
+        ],
+    }
 
 
 def _needed(series: Sequence[str]) -> tuple[str, ...]:
@@ -103,6 +156,16 @@ def query(storage: Storage, start: int, end: int, bucket: str, series: Sequence[
     return _response(start, end, bucket, resolved, edges, per_bucket, series, now)
 
 
+_SERIES_VALUES = {  # one bucket-aligned array per history field of an ordinary metric
+    "avg": lambda stats: [None if st is None else st.avg for st in stats],
+    "last": lambda stats: [None if st is None else st.last for st in stats],
+    "min": lambda stats: [None if st is None else st.min for st in stats],
+    "max": lambda stats: [None if st is None else st.max for st in stats],
+    "minutes": lambda stats: [0 if st is None else st.n for st in stats],
+    "kwh": lambda stats: [energy_kwh(st) for st in stats],
+}
+
+
 def _response(start, end, requested, resolved, edges, per_bucket, series, now) -> dict:
     buckets = []
     for (a, b), acc in zip(edges, per_bucket):
@@ -118,25 +181,17 @@ def _response(start, end, requested, resolved, edges, per_bucket, series, now) -
 
     out = {}
     for name in series:
+        fields = history_fields(name)
         if name in COP_SERIES:
             pair_in, pair_out = PAIRS[COP_SERIES[name]]
             facts = [cop(acc.get(pair_in), acc.get(pair_out)) for acc in per_bucket]
             entry = {"label": COP_LABELS[name], "unit": None, "kind": "cop"}
-            for field in ("cop", "paired_minutes", "input_kwh", "output_kwh"):
-                entry[field] = [f[field] for f in facts]
+            entry.update({f: [fact[f] for fact in facts] for f in fields})
         else:
             metric = METRICS_BY_KEY[name]
             stats = [acc.get(name) for acc in per_bucket]
             entry = {"label": metric.label, "unit": metric.unit, "kind": metric.kind}
-            if metric.kind == "mean":
-                entry["avg"] = [None if st is None else st.avg for st in stats]
-            else:
-                entry["last"] = [None if st is None else st.last for st in stats]
-            entry["min"] = [None if st is None else st.min for st in stats]
-            entry["max"] = [None if st is None else st.max for st in stats]
-            entry["minutes"] = [0 if st is None else st.n for st in stats]
-            if is_power(name):
-                entry["kwh"] = [energy_kwh(st) for st in stats]
+            entry.update({f: _SERIES_VALUES[f](stats) for f in fields})
         out[name] = entry
 
     return {
