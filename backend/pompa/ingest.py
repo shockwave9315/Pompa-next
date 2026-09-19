@@ -40,6 +40,7 @@ class SourceState:
     retained_messages: int = 0
     sentinel_messages: int = 0
     rejected_messages: int = 0
+    first_live_at: float | None = None
     max_live_gap: float | None = None  # between consecutive non-retained messages in one epoch
 
 
@@ -125,6 +126,8 @@ class Ingest:
 
         self._expire(t)
         s.live_messages += 1
+        if s.first_live_at is None:
+            s.first_live_at = t
         if s.last_live_at is not None:
             gap = t - s.last_live_at
             if s.max_live_gap is None or gap > s.max_live_gap:

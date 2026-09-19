@@ -143,6 +143,7 @@ class Recorder:
                         "last_outcome": None if s.last_outcome is None else s.last_outcome.value,
                         "last_retained": s.last_retained,
                         "last_received_at": iso_utc(s.last_received_at),
+                        "first_live_at": iso_utc(s.first_live_at),
                         "live_messages": s.live_messages,
                         "retained_messages": s.retained_messages,
                         "sentinel_messages": s.sentinel_messages,

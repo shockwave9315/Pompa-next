@@ -34,7 +34,8 @@ def main() -> None:
         print(f"configuration error: {e}", file=sys.stderr)
         sys.exit(2)
 
-    logging.basicConfig(level=settings.log_level,
+    logging.Formatter.converter = time.gmtime  # UTC, comparable with API timestamps
+    logging.basicConfig(level=settings.log_level, datefmt="%Y-%m-%dT%H:%M:%SZ",
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     process_start = time.time()
