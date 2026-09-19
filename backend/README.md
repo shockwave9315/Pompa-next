@@ -38,7 +38,8 @@ Domain rules are in [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 
 - `GET /health` — process liveness only: `{"status": "ok"}`.
 - `GET /api/v1/status` — facts: MQTT connection/epoch/LWT/alive/last live message/parse rejects,
-  recorder process start/last closed and written minute/buffer/drops, database availability and
+  recorder process start/last closed and written minute, buffered and in-flight rows, drops
+  (a drop is always a row that was never persisted), database availability and
   oldest/newest stored minute, and per-source measurement counters. No verdicts.
 - `GET /api/v1/history?from=…&to=…&bucket=1m[&series=a,b]` — exact `[from, to)`; both instants are
   ISO 8601 with an explicit offset and minute-aligned; at most 48 hours. Each bucket has `start`,
@@ -100,11 +101,17 @@ What each question is answered by:
 
 | Question | Evidence |
 |---|---|
-| Publication gap per TOP/XTOP topic | `sources[].max_live_gap_seconds`, mean gap column in the report |
+| Publication gap per TOP/XTOP topic | `sources[].gap_count`, `gap_sum_seconds`, `mean_live_gap_seconds`, `max_live_gap_seconds` |
 | Maximum observed non-retained gap | largest `max_live_gap_seconds` |
 | Retained behavior | `sources[].retained_messages`, `last_retained`; `mqtt.lwt.retained` |
 | Reconnect behavior | `mqtt.connects`/`disconnects`/`epoch` and `MQTT connected`/`disconnected` log lines |
 | LWT behavior | `LWT … retained=…` log lines, `mqtt.lwt` |
 | XTOP topic path | `sources[]` XTOP rows receiving messages, or `uncatalogued_topics` outside `main/` |
+
+A gap sample is the time between two consecutive non-retained messages of the same topic inside
+one observation interval. An interval ends at MQTT disconnect/reconnect and at LWT `Offline`; the
+first message of a new interval is only a baseline. Retained deliveries never contribute. Message
+counts, `first_live_at` and `latest_live_at` cover the process lifetime; `epoch_last_live_at` is the
+current connection epoch's freshness evidence used by history.
 
 The measurement only reads ingest facts; it does not change `sample_1m` semantics.

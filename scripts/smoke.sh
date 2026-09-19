@@ -82,20 +82,16 @@ for g in gaps:
     print(f"                  missing [{g[0]}, {g[1]})")
 
 print()
-print("per-topic measurement: max_gap_s = largest non-retained gap within one connection epoch;")
-print("mean_gap_s = (last_live_at - first_live_at) / (live - 1) over the whole process")
-print(f"{'id':7} {'topic':45} {'seen':5} {'live':>7} {'ret':>4} {'sent':>5} {'rej':>4} {'max_gap_s':>10} "
-      f"{'mean_gap_s':>10}  last_live_at")
+print("per-topic measurement (process lifetime): gaps are sampled only between consecutive non-retained")
+print("messages of one topic inside one observation interval (ended by MQTT reconnect or LWT Offline)")
+print(f"{'id':7} {'topic':45} {'seen':5} {'live':>7} {'ret':>4} {'sent':>5} {'rej':>4} {'gaps':>6} "
+      f"{'mean_gap_s':>10} {'max_gap_s':>10}  latest_live_at")
+fmt = lambda v: "" if v is None else f"{v:.1f}"
 for s in status["sources"]:
-    mean = ""
-    if s["live_messages"] > 1 and s["first_live_at"] and s["last_live_at"]:
-        ts = lambda v: datetime.fromisoformat(v.replace("Z", "+00:00"))
-        span = (ts(s["last_live_at"]) - ts(s["first_live_at"])).total_seconds()
-        mean = f"{span / (s['live_messages'] - 1):.1f}"
-    gap = "" if s["max_live_gap_seconds"] is None else f"{s['max_live_gap_seconds']:.1f}"
     print(f"{s['id']:7} {s['topic']:45} {str(s['seen_live']):5} {s['live_messages']:>7} "
           f"{s['retained_messages']:>4} {s['sentinel_messages']:>5} {s['rejected_messages']:>4} "
-          f"{gap:>10} {mean:>10}  {s['last_live_at']}")
+          f"{s['gap_count']:>6} {fmt(s['mean_live_gap_seconds']):>10} {fmt(s['max_live_gap_seconds']):>10}  "
+          f"{s['latest_live_at']}")
 print(f"uncatalogued topics seen: {len(m['uncatalogued_topics'])}")
 extra = [t for t in m["uncatalogued_topics"] if not t.startswith("main/")]
 if extra:

@@ -4,6 +4,15 @@ Event entry points run on the MQTT network thread; ``tick`` runs on the single
 recorder thread; ``snapshot`` runs on API threads. One lock guards all
 in-memory state. Database I/O happens outside the lock so a slow or absent
 database never delays MQTT receive handling.
+
+Write buffer: closed rows queue in FIFO order. A flush claims the rows at the
+front (``_in_flight``); overflow never removes a claimed row, because its fate
+is unknown until the write returns. At most ``buffer_rows`` unclaimed rows are
+kept; beyond that the oldest unclaimed row is dropped at once, since it would
+be dropped whatever the write's outcome. When the write returns, claimed rows
+leave the buffer as written (success) or become ordinary queued rows again
+(failure) and the ``buffer_rows`` bound applies to the whole queue. Every
+``dropped_rows`` increment is therefore a row that was never persisted.
 """
 
 from __future__ import annotations
@@ -27,6 +36,7 @@ class Recorder:
         self.buffer_rows = buffer_rows
         self._lock = threading.Lock()
         self._buffer: deque[MinuteRow] = deque()
+        self._in_flight = 0  # rows at the front of _buffer claimed by the running flush
         self.dropped_rows = 0
         self.rows_closed = 0
         self.rows_written = 0
@@ -61,33 +71,39 @@ class Recorder:
         """Close due minutes, bootstrap the schema if needed and flush the buffer."""
         with self._lock:
             self._advance(now)
+            if self._in_flight:
+                return  # one flush at a time (only a shutdown tick can overlap)
             pending = list(self._buffer)
-        if self.schema_ready and not pending:
-            return
+            if self.schema_ready and not pending:
+                return
+            self._in_flight = len(pending)
+        written = False
         try:
             if not self.schema_ready:
                 self.storage.ensure_schema()
                 self.schema_ready = True
                 log.info("sample_1m schema ready")
             self.storage.upsert(pending)
+            written = True
         except StorageUnavailable as e:
             if self.db_last_error is None:
                 log.warning("database unavailable, %d row(s) buffered: %s", len(pending), e)
             self.db_last_error, self.db_last_error_at = str(e), now
-            return
-        if self.db_last_error is not None:
-            log.info("database available again")
-        self.db_last_error = None
-        self.db_last_ok_at = now
-        if pending:
-            written = {r.ts for r in pending}
+        finally:
             with self._lock:
-                # Rows closed during the write stay queued. (A pending row dropped
-                # by overflow during the write was still written; the drop count
-                # can only overstate a loss, never hide one.)
-                self._buffer = deque(r for r in self._buffer if r.ts not in written)
-                self.rows_written += len(pending)
-                self.last_written_minute = max(written | {self.last_written_minute or 0})
+                if written:
+                    for _ in range(self._in_flight):
+                        self._buffer.popleft()
+                    self.rows_written += len(pending)
+                    if pending:
+                        self.last_written_minute = pending[-1].ts
+                self._in_flight = 0
+                self._enforce_capacity()
+        if written:
+            if self.db_last_error is not None:
+                log.info("database available again")
+            self.db_last_error = None
+            self.db_last_ok_at = now
 
     # ------------------------------------------------------------- facts
 
@@ -124,6 +140,7 @@ class Recorder:
                     "rows_closed": self.rows_closed,
                     "rows_written": self.rows_written,
                     "buffered_rows": len(self._buffer),
+                    "in_flight_rows": self._in_flight,
                     "buffer_capacity": self.buffer_rows,
                     "dropped_rows": self.dropped_rows,
                     "schema_ready": self.schema_ready,
@@ -138,17 +155,23 @@ class Recorder:
                         "metric": s.metric.key,
                         "seen_live": s.seen_live,
                         "historical_value": s.value,
-                        "last_live_at": iso_utc(s.last_live_at),
+                        # Latest non-retained receipt in the current connection epoch (history freshness).
+                        "epoch_last_live_at": iso_utc(s.last_live_at),
                         "last_value": s.last_value,
                         "last_outcome": None if s.last_outcome is None else s.last_outcome.value,
                         "last_retained": s.last_retained,
                         "last_received_at": iso_utc(s.last_received_at),
+                        # Process-lifetime measurement facts.
                         "first_live_at": iso_utc(s.first_live_at),
+                        "latest_live_at": iso_utc(s.latest_live_at),
                         "live_messages": s.live_messages,
                         "retained_messages": s.retained_messages,
                         "sentinel_messages": s.sentinel_messages,
                         "rejected_messages": s.rejected_messages,
+                        "gap_count": s.gap_count,
+                        "gap_sum_seconds": round(s.gap_sum, 3),
                         "max_live_gap_seconds": None if s.max_live_gap is None else round(s.max_live_gap, 3),
+                        "mean_live_gap_seconds": round(s.gap_sum / s.gap_count, 3) if s.gap_count else None,
                     }
                     for s in ing.sources.values()
                 ],
@@ -166,9 +189,14 @@ class Recorder:
         for row in self.accumulator.advance(t):
             self.rows_closed += 1
             self.last_row_minute = row.ts
-            if len(self._buffer) >= self.buffer_rows:
-                lost = self._buffer.popleft()
-                self.dropped_rows += 1
-                log.warning("write buffer full, dropped minute %s", iso_utc(lost.ts))
             self._buffer.append(row)
+        self._enforce_capacity()
         return t
+
+    def _enforce_capacity(self) -> None:
+        """Drop the oldest unclaimed rows beyond ``buffer_rows`` (see module docstring)."""
+        while len(self._buffer) - self._in_flight > self.buffer_rows:
+            lost = self._buffer[self._in_flight]
+            del self._buffer[self._in_flight]
+            self.dropped_rows += 1
+            log.warning("write buffer full, dropped minute %s", iso_utc(lost.ts))

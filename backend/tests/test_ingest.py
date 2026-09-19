@@ -181,14 +181,65 @@ def test_uncatalogued_topics_are_ignored_but_listed():
     assert sim.ingest.parse_rejects == 0
 
 
-def test_max_live_gap_per_source_within_epoch():
+def gaps(sim, topic=OUTLET):
+    s = sim.ingest.sources[topic]
+    return s.gap_count, s.gap_sum, s.max_live_gap
+
+
+def test_gaps_between_repeated_live_messages():
     sim = Sim().connect(T0).msg(T0, OUTLET, "35").msg(T0 + 30, OUTLET, "35").msg(T0 + 100, OUTLET, "36")
-    sim.msg(T0 + 101, OUTLET, "36", retained=True)
-    assert sim.ingest.sources[OUTLET].max_live_gap == 70
+    assert gaps(sim) == (2, 100, 70)
     assert sim.ingest.sources[OUTLET].live_messages == 3
-    assert sim.ingest.sources[OUTLET].retained_messages == 1
-    sim.disconnect(T0 + 110).connect(T0 + 500).msg(T0 + 510, OUTLET, "36")
-    assert sim.ingest.sources[OUTLET].max_live_gap == 70  # gaps never span epochs
+
+
+def test_first_message_of_interval_is_baseline_only():
+    sim = Sim().connect(T0).msg(T0 + 5, OUTLET, "35")
+    assert gaps(sim) == (0, 0.0, None)
+
+
+def test_retained_messages_never_contribute_gaps():
+    sim = Sim().connect(T0).msg(T0 + 1, OUTLET, "35", retained=True).msg(T0 + 10, OUTLET, "35")
+    assert gaps(sim) == (0, 0.0, None)  # retained is not a baseline
+    sim.msg(T0 + 15, OUTLET, "35", retained=True).msg(T0 + 40, OUTLET, "35")
+    assert gaps(sim) == (1, 30, 30)  # retained in between neither splits nor adds
+    assert sim.ingest.sources[OUTLET].retained_messages == 2
+
+
+def test_reconnect_starts_new_gap_interval():
+    sim = Sim().connect(T0).msg(T0, OUTLET, "35").msg(T0 + 10, OUTLET, "35")
+    sim.disconnect(T0 + 20).connect(T0 + 500).msg(T0 + 505, OUTLET, "35")
+    assert gaps(sim) == (1, 10, 10)  # no 495 s sample spanning the epochs
+
+
+def test_lwt_offline_ends_gap_interval():
+    sim = Sim().connect(T0).msg(T0, OUTLET, "35").msg(T0 + 10, OUTLET, "35")
+    sim.lwt(T0 + 12, "Offline").lwt(T0 + 400, "Online").msg(T0 + 410, OUTLET, "35")
+    assert gaps(sim) == (1, 10, 10)  # no 400 s sample spanning the offline interval
+    sim.msg(T0 + 420, OUTLET, "35")
+    assert gaps(sim) == (2, 20, 10)
+
+
+def test_gap_statistics_accumulate_across_epochs():
+    sim = Sim().connect(T0)
+    for t in (0, 10, 30):  # gaps 10, 20
+        sim.msg(T0 + t, OUTLET, "35")
+    sim.disconnect(T0 + 40).connect(T0 + 100)
+    for t in (100, 140, 145):  # gaps 40, 5
+        sim.msg(T0 + t, OUTLET, "35")
+    sim.lwt(T0 + 150, "Offline").lwt(T0 + 160, "Online")
+    for t in (170, 185):  # gap 15
+        sim.msg(T0 + t, OUTLET, "35")
+    assert gaps(sim) == (5, 90, 40)
+    s = sim.ingest.sources[OUTLET]
+    assert (s.live_messages, s.first_live_at, s.latest_live_at) == (8, T0, T0 + 185)
+
+
+def test_gap_measurement_does_not_touch_history_state():
+    sim = Sim().connect(T0).msg(T0, OUTLET, "35").lwt(T0 + 5, "Offline").lwt(T0 + 6, "Online")
+    sim.msg(T0 + 7, OUTLET, "36")
+    s = sim.ingest.sources[OUTLET]
+    assert (s.seen_live, s.value, s.last_live_at) == (True, 36.0, T0 + 7)
+    assert sim.hist("main_outlet_temp", T0 + 8) == (36.0, "TOP6")
 
 
 # --------------------------------------------------------------- minute rows

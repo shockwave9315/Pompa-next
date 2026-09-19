@@ -35,13 +35,21 @@ class SourceState:
     last_outcome: Outcome | None = None
     last_received_at: float | None = None
     last_retained: bool | None = None
-    # Cumulative measurement facts for the whole process lifetime.
+    # Measurement only (never read by history). Counts and first/latest are
+    # process-lifetime. A publication gap is sampled only between consecutive
+    # non-retained messages inside one observation interval, which ends at MQTT
+    # disconnect/reconnect and at LWT Offline; the first message of an interval
+    # is only its baseline.
     live_messages: int = 0
     retained_messages: int = 0
     sentinel_messages: int = 0
     rejected_messages: int = 0
     first_live_at: float | None = None
-    max_live_gap: float | None = None  # between consecutive non-retained messages in one epoch
+    latest_live_at: float | None = None
+    gap_baseline_at: float | None = None
+    gap_count: int = 0
+    gap_sum: float = 0.0
+    max_live_gap: float | None = None
 
 
 class Ingest:
@@ -82,6 +90,7 @@ class Ingest:
             s.seen_live = False
             s.value = None
             s.last_live_at = None
+            s.gap_baseline_at = None
         self.last_live_at = None
         self.alive_since = None
 
@@ -128,10 +137,14 @@ class Ingest:
         s.live_messages += 1
         if s.first_live_at is None:
             s.first_live_at = t
-        if s.last_live_at is not None:
-            gap = t - s.last_live_at
+        s.latest_live_at = t
+        if s.gap_baseline_at is not None:
+            gap = t - s.gap_baseline_at
+            s.gap_count += 1
+            s.gap_sum += gap
             if s.max_live_gap is None or gap > s.max_live_gap:
                 s.max_live_gap = gap
+        s.gap_baseline_at = t
         s.seen_live = True
         s.value = value
         s.last_live_at = t
@@ -185,6 +198,7 @@ class Ingest:
         """Disconnect/Offline: values and source life need new non-retained evidence."""
         for s in self.sources.values():
             s.value = None
+            s.gap_baseline_at = None
         self.last_live_at = None
         self.alive_since = None
 

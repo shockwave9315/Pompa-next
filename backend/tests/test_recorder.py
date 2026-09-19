@@ -193,3 +193,91 @@ def test_concurrent_events_and_ticks():
     assert all(ts % 60 == 0 for ts in db.rows)
     assert rec.dropped_rows == 0 and rec.rows_written == len(db.rows) > 0
     assert len(rec._buffer) == 0
+
+
+class BlockingStorage(FakeStorage):
+    """upsert() records its claimed rows, then blocks until released."""
+
+    def __init__(self, fail=False):
+        super().__init__()
+        self.fail = fail
+        self.claimed = None
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def upsert(self, rows):
+        self.claimed = [r.ts for r in rows]
+        self.started.set()
+        assert self.release.wait(5), "test never released the write"
+        if self.fail:
+            self.upsert_calls += 1
+            raise StorageUnavailable("write failed")
+        super().upsert(rows)
+
+
+def full_buffer_then_blocked_flush(capacity, storage):
+    """Buffer full after an outage; a recovery flush is blocked inside upsert()."""
+    rec, _ = make(buffer_rows=capacity, storage=storage)
+    storage.available = False
+    rec.on_connect(T0)
+    feed(rec, T0, T0 + 60 * capacity)
+    rec.tick(T0 + 60 * capacity)
+    assert [r.ts for r in rec._buffer] == [T0 + 60 * m for m in range(capacity)]
+    assert rec.dropped_rows == 0
+    storage.available = True
+    flush = threading.Thread(target=rec.tick, args=(T0 + 60 * capacity + 1,))
+    flush.start()
+    assert storage.started.wait(5)
+    return rec, flush
+
+
+def minutes_ts(*offsets):
+    return [T0 + 60 * m for m in offsets]
+
+
+def test_row_persisted_by_in_flight_flush_is_not_counted_as_dropped():
+    db = BlockingStorage()
+    rec, flush = full_buffer_then_blocked_flush(3, db)
+    assert db.claimed == minutes_ts(0, 1, 2)
+    # MQTT keeps closing minutes while the write is blocked (no lock wait).
+    feed(rec, T0 + 181, T0 + 300)
+    rec.on_message("main/Main_Outlet_Temp", "35", False, T0 + 300)
+    snap = rec.snapshot(T0 + 300)["recorder"]
+    assert (snap["buffered_rows"], snap["in_flight_rows"], snap["dropped_rows"]) == (5, 3, 0)
+    db.release.set()
+    flush.join(5)
+    assert sorted(db.rows) == minutes_ts(0, 1, 2)
+    assert [r.ts for r in rec._buffer] == minutes_ts(3, 4)  # FIFO preserved
+    assert (rec.dropped_rows, rec.rows_written, rec._in_flight) == (0, 3, 0)
+    rec.tick(T0 + 301)
+    assert sorted(db.rows) == minutes_ts(0, 1, 2, 3, 4)
+    assert rec.dropped_rows == 0 and len(rec._buffer) == 0
+
+
+def test_failed_in_flight_flush_then_drops_oldest():
+    db = BlockingStorage(fail=True)
+    rec, flush = full_buffer_then_blocked_flush(3, db)
+    feed(rec, T0 + 181, T0 + 240)
+    rec.on_message("main/Main_Outlet_Temp", "35", False, T0 + 240)  # closes minute 3
+    assert rec.dropped_rows == 0  # outcome of minute 0 still unknown
+    db.release.set()
+    flush.join(5)
+    assert db.rows == {}
+    assert [r.ts for r in rec._buffer] == minutes_ts(1, 2, 3)  # minute 0 was the real loss
+    assert rec.dropped_rows == 1 and rec._in_flight == 0
+
+
+def test_row_doomed_whatever_the_outcome_is_dropped_immediately():
+    db = BlockingStorage()
+    rec, flush = full_buffer_then_blocked_flush(2, db)
+    assert db.claimed == minutes_ts(0, 1)
+    feed(rec, T0 + 121, T0 + 300)
+    rec.on_message("main/Main_Outlet_Temp", "35", False, T0 + 300)  # closes minutes 2, 3, 4
+    # Three unclaimed rows exceed capacity 2: minute 2 is lost on either outcome.
+    assert [r.ts for r in rec._buffer] == minutes_ts(0, 1, 3, 4)
+    assert rec.dropped_rows == 1
+    db.release.set()
+    flush.join(5)
+    assert sorted(db.rows) == minutes_ts(0, 1)
+    assert [r.ts for r in rec._buffer] == minutes_ts(3, 4)
+    assert rec.dropped_rows == 1
