@@ -85,6 +85,8 @@ class Ingest:
         self.alive_since = None
 
     def disconnect(self, t: float) -> None:
+        if not self.connected:
+            return  # e.g. a failed connect attempt: no epoch ended
         self.connected = False
         self.disconnects += 1
         self.disconnected_at = t
