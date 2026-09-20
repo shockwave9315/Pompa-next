@@ -420,3 +420,26 @@ Substantive stages deliver a complete vertical outcome and use a feature branch 
 14. Backend owns domain truth; frontend only renders backend facts.
 15. Recorder/history remain independent of the later isolated control path.
 16. Legacy history is not migrated or backfilled, and legacy compatibility is not a requirement.
+
+## 24. Operating trust boundary
+
+Pompa Next runs in a private Proxmox LXC. The host, the container's kernel environment and its root
+administrator are trusted. The system does not attempt to remain semantically correct under
+deliberate administrator tampering with `CLOCK_REALTIME`, process memory, application files or
+MariaDB contents — there is no defence against a `date -s` run specifically to break the recorder,
+and none is required.
+
+Ordinary operational failures remain fully supported and are not excused by the paragraph above:
+process/container restart, a host restart, MQTT/database/network outages, and a real backward
+`CLOCK_REALTIME` step from a normal NTP correction while the process keeps running (e.g. after a
+container freeze/resume or a slow boot before the clock is disciplined) all remain in scope and must
+degrade safely. `Recorder._advance` already treats a backward step as ordinary: it clamps event
+sequencing to the accumulator's cursor so a step can only ever produce a gap, never a duplicate
+primary key; a source's own freshness timestamp is threaded through unclamped instead, so the same
+step cannot make that source look confirmed alive for longer than `STALE_AFTER_SECONDS` of real
+elapsed time (§4), in `/api/v1/live`/`/api/v1/status` or inside `sample_1m` itself.
+
+Time the process did not validly observe is a gap. It is never backfilled, interpolated or
+reconstructed, regardless of cause — a container pause, a restart, or a restored older snapshot that
+removes later persisted history all leave an ordinary, visible gap, exactly as invariant 3 already
+requires.

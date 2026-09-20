@@ -160,7 +160,9 @@ while the process is alive, including when MariaDB is unavailable — that failu
 `database`.
 
 `now`, the MQTT facts, the recorder facts, every source entry and the `alive` verdict are one locked
-observation, so no timestamp among them is later than `now`. The `database` object is fetched
+observation, so no timestamp among them is later than `now` — including across a real backward
+`CLOCK_REALTIME` step, which `now` is floored against (see `ARCHITECTURE.md` §24). The `database`
+object is fetched
 afterwards and is not part of that observation, though `purge_cutoff` inside it is still computed
 from the same `now`. This atomicity is scoped to that one locked read; it is not a claim that every
 field in the response is one byte-atomic multi-field transaction — some recorder maintenance facts

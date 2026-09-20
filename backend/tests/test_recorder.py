@@ -103,13 +103,19 @@ def test_overflow_drops_oldest_and_counts():
     assert rec.snapshot(lambda: T0 + 301)[1]["recorder"]["dropped_rows"] == 2
 
 
-def test_event_before_cursor_is_clamped():
+def test_event_before_cursor_clamps_sequencing_but_not_freshness():
+    """The accumulator's cursor clamps for safe sequencing; a source's freshness timestamp must not.
+
+    Clamping ``ingest.last_live_at`` to the cursor as well would inflate how long this evidence
+    counts as fresh by exactly the gap between its raw receipt and the cursor — the P2
+    clock-discontinuity bug. The cursor still floors accumulation; freshness uses the raw receipt.
+    """
     rec, _ = make()
     rec.on_connect(T0)
     rec.tick(T0 + 100)
     rec.on_message("main/Main_Outlet_Temp", "35", False, T0 + 50)
-    assert rec.ingest.last_live_at == T0 + 100
-    assert rec.accumulator.cursor == T0 + 100
+    assert rec.accumulator.cursor == T0 + 100  # sequencing floor: never regresses
+    assert rec.ingest.last_live_at == T0 + 50  # freshness: the true, raw receipt time
 
 
 def test_disconnect_at_boundary_closes_minute_first():

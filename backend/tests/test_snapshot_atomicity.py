@@ -53,7 +53,14 @@ def previous_live(recorder, clock, mutate):
     return recorder.live(lambda: now)
 
 
-def test_the_previous_ordering_could_report_a_receipt_after_now():
+def test_the_previous_ordering_is_now_caught_by_the_cursor_floor():
+    """The old clock-outside-lock ordering is the same shape of problem as a backward clock step:
+    in both, the recorder has already processed a later instant than the ``now`` handed to
+    ``live()``. The cursor floor added by the P2 clock-discontinuity fix (``Recorder.live``/
+    ``Recorder.snapshot`` floor ``now`` at ``accumulator.cursor``) defends both, independently of
+    lock ordering, so this can no longer reproduce ``received_at > now`` even with the old
+    sampling order.
+    """
     api = Api()
     api.connect(T0)
     clock = Clock(T0 + 100)
@@ -64,8 +71,8 @@ def test_the_previous_ordering_could_report_a_receipt_after_now():
 
     stale = previous_live(api.recorder, clock, mqtt_callback)
     entry = stale["metrics"][CO_IN]
-    assert entry["mode"] == "live"  # the later message is in the response ...
-    assert at(entry["received_at"]) > at(stale["now"])  # ... under an earlier now
+    assert entry["mode"] == "live"
+    assert at(entry["received_at"]) <= at(stale["now"])  # the cursor floor recovers consistency
 
 
 def test_the_fixed_ordering_cannot():

@@ -160,7 +160,10 @@ class Ingest:
         if s.first_live_at is None:
             s.first_live_at = t
         s.latest_live_at = t
-        if s.gap_baseline_at is not None:
+        if s.gap_baseline_at is not None and t > s.gap_baseline_at:
+            # A non-positive delta means a backward wall-clock step landed between two live
+            # messages of this source; that is not a publication gap sample, so it is skipped
+            # rather than polluting the Stage 1 evidence trail with a negative or zero "gap".
             gap = t - s.gap_baseline_at
             s.gap_count += 1
             s.gap_sum += gap

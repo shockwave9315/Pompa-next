@@ -213,19 +213,23 @@ class Recorder:
 
     def on_connect(self, t: float) -> None:
         with self._lock:
-            self.ingest.connect(self._advance(t))
+            self._advance(t)
+            self.ingest.connect(t)
 
     def on_disconnect(self, t: float) -> None:
         with self._lock:
-            self.ingest.disconnect(self._advance(t))
+            self._advance(t)
+            self.ingest.disconnect(t)
 
     def on_lwt(self, payload: str, retained: bool, t: float) -> None:
         with self._lock:
-            self.ingest.lwt_message(payload, retained, self._advance(t))
+            self._advance(t)
+            self.ingest.lwt_message(payload, retained, t)
 
     def on_message(self, topic: str, payload: str, retained: bool, t: float) -> None:
         with self._lock:
-            self.ingest.message(topic, payload, retained, self._advance(t))
+            self._advance(t)
+            self.ingest.message(topic, payload, retained, t)
 
     # ------------------------------------------------------------- recorder tick
 
@@ -386,11 +390,20 @@ class Recorder:
         in it at all. Sampling the clock first would let a later receipt appear
         under an earlier ``now`` without any wall-clock reversal.
 
+        ``now`` is additionally floored at the accumulator's cursor — the
+        highest instant this recorder has ever processed. A wall-clock step
+        backwards cannot make a freshly received, correctly-timestamped
+        ``received_at`` look later than ``now``: display never regresses below
+        what the recorder has already logically observed. This floor is
+        display-only; it is never fed back into a source's own freshness
+        timestamp (see ``_advance``), so it cannot inflate how long a source
+        counts as alive.
+
         No database I/O and no state change: minutes are closed by ``tick``,
         never by an API thread.
         """
         with self._lock:
-            now = clock()
+            now = max(clock(), self.accumulator.cursor)
             ing = self.ingest
             return {
                 "now": iso_utc(now),
@@ -410,13 +423,15 @@ class Recorder:
     def snapshot(self, clock: Callable[[], float]) -> tuple[float, dict]:
         """Factual in-memory state for ``/api/v1/status``, with its observation instant.
 
-        Like ``live``, ``clock`` is read inside the lock: ``now``, the freshness
-        of every source and the ``alive`` verdict are one observation. The
-        instant is returned because the caller needs it for facts computed
-        outside this lock, such as the prospective purge cutoff.
+        Like ``live``, ``clock`` is read inside the lock and floored at the
+        accumulator's cursor: ``now``, the freshness of every source and the
+        ``alive`` verdict are one observation that never displays as earlier
+        than what this recorder has already processed. The instant is
+        returned because the caller needs it for facts computed outside this
+        lock, such as the prospective purge cutoff.
         """
         with self._lock:
-            now = clock()
+            now = max(clock(), self.accumulator.cursor)
             ing, acc = self.ingest, self.accumulator
             return now, {
                 "mqtt": {
@@ -511,8 +526,15 @@ class Recorder:
     def _advance(self, t: float) -> float:
         """Close minutes up to ``t``; returns ``t`` clamped to never go backwards.
 
-        After a wall-clock step backwards, events are applied at the cursor and
-        no minute closes until real time passes it again: a gap, never a duplicate.
+        This clamp exists only for the accumulator's own monotonic sequencing
+        (segment integration, minute closing, upsert-by-``ts`` safety): after a
+        wall-clock step backwards, no minute closes until real time passes the
+        cursor again, so the result is a gap, never a duplicate. Callers must
+        still feed ``Ingest`` the *raw*, unclamped ``t`` for freshness purposes
+        (``on_connect``/``on_disconnect``/``on_lwt``/``on_message`` do this) —
+        clamping a source's confirmed-evidence timestamp to a cursor that is
+        temporarily ahead of the wall clock would inflate how long that
+        evidence counts as fresh by the size of the clock step.
         """
         t = max(t, self.accumulator.cursor)
         for row in self.accumulator.advance(t):
