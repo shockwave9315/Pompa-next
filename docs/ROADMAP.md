@@ -17,7 +17,7 @@ MQTT → catalog/ingest → canonical minute → sample_1m
 
 Run it beside legacy with a separate MQTT client ID, database, and port. Complete a runtime smoke test.
 
-For at least 24 hours, measure publication gaps per relevant topic, LWT behavior, and retained behavior. Use the evidence to choose one measured global freshness timeout or propose per-metric/source freshness only if rhythms differ materially. Until then, 600 seconds is the bootstrap default.
+Real-runtime freshness measurement and decision are complete. The originally planned ≥24 h target was stopped short; the owner accepted the 22.768 h uninterrupted run on CT109 because the observed publication-gap envelope was extremely stable across all relevant topics (max 305.1 s, no gap over 600 s). The decided global freshness policy is `STALE_AFTER_SECONDS=600`; per-metric/source freshness was not justified by the evidence.
 
 ## Stage 2 — Historical Engine
 

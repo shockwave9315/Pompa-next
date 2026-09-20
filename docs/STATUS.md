@@ -4,6 +4,11 @@
 
 **Stage 1 — Core Backend**
 
+Implementation complete. Runtime validation complete: a 22.768 h uninterrupted real-runtime
+measurement on CT109 (owner-accepted short of the originally planned ≥24 h target). Freshness
+decision complete: `STALE_AFTER_SECONDS=600` is the accepted global policy (max observed gap
+305.1 s, no gap over 600 s). Ready for merge.
+
 ## Goal
 
 Build the first complete vertical slice from live MQTT input to a queryable canonical minute history.
@@ -19,7 +24,8 @@ Build the first complete vertical slice from live MQTT input to a queryable cano
 - `GET /api/v1/status` and `GET /health`.
 - Focused unit, storage, slice, and runtime-smoke tests.
 - Runtime smoke beside legacy using separate identity, database, and port.
-- At least 24 hours of topic-gap, LWT, and retained-message measurements.
+- Topic-gap, LWT, and retained-message measurements: a 22.768 h uninterrupted run, accepted
+  short of the originally planned ≥24 h target.
 
 `/api/v1` is the fresh Pompa Next API namespace. It does not retain legacy `/api/v2` numbering or compatibility.
 

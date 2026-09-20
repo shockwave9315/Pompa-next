@@ -1,0 +1,54 @@
+# Pompa Next — runs beside legacy with its own project name, database and port.
+# Configure through .env (see .env.example). The MQTT broker is external.
+name: pompa-next
+
+services:
+  db:
+    image: mariadb:11.4
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: ${DB_NAME:-pompa_next}
+      MARIADB_USER: ${DB_USER:-pompa_next}
+      MARIADB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?set DB_ROOT_PASSWORD in .env}
+      TZ: ${TZ:-Europe/Warsaw}
+    volumes:
+      - db-data:/var/lib/mysql
+
+  backend:
+    build: ./backend
+    image: pompa-next-backend
+    restart: unless-stopped
+    depends_on:
+      - db
+    environment:
+      MQTT_HOST: ${MQTT_HOST:?set MQTT_HOST in .env}
+      MQTT_PORT: ${MQTT_PORT:-1883}
+      MQTT_USERNAME: ${MQTT_USERNAME:-}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:-}
+      MQTT_CLIENT_ID: ${MQTT_CLIENT_ID:-pompa-next}
+      MQTT_TOPIC_PREFIX: ${MQTT_TOPIC_PREFIX:-panasonic_heat_pump}
+      DB_HOST: ${DB_HOST:-db}
+      DB_PORT: ${DB_PORT:-3306}
+      DB_USER: ${DB_USER:-pompa_next}
+      DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      DB_NAME: ${DB_NAME:-pompa_next}
+      API_PORT: ${API_PORT:-8001}
+      STALE_AFTER_SECONDS: ${STALE_AFTER_SECONDS:-600}
+      WRITE_BUFFER_ROWS: ${WRITE_BUFFER_ROWS:-60}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      TZ: ${TZ:-Europe/Warsaw}
+    ports:
+      - "${API_PORT:-8001}:${API_PORT:-8001}"
+    # Lets MQTT_HOST=host.docker.internal reach a broker on the Docker host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "10"
+
+volumes:
+  db-data:
