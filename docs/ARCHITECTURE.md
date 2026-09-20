@@ -88,7 +88,7 @@ alive(t) = mqtt_connected
 ```
 
 `last_live_message_at` advances only for non-retained messages. `alive_since` marks the beginning of the current uninterrupted alive interval and resets on disconnect, LWT `Offline`, or detected staleness.
-`STALE_AFTER_SECONDS=600` is a bootstrap default, not accepted production semantics. Stage 1 measures publication gaps per relevant TOP/XTOP topic, LWT behavior, and retained behavior for at least 24 hours. A single measured global timeout remains only if topic rhythms are similar; per-metric or per-source freshness is considered only if evidence requires it.
+`STALE_AFTER_SECONDS=600` is the accepted Stage 1 global freshness policy, decided from a real-runtime measurement on CT109 (22.768 h uninterrupted, owner-accepted short of the originally planned ≥24 h). No non-retained publication gap exceeded 305.1 s across all relevant TOP/XTOP topics despite materially different mean publication rhythms, so a single global timeout is used; per-metric or per-source freshness was not justified by the evidence. The policy is revisited only if future real-runtime evidence shows normal gaps approaching or exceeding 600 s.
 A value remains valid from receipt until its replacement, its source goes offline, or freshness expires. Holding a report-by-exception value inside that bounded interval is protocol semantics, not interpolation.
 
 ## 5. Retained and `seen_live` rules
@@ -391,7 +391,7 @@ Substantive stages deliver a complete vertical outcome and use a feature branch 
 3. No path zero-fills, interpolates, extrapolates, backfills, or creates pre-process minutes.
 4. Retained messages are never historical evidence; every physical source needs non-retained evidence in the current process/connection epoch.
 5. Historical priority uses the first valid, `seen_live`, fresh source, so confirmed TOP may beat unconfirmed XTOP.
-6. The 600-second freshness value is temporary until at least 24 hours of measurement supports a policy.
+6. The 600-second freshness value is the accepted Stage 1 policy, decided from a 22.768 h real-runtime measurement (max observed gap 305.1 s, no gap over 600 s).
 7. `rollup_1h` is exactly the time-ordered fold of its raw minutes, including `last`.
 8. A persisted minute below `rolled_until` is rebuilt into its rollup in the same transaction, and purge cannot delete an unrolled minute, the two-hour margin, a pending write's hour, or any hour whose rollup it cannot prove complete.
 9. Energy is `ΣW/60000`; period COP is `Σout/Σin` over paired minutes and is never an average of COP values.

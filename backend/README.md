@@ -33,7 +33,7 @@ Domain rules are in [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 | `DB_HOST` / `DB_PORT` | required / `3306` | Compose sets `DB_HOST=db`. |
 | `DB_USER` / `DB_PASSWORD` / `DB_NAME` | required / empty / `pompa_next` | |
 | `API_HOST` / `API_PORT` | `0.0.0.0` / `8001` | |
-| `STALE_AFTER_SECONDS` | `600` | Stage 1 bootstrap value, 60–86400. Not an accepted policy. |
+| `STALE_AFTER_SECONDS` | `600` | Accepted Stage 1 global freshness policy, configurable in 60–86400. |
 | `WRITE_BUFFER_ROWS` | `60` | Bound on never-submitted waiting rows; one submitted batch of at most as many rows is held for retry on top of it. |
 | `RETENTION_1M_DAYS` | `365` | `sample_1m` retention, 0–36500; `0` disables purge. `rollup_1h` is kept indefinitely. |
 | `LOG_LEVEL` | `INFO` | Logs are UTC. |
@@ -131,12 +131,18 @@ scripts/smoke.sh                         # health, status, last-hour gaps, per-t
 Update: `git pull && docker compose up -d --build backend`. Stop: `docker compose down`
 (keeps the `db-data` volume). Run exactly one backend container.
 
-## 24-hour freshness measurement
+## Freshness re-measurement procedure
+
+Stage 1's real-runtime freshness measurement is complete: an owner-accepted 22.768 h
+uninterrupted run on CT109 decided `STALE_AFTER_SECONDS=600` as the accepted global policy (see
+[`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) §4). The procedure below is kept for any
+future re-measurement if new evidence prompts revisiting the policy.
 
 The process accumulates the evidence in memory from its start; a restart resets it.
 
 1. Deploy, then note `recorder.process_start` from `scripts/smoke.sh`.
-2. Leave it running for at least 24 hours without restarting the backend.
+2. Leave it running for the desired observation window without restarting the backend (the
+   original Stage 1 target was at least 24 hours).
 3. Archive the evidence:
 
    ```sh
