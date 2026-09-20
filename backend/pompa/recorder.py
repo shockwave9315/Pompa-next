@@ -64,6 +64,12 @@ ROLL_HOURS_PER_TICK = 24
 PURGE_HOURS_PER_STEP = 24  # at most 1440 minute rows deleted per step
 PURGE_INTERVAL_SECONDS = HOUR
 MAINTENANCE_RETRY_SECONDS = 60
+# A backward CLOCK_REALTIME step is detected by comparing consecutive readings. Ordinary thread
+# interleaving can also invert two readings — the MQTT and recorder threads sample the clock before
+# they contend for the lock — but only by the lock wait, measured well under a second even under
+# synthetic contention. A real NTP step is orders of magnitude larger, and a step below this
+# threshold cannot meaningfully distort a 600-second freshness budget anyway.
+CLOCK_STEP_BACK_SECONDS = 1.0
 
 
 class PurgeRefused(Exception):
@@ -201,6 +207,8 @@ class Recorder:
         self.last_rolled_at: float | None = None
         self.rollup_error: str | None = None
         self.rollup_error_at: float | None = None
+        # Previous raw CLOCK_REALTIME reading, for detecting a backward step (see ``_advance``).
+        self._last_wall = accumulator.process_start
         self._purge_next_at = float("-inf")
         self.last_purge_at: float | None = None
         self.last_purge_cutoff: int | None = None
@@ -390,20 +398,20 @@ class Recorder:
         in it at all. Sampling the clock first would let a later receipt appear
         under an earlier ``now`` without any wall-clock reversal.
 
-        ``now`` is additionally floored at the accumulator's cursor — the
-        highest instant this recorder has ever processed. A wall-clock step
-        backwards cannot make a freshly received, correctly-timestamped
-        ``received_at`` look later than ``now``: display never regresses below
-        what the recorder has already logically observed. This floor is
-        display-only; it is never fed back into a source's own freshness
-        timestamp (see ``_advance``), so it cannot inflate how long a source
-        counts as alive.
+        ``now`` is the raw clock, the same reading freshness is measured
+        against, so ``alive`` and every ``mode`` in this response describe real
+        elapsed time. It is deliberately not floored at the accumulator's
+        cursor: doing that would mix a pre-step observation instant with
+        post-step receipt timestamps and make a just-received message look
+        stale for the size of the step. A backward step instead discards the
+        stamps taken before it (see ``_advance``), which is what keeps the two
+        operands of every freshness subtraction on one side of the correction.
 
         No database I/O and no state change: minutes are closed by ``tick``,
         never by an API thread.
         """
         with self._lock:
-            now = max(clock(), self.accumulator.cursor)
+            now = clock()
             ing = self.ingest
             return {
                 "now": iso_utc(now),
@@ -423,15 +431,16 @@ class Recorder:
     def snapshot(self, clock: Callable[[], float]) -> tuple[float, dict]:
         """Factual in-memory state for ``/api/v1/status``, with its observation instant.
 
-        Like ``live``, ``clock`` is read inside the lock and floored at the
-        accumulator's cursor: ``now``, the freshness of every source and the
-        ``alive`` verdict are one observation that never displays as earlier
-        than what this recorder has already processed. The instant is
-        returned because the caller needs it for facts computed outside this
-        lock, such as the prospective purge cutoff.
+        Like ``live``, ``clock`` is read raw inside the lock: ``now``, the
+        freshness of every source and the ``alive`` verdict are one
+        observation on one clock. The instant is returned because the caller
+        needs it for facts computed outside this lock, such as the prospective
+        purge cutoff — which ``Recorder._purge`` derives from the raw tick
+        clock, so reporting anything else here would describe a cutoff purge
+        will not use.
         """
         with self._lock:
-            now = max(clock(), self.accumulator.cursor)
+            now = clock()
             ing, acc = self.ingest, self.accumulator
             return now, {
                 "mqtt": {
@@ -452,6 +461,8 @@ class Recorder:
                     "last_live_message_at": iso_utc(ing.latest_live_message_at),
                     "stale_after_seconds": ing.stale_after,
                     "parse_rejects": ing.parse_rejects,
+                    "clock_steps": ing.clock_steps,
+                    "last_clock_step_at": iso_utc(ing.last_clock_step_at),
                     "uncatalogued_topics": sorted(ing.uncatalogued_topics),
                 },
                 "recorder": {
@@ -535,7 +546,23 @@ class Recorder:
         clamping a source's confirmed-evidence timestamp to a cursor that is
         temporarily ahead of the wall clock would inflate how long that
         evidence counts as fresh by the size of the clock step.
+
+        Two consecutive readings that go backwards by more than
+        ``CLOCK_STEP_BACK_SECONDS`` are a real backward step, and every
+        confirmed timestamp taken before it is discarded
+        (``Ingest.clock_stepped_back``). The comparison is against the previous
+        reading, not against the cursor: the cursor stays ahead for the whole
+        replayed interval, so comparing against it would re-discard the
+        evidence of every message arriving in that interval and black the
+        sources out until the wall clock caught up. Detection runs before the
+        caller applies its event, so a message that carries the step forward
+        immediately re-establishes its own source.
         """
+        if t < self._last_wall - CLOCK_STEP_BACK_SECONDS:
+            log.warning("CLOCK_REALTIME stepped back %.3fs to %s; confirmed source evidence discarded",
+                        self._last_wall - t, iso_utc(t))
+            self.ingest.clock_stepped_back(t)
+        self._last_wall = t
         t = max(t, self.accumulator.cursor)
         for row in self.accumulator.advance(t):
             self.rows_closed += 1

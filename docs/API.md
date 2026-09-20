@@ -160,20 +160,32 @@ while the process is alive, including when MariaDB is unavailable — that failu
 `database`.
 
 `now`, the MQTT facts, the recorder facts, every source entry and the `alive` verdict are one locked
-observation, so no timestamp among them is later than `now` — including across a real backward
-`CLOCK_REALTIME` step, which `now` is floored against (see `ARCHITECTURE.md` §24). The `database`
-object is fetched
-afterwards and is not part of that observation, though `purge_cutoff` inside it is still computed
-from the same `now`. This atomicity is scoped to that one locked read; it is not a claim that every
-field in the response is one byte-atomic multi-field transaction — some recorder maintenance facts
-(rollup/purge outcomes) are updated by the recorder thread between ticks and are factual snapshots
-of their own last run, not part of the `now`-locked observation.
+observation: `now` is read inside the recorder lock, so no MQTT message can be applied between
+sampling it and serialising the state it describes. `now` is the raw `CLOCK_REALTIME` reading — the
+same clock `alive` and every freshness verdict are measured against, and the same one
+`Recorder._purge` uses, so `database.purge_cutoff` describes the cutoff purge will actually apply.
+
+Two consequences are worth stating plainly rather than hiding behind a clamp. While the process is
+running normally, no timestamp in the observation is later than `now`. Immediately after a real
+backward `CLOCK_REALTIME` step (`ARCHITECTURE.md` §24), stamps that were *recorded before the
+correction* can be later than `now` — `sources[].last_received_at`, `mqtt.last_live_message_at`,
+`recorder.last_closed_minute`, a retained `received_at` in `/api/v1/live`. That is reported
+truthfully: those events really were observed at those readings, and rewriting them to fit the
+corrected clock would be fabrication. No *confirmed* freshness stamp is ever among them, because a
+detected step discards confirmed evidence outright and `mqtt.clock_steps` counts that it happened.
+
+This atomicity is scoped to that one locked read; it is not a claim that every field in the response
+is one byte-atomic multi-field transaction — some recorder maintenance facts (rollup/purge outcomes)
+are updated by the recorder thread between ticks and are factual snapshots of their own last run,
+not part of the `now`-locked observation.
 
 Top-level keys: `now`, `mqtt`, `recorder`, `database`, `sources`.
 
 `mqtt`: `connected`, `epoch`, `connects`, `disconnects`, `connected_at`, `disconnected_at`,
 `lwt` (`state`, `retained`, `received_at`, `messages`), `alive`, `alive_since`,
-`last_live_message_at`, `stale_after_seconds`, `parse_rejects`, `uncatalogued_topics`.
+`last_live_message_at`, `stale_after_seconds`, `parse_rejects`, `uncatalogued_topics`,
+`clock_steps` and `last_clock_step_at` (detected backward `CLOCK_REALTIME` steps; each one
+discarded the confirmed source evidence recorded before it — see `ARCHITECTURE.md` §24).
 
 `recorder`: `process_start`, `last_closed_minute`, `last_row_minute`, `last_written_minute`,
 `rows_closed`, `rows_written`, `protected_rows`, `waiting_rows`, `waiting_capacity`,

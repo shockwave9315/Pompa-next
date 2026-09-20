@@ -21,7 +21,7 @@ COP_ENTRY_KEYS = {"key", "label", "unit", "kind", "history_fields"}
 STATUS_KEYS = {"now", "mqtt", "recorder", "database", "sources"}
 STATUS_MQTT_KEYS = {"connected", "epoch", "connects", "disconnects", "connected_at", "disconnected_at",
                     "lwt", "alive", "alive_since", "last_live_message_at", "stale_after_seconds",
-                    "parse_rejects", "uncatalogued_topics"}
+                    "parse_rejects", "uncatalogued_topics", "clock_steps", "last_clock_step_at"}
 STATUS_RECORDER_KEYS = {"process_start", "last_closed_minute", "last_row_minute", "last_written_minute",
                         "rows_closed", "rows_written", "protected_rows", "waiting_rows",
                         "waiting_capacity", "flush_in_progress", "dropped_rows", "refused_rows",

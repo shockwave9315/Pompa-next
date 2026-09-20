@@ -433,13 +433,34 @@ Ordinary operational failures remain fully supported and are not excused by the 
 process/container restart, a host restart, MQTT/database/network outages, and a real backward
 `CLOCK_REALTIME` step from a normal NTP correction while the process keeps running (e.g. after a
 container freeze/resume or a slow boot before the clock is disciplined) all remain in scope and must
-degrade safely. `Recorder._advance` already treats a backward step as ordinary: it clamps event
-sequencing to the accumulator's cursor so a step can only ever produce a gap, never a duplicate
-primary key; a source's own freshness timestamp is threaded through unclamped instead, so the same
-step cannot make that source look confirmed alive for longer than `STALE_AFTER_SECONDS` of real
-elapsed time (§4), in `/api/v1/live`/`/api/v1/status` or inside `sample_1m` itself.
+degrade safely.
+
+Freshness is measured only between two `CLOCK_REALTIME` readings taken on the same side of a
+correction. Three rules implement that, and nothing else is needed:
+
+1. Event *sequencing* keeps its own clamp: `Recorder._advance` never lets the accumulator's cursor
+   regress, so a step produces a gap and never a duplicate primary key. The cursor is an ordering
+   device and is never an operand of a duration.
+2. A source's freshness anchor is the *raw*, unclamped receipt timestamp, and the observation `now`
+   in `/api/v1/live` and `/api/v1/status` is the raw clock too. Clamping either to the cursor would
+   pair a reading from one side of the correction with a reading from the other.
+3. A backward step larger than `CLOCK_STEP_BACK_SECONDS` between two consecutive readings is
+   detected, and every confirmed timestamp taken before it is discarded — the sources need new
+   non-retained evidence, exactly as after a disconnect. `seen_live`, the connection epoch and
+   retained provenance are untouched. The very next ordinary message re-establishes the source, so
+   the cost is at most one publication interval of `mode="none"`, and a message that itself carries
+   the step forward re-establishes its own source in the same call.
+
+A step therefore never makes a source look confirmed alive for longer than `STALE_AFTER_SECONDS` of
+real elapsed time — in `/api/v1/live`, `/api/v1/status` or `sample_1m`. A step too small to move two
+consecutive readings backwards is not detected and does not need to be: it can add at most its own
+size to a freshness budget. A *forward* step needs no detection at all, because it only ages
+evidence, which the ordinary freshness window already handles.
 
 Time the process did not validly observe is a gap. It is never backfilled, interpolated or
 reconstructed, regardless of cause — a container pause, a restart, or a restored older snapshot that
 removes later persisted history all leave an ordinary, visible gap, exactly as invariant 3 already
-requires.
+requires. The recorder has no freeze detector and needs none, but the gap is not instantaneous: a
+pause or freeze is indistinguishable from a silent source, so the last confirmed value still counts
+as known for up to `STALE_AFTER_SECONDS` into the paused interval, and the visible gap begins after
+that window, not at the first paused second.

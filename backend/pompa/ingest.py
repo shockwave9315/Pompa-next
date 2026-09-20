@@ -98,6 +98,8 @@ class Ingest:
         self.alive_since: float | None = None
         self.parse_rejects = 0
         self.uncatalogued_topics: set[str] = set()
+        self.clock_steps = 0  # detected backward CLOCK_REALTIME steps; each discarded confirmed evidence
+        self.last_clock_step_at: float | None = None
 
     # ------------------------------------------------------------------ events
 
@@ -242,8 +244,26 @@ class Ingest:
 
     # ------------------------------------------------------------------ internals
 
+    def clock_stepped_back(self, t: float) -> None:
+        """A backward ``CLOCK_REALTIME`` step: every confirmed timestamp predates the correction.
+
+        Freshness is an elapsed-time question, so both of its operands must be
+        readings of the same clock on the same side of a correction. A backward
+        step invalidates that for every stamp taken before it: those stamps
+        belong to a timeline the system has just been told was wrong, and
+        subtracting a post-step ``now`` from one of them understates the age by
+        the size of the step. They are therefore discarded exactly as a
+        disconnect discards them — the sources need new non-retained evidence,
+        which their next ordinary message supplies. ``seen_live`` and the
+        connection epoch are untouched: the broker connection did not change.
+        Retained provenance is untouched too; it never measured freshness.
+        """
+        self.clock_steps += 1
+        self.last_clock_step_at = t
+        self._invalidate()
+
     def _invalidate(self) -> None:
-        """Disconnect/Offline: values and source life need new non-retained evidence."""
+        """Disconnect/Offline/clock step: values and source life need new non-retained evidence."""
         for s in self.sources.values():
             s.value = None
             s.gap_baseline_at = None
