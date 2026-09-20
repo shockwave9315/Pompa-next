@@ -56,7 +56,7 @@ def main() -> None:
 
     @asynccontextmanager
     async def lifespan(_app):
-        log.info("process start %.3f, STALE_AFTER_SECONDS=%d (bootstrap value), buffer %d rows",
+        log.info("process start %.3f, STALE_AFTER_SECONDS=%d, buffer %d rows",
                  process_start, settings.stale_after_seconds, settings.write_buffer_rows)
         thread = threading.Thread(target=run_recorder, name="recorder", daemon=True)
         thread.start()

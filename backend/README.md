@@ -30,7 +30,7 @@ Domain rules are in [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 | `DB_HOST` / `DB_PORT` | required / `3306` | Compose sets `DB_HOST=db`. |
 | `DB_USER` / `DB_PASSWORD` / `DB_NAME` | required / empty / `pompa_next` | |
 | `API_HOST` / `API_PORT` | `0.0.0.0` / `8001` | |
-| `STALE_AFTER_SECONDS` | `600` | Stage 1 bootstrap value, 60–86400. Not an accepted policy. |
+| `STALE_AFTER_SECONDS` | `600` | Accepted Stage 1 global freshness policy, configurable in 60–86400. |
 | `WRITE_BUFFER_ROWS` | `60` | Bound on never-submitted waiting rows; one submitted batch of at most as many rows is held for retry on top of it. |
 | `LOG_LEVEL` | `INFO` | Logs are UTC. |
 
