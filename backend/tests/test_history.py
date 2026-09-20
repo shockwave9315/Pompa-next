@@ -11,7 +11,7 @@ import pytest
 from conftest import T0, FakeStorage, minutes, row, sample
 from pompa import history
 from pompa.aggregation import fold_minutes
-from pompa.recorder import persist, roll_next_hour
+from pompa.recorder import persist, purge_step, roll_next_hour
 from pompa.timegrid import Unrepresentable, local_midnight
 
 H = 3600
@@ -19,8 +19,8 @@ H0 = T0  # 2027-01-15T08:00:00Z
 ALL = list(history.HISTORY_SERIES)
 
 
-def q(storage, start, end, bucket, series=ALL, now=H0 + 1000 * H, retention=365):
-    return history.query(storage, start, end, bucket, list(series), now, retention)
+def q(storage, start, end, bucket, series=ALL, now=H0 + 1000 * H):
+    return history.query(storage, start, end, bucket, list(series), now)
 
 
 def roll_until(storage, closed_before):
@@ -244,54 +244,108 @@ def test_future_bucket_has_no_expected_minutes(any_storage):
     assert [b["coverage_percent"] for b in body["buckets"]] == [0.0, 0.0, None]
 
 
-# ------------------------------------------------------------------ retention and 422
+# ------------------------------------------------------------------ purged raw and 422
 
 
-def test_old_partial_edge_is_422_but_whole_hours_are_served_from_rollup(any_storage):
-    persist(any_storage, minutes(H0, 6 * 60))
-    roll_until(any_storage, H0 + 6 * H)
-    now = H0 + 2 * 86400 + 30  # retention 1 day: raw floor is H0 + 24 h
-    with pytest.raises(Unrepresentable, match="not rounded"):
-        q(any_storage, H0 + 60, H0 + 3 * H, "1h", now=now, retention=1)
-    with pytest.raises(Unrepresentable):
-        q(any_storage, H0, H0 + 3 * H - 60, "total", now=now, retention=1)
-    with pytest.raises(Unrepresentable):
-        q(any_storage, H0 + 60, H0 + 120, "total", now=now, retention=1)  # inside one old hour
-    body = q(any_storage, H0, H0 + 3 * H, "1h", ["outside_temp"], now=now, retention=1)
-    assert [b["recorded_minutes"] for b in body["buckets"]] == [60, 60, 60]
+GAP_HOUR = H0 + 30 * H  # never recorded at all, and below every purge cutoff used here
+PURGED_UNTIL = H0 + 48 * H  # raw physically deleted below this
 
 
-def old_rolled_history(storage):
-    """Two recorded hours at H0 and rollups through H0 + 30 h; with retention 1 day at
-    ``now = H0 + 2 days`` the raw floor is H0 + 24 h (not the rolled_until - 2 h term)."""
-    persist(storage, minutes(H0, 2 * 60) + [row(H0 + 29 * H, outside_temp=1.0)])
-    roll_until(storage, H0 + 30 * H)
-    return H0 + 2 * 86400
+def purged_history(storage):
+    """72 recorded hours with one never-recorded hour, rolled, then really purged.
+
+    Returns the ``now`` the purge ran at. Raw below ``PURGED_UNTIL`` is gone
+    from the database; ``GAP_HOUR`` is a natural hole that was never recorded
+    and therefore has no rollup row either.
+    """
+    persist(storage, [r for r in minutes(H0, 72 * 60) if not GAP_HOUR <= r.ts < GAP_HOUR + H])
+    roll_until(storage, H0 + 72 * H)
+    now = H0 + 72 * H
+    more = True
+    while more:
+        _, _, more = purge_step(storage, now, retention_days=1, pending_from=None, max_hours=24)
+    return now
 
 
-@pytest.mark.parametrize("bucket", ["1m", "5m"])
-def test_explicit_minute_buckets_before_raw_retention_are_422(any_storage, bucket):
-    now = old_rolled_history(any_storage)
-    with pytest.raises(Unrepresentable):
-        q(any_storage, H0, H0 + H, bucket, now=now, retention=1)
-    # Retention 0 disables purge, so the same request is servable from raw minutes.
-    assert q(any_storage, H0, H0 + H, bucket, now=now, retention=0)["bucket"] == bucket
+# 422 must follow the database, not the wall clock or the configured retention. These are the
+# perturbations that used to move the predicted floor backwards and re-open purged ranges.
+PERTURBED = pytest.mark.parametrize("shift", [0, -24 * H], ids=["clock_sane", "clock_back_24h"])
 
 
-def test_auto_promotes_to_1h_when_raw_retention_cannot_serve_it(any_storage):
-    now = old_rolled_history(any_storage)
-    body = q(any_storage, H0, H0 + 2 * H, "auto", ["outside_temp"], now=now, retention=1)
+def test_purged_raw_is_422_for_minute_buckets(any_storage):
+    now = purged_history(any_storage)
+    for bucket in ("1m", "5m"):
+        with pytest.raises(Unrepresentable, match="was purged"):
+            q(any_storage, H0 + 24 * H, H0 + 25 * H, bucket, now=now)
+
+
+@PERTURBED
+def test_purged_raw_stays_422_after_a_backward_clock_step(any_storage, shift):
+    now = purged_history(any_storage) + shift
+    with pytest.raises(Unrepresentable, match="was purged"):
+        q(any_storage, H0 + 24 * H, H0 + 25 * H, "1m", now=now)
+    with pytest.raises(Unrepresentable, match="was purged"):  # partial 1h edge needs the same raw
+        q(any_storage, H0 + 24 * H + 1800, H0 + 26 * H, "1h", now=now)
+
+
+def test_purged_raw_stays_422_when_retention_is_raised_or_disabled(any_storage):
+    """Retention is policy; it cannot resurrect minutes the database no longer has."""
+    now = purged_history(any_storage)
+    for bucket in ("1m", "auto"):
+        with pytest.raises(Unrepresentable, match="was purged"):
+            q(any_storage, H0 + 24 * H + 1800, H0 + 25 * H, bucket, now=now)
+    with pytest.raises(Unrepresentable, match="was purged"):
+        q(any_storage, H0 + 24 * H, H0 + 25 * H, "1m", now=now)
+
+
+def test_partial_edge_inside_a_purged_hour_is_found(any_storage):
+    """A request starting at 08:30 must still see the purged hour starting at 08:00."""
+    now = purged_history(any_storage)
+    start = H0 + 24 * H + 1800
+    with any_storage.session() as s:
+        assert s.first_purged_hour(start, start + 1800) == H0 + 24 * H
+    for bucket in ("1h", "1d", "total"):
+        with pytest.raises(Unrepresentable, match="was purged"):
+            q(any_storage, start, H0 + 26 * H, bucket, now=now)
+
+
+@PERTURBED
+def test_whole_rolled_hours_over_purged_raw_are_served_from_rollup(any_storage, shift):
+    now = purged_history(any_storage) + shift
+    body = q(any_storage, H0 + 24 * H, H0 + 26 * H, "1h", ["outside_temp"], now=now)
+    assert [b["recorded_minutes"] for b in body["buckets"]] == [60, 60]
+
+
+@PERTURBED
+def test_a_never_recorded_hour_below_the_cutoff_is_an_ordinary_empty_answer(any_storage, shift):
+    """No raw and no rollup is not evidence of purge: it means the minutes never existed."""
+    now = purged_history(any_storage) + shift
+    body = q(any_storage, GAP_HOUR, GAP_HOUR + H, "1m", ["outside_temp"], now=now)
+    assert body["bucket"] == "1m"
+    assert [b["recorded_minutes"] for b in body["buckets"]] == [0] * 60
+    assert [b["coverage_percent"] for b in body["buckets"]] == [0.0] * 60
+
+
+def test_a_range_from_before_the_recorder_existed_is_not_422(any_storage):
+    now = purged_history(any_storage)
+    body = q(any_storage, H0 - 10 * H, H0 - 9 * H, "1m", ["outside_temp"], now=now)
+    assert sum(b["recorded_minutes"] for b in body["buckets"]) == 0
+
+
+def test_auto_promotes_to_1h_when_the_range_needs_purged_raw(any_storage):
+    now = purged_history(any_storage)
+    body = q(any_storage, H0 + 24 * H, H0 + 26 * H, "auto", ["outside_temp"], now=now)
     assert (body["bucket"], body["requested_bucket"]) == ("1h", "auto")
     assert body["series"]["outside_temp"]["minutes"] == [48, 48]  # from rollup_1h
-    recent = q(any_storage, now - 3600 - now % 60, now - now % 60, "auto", ["outside_temp"], now=now, retention=1)
-    assert recent["bucket"] == "1m"
-    with pytest.raises(Unrepresentable):  # promoted, but the partial edge hour is still too old
-        q(any_storage, H0 + 60, H0 + 2 * H, "auto", now=now, retention=1)
+    recent = q(any_storage, H0 + 60 * H, H0 + 61 * H, "auto", ["outside_temp"], now=now)
+    assert recent["bucket"] == "1m"  # raw still there, no promotion
+    with pytest.raises(Unrepresentable):  # promoted, but the partial edge still needs purged raw
+        q(any_storage, H0 + 24 * H + 60, H0 + 26 * H, "auto", now=now)
 
 
 def test_without_any_rollup_raw_is_always_servable(any_storage):
     persist(any_storage, minutes(H0, 60))
-    body = q(any_storage, H0, H0 + H, "1m", ["outside_temp"], now=H0 + 800 * 86400, retention=1)
+    body = q(any_storage, H0, H0 + H, "1m", ["outside_temp"], now=H0 + 800 * 86400)
     assert body["bucket"] == "1m" and sum(b["recorded_minutes"] for b in body["buckets"]) == 60
 
 

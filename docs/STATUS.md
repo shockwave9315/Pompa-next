@@ -2,13 +2,27 @@
 
 ## Current stage
 
-**Stage 3 — Complete Backend API**, developed on `stage-3-complete-backend-api` as a DRAFT PR
-stacked on `stage-2-historical-engine`, which is itself stacked on `stage-1-core-backend`. Nothing
-is merged and nothing is deployed.
+**Stage 3 — Complete Backend API**, developed on `stage-3-complete-backend-api`. Not deployed to
+CT109.
 
-Stage 1 is not merged: its ≥24 h freshness measurement is still running on CT109 and the freshness
-policy is still `STALE_AFTER_SECONDS=600`, unchanged and undecided. Stage 2 remains stacked and
-unmerged.
+### Stage 1
+
+DONE. Merged to `main` (merge commit `ba70fefa94b3000f518e2273283bf69a4abec05f`). Freshness policy
+accepted: `STALE_AFTER_SECONDS=600`.
+
+Runtime measurement: 22.768 h uninterrupted on CT109, accepted short of the originally planned
+≥24 h target (max observed gap 305.059 s, no gap over 600 s).
+
+### Stage 2
+
+DONE. Merged to `main` (merge commit `9ea192967b7ab24d4b961d22f4280c19069ad4b8`). Independent
+adversarial review complete, and its finding applied: reads, writes and the write queue share one
+database fact for purged raw evidence — `purged(H)` from `rollup_1h`/`sample_1m` presence, never the
+wall clock or retention config (see `docs/ARCHITECTURE.md` §8). Not deployed to CT109.
+
+### Stage 3
+
+Current stage.
 
 ## Goal
 
@@ -32,8 +46,8 @@ documented and tested `/api/v1`.
 - Frontend, timeline/activity, cycles, compressor starts, the 193-capability explorer.
 - Control/SET, user settings, legacy compatibility, legacy aliases and historical migration.
 - Live COP: COP is defined on canonical minutes and stays in `/api/v1/history`.
-- Changing Stage 1 freshness policy, the running CT109 measurement, or Stage 2 aggregation,
-  rollup, purge, retention and history semantics.
+- Changing the accepted Stage 1 freshness policy or its runtime measurement result, or Stage 2
+  aggregation, rollup, purge, retention and purged-history semantics.
 
 ## Next
 

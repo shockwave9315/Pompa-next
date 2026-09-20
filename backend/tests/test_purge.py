@@ -199,8 +199,8 @@ def test_purged_hours_remain_readable_as_rollups_but_not_as_minutes(any_storage)
     roll_all(any_storage)
     now = H0 + 72 * H
     purge_all(any_storage, now, retention_days=1)
-    body = history.query(any_storage, H0, H0 + 2 * H, "1h", ["outside_temp", "cop_co"], now, retention_days=1)
+    body = history.query(any_storage, H0, H0 + 2 * H, "1h", ["outside_temp", "cop_co"], now)
     assert [b["recorded_minutes"] for b in body["buckets"]] == [60, 60]
     assert body["series"]["cop_co"]["paired_minutes"] == [55, 55]  # 5 unpaired minutes per hour
     with pytest.raises(Unrepresentable):
-        history.query(any_storage, H0, H0 + 2 * H, "1m", ["outside_temp"], now, retention_days=1)
+        history.query(any_storage, H0, H0 + 2 * H, "1m", ["outside_temp"], now)

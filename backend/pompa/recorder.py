@@ -10,10 +10,13 @@ Write buffer, two explicit parts:
 * ``_waiting``: closed rows never submitted to storage, FIFO, at most
   ``buffer_rows``. On overflow the oldest waiting row is dropped and counted;
   it was never submitted, so it cannot have been persisted by this recorder.
-* ``_protected``: the batch submitted to storage (at most ``buffer_rows``). A
-  failed write does not prove nothing was committed (the acknowledgement may be
-  lost), so the batch is retried unchanged and idempotently until a write
-  returns success. It is never dropped and never counted in ``dropped_rows``.
+* ``_protected``: the batch submitted to storage (at most ``buffer_rows``). An
+  *ambiguous* failure does not prove nothing was committed (the acknowledgement
+  may be lost), so the batch is retried unchanged and idempotently until a write
+  returns success. It is never dropped and never counted in ``dropped_rows``. A
+  *definite refusal* is different: it is raised before anything is upserted and
+  can never succeed, so exactly the rows of the refused hours leave the batch,
+  are counted in ``refused_rows``, and the rest is written at once.
 
 A flush claims the whole waiting queue only when no protected batch exists.
 Transient memory is therefore at most ``buffer_rows`` protected plus
@@ -27,13 +30,18 @@ Rollup and purge (after a tick whose flush fully succeeded):
   rolled, a clock step back across a restart — therefore commits together with
   its corrected rollup, or not at all. A lost acknowledgement leaves both
   committed; the retry repeats an idempotent upsert and an idempotent rebuild.
+  A rolled hour whose raw evidence has already been purged is never rebuilt
+  from newly arriving partial raw data; the write fails closed instead
+  (``RebuildRefused``).
 * Closed hours are rolled in ascending order, one transaction per hour, so
   ``rolled_until = MAX(hour_ts) + 1 h`` bounds a contiguous rolled range.
   Raw minutes at or above it are simply not rolled yet.
-* Purge deletes whole hours below ``min(raw_floor, oldest pending minute's
+* Purge deletes whole hours below ``min(purge_cutoff, oldest pending minute's
   hour)`` and only after proving, per hour, that the rollup accounts for every
   stored minute. Any doubt deletes nothing. The raw evidence of an hour that a
   pending minute can still enter is therefore never purged before its rebuild.
+  That proof is also what lets a surviving rollup row stand as evidence of
+  deletion, which is how ``Session.first_purged_hour`` answers every path.
 """
 
 from __future__ import annotations
@@ -41,13 +49,14 @@ from __future__ import annotations
 import logging
 import threading
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from enum import Enum
 
 from .aggregation import RECORDED, SERIES, fold_minutes
 from .ingest import Ingest
 from .minute import MinuteAccumulator, MinuteRow, iso_utc
 from .storage import Session, Storage, StorageUnavailable
-from .timegrid import HOUR, floor_hour, raw_floor
+from .timegrid import HOUR, floor_hour, purge_cutoff
 
 log = logging.getLogger(__name__)
 
@@ -59,6 +68,33 @@ MAINTENANCE_RETRY_SECONDS = 60
 
 class PurgeRefused(Exception):
     """Purge could not prove that deleting raw minutes loses nothing; nothing was deleted."""
+
+
+class RebuildRefused(Exception):
+    """Touched hours are already rolled but their raw evidence was already purged.
+
+    Rebuilding one from a newly arrived partial write would silently replace a
+    complete rollup with a partial one, so the whole transaction is refused
+    before anything is upserted. ``refused_hours`` names every hour that caused
+    it, so the recorder can drop exactly the unwritable rows without guessing.
+    """
+
+    def __init__(self, message: str, hours: Iterable[int]):
+        super().__init__(message)
+        self.refused_hours: frozenset[int] = frozenset(hours)
+
+
+class WriteOutcome(Enum):
+    """What one storage write proved.
+
+    ``AMBIGUOUS`` and ``REFUSED`` are not interchangeable: the first may have
+    committed and must be retried unchanged, the second provably did not and
+    can never succeed.
+    """
+
+    SUCCESS = "success"      # committed
+    AMBIGUOUS = "ambiguous"  # may or may not have committed; retry the batch unchanged
+    REFUSED = "refused"      # nothing was written and nothing can be; the batch was shrunk
 
 
 def rebuild_hour(session: Session, hour_ts: int) -> None:
@@ -76,13 +112,28 @@ def rebuild_hour(session: Session, hour_ts: int) -> None:
 
 
 def persist(storage: Storage, rows: list[MinuteRow]) -> None:
-    """Upsert minutes and rebuild every touched, already rolled hour in one transaction."""
+    """Upsert minutes and rebuild every touched, already rolled hour in one transaction.
+
+    A touched hour that is already rolled but whose raw evidence was already
+    purged (a wall clock stepped back across a restart by more than raw
+    retention) cannot be rebuilt from the newly arriving minute alone: doing
+    so would replace its complete rollup with a partial one. Every such hour is
+    found before the upsert, and the whole transaction is refused, leaving raw
+    and rollup untouched. ``Session.first_purged_hour`` is the one fact that
+    decides it, here and on the read path.
+    """
     with storage.session() as s:
-        s.upsert_minutes(rows)
         rolled_until = s.rolled_until()
-        if rolled_until is not None:
-            for hour_ts in sorted({floor_hour(r.ts) for r in rows if r.ts < rolled_until}):
-                rebuild_hour(s, hour_ts)
+        touched = (sorted({floor_hour(r.ts) for r in rows if r.ts < rolled_until})
+                  if rolled_until is not None else [])
+        refused = [h for h in touched if s.first_purged_hour(h, h + HOUR) is not None]
+        if refused:
+            raise RebuildRefused(
+                f"hour(s) {', '.join(iso_utc(h) for h in refused)} are rolled but their raw evidence"
+                " was already purged; refusing to rebuild them from a new partial write", refused)
+        s.upsert_minutes(rows)
+        for hour_ts in touched:
+            rebuild_hour(s, hour_ts)
 
 
 def roll_next_hour(storage: Storage, closed_before: int) -> int | None:
@@ -105,7 +156,7 @@ def purge_step(storage: Storage, now: float, retention_days: int, pending_from: 
     when an affected hour's rollup does not account for all its stored minutes.
     """
     with storage.session() as s:
-        cutoff = raw_floor(now, s.rolled_until(), retention_days)
+        cutoff = purge_cutoff(now, s.rolled_until(), retention_days)
         if cutoff is None:
             return None, 0, False
         if pending_from is not None:
@@ -133,7 +184,9 @@ class Recorder:
         self._waiting: deque[MinuteRow] = deque()
         self._protected: list[MinuteRow] = []
         self._flushing = False
-        self.dropped_rows = 0
+        self.dropped_rows = 0   # never-submitted rows lost to waiting-queue overflow
+        self.refused_rows = 0   # rows the historical safety guard will never let be written
+        self.last_refusal: dict | None = None
         self.rows_closed = 0
         self.rows_written = 0
         self.last_row_minute: int | None = None
@@ -204,8 +257,13 @@ class Recorder:
                 batch = self._protected
             if self.schema_ready and not batch:
                 return True
-            if not self._write(batch, now):
+            outcome = self._write(batch, now)
+            if outcome is WriteOutcome.AMBIGUOUS:
                 return False
+            if outcome is WriteOutcome.REFUSED:
+                # ``_refuse`` removed at least the row that caused it, so this
+                # loop always shrinks; write whatever is left of the batch now.
+                continue
             with self._lock:
                 self._protected = []
                 self.rows_written += len(batch)
@@ -214,8 +272,9 @@ class Recorder:
             if not batch:
                 return True
 
-    def _write(self, batch: list[MinuteRow], now: float) -> bool:
-        """Database I/O, called without the lock. True only when the write returned success."""
+    def _write(self, batch: list[MinuteRow], now: float) -> WriteOutcome:
+        """Database I/O, called without the lock. Reports which of the three outcomes happened."""
+        outcome = WriteOutcome.SUCCESS
         try:
             if not self.schema_ready:
                 self.storage.ensure_schema()
@@ -227,12 +286,41 @@ class Recorder:
             if self.db_last_error is None:
                 log.warning("database unavailable, %d row(s) held for retry: %s", len(batch), e)
             self.db_last_error, self.db_last_error_at = str(e), now
-            return False
+            return WriteOutcome.AMBIGUOUS
+        except RebuildRefused as e:
+            self._refuse(batch, e, now)
+            outcome = WriteOutcome.REFUSED
+        # The database answered in both remaining cases; only the refusal was ours.
         if self.db_last_error is not None:
             log.info("database available again")
         self.db_last_error = None
         self.db_last_ok_at = now
-        return True
+        return outcome
+
+    def _refuse(self, batch: list[MinuteRow], error: RebuildRefused, now: float) -> None:
+        """Drop exactly the rows of permanently unwritable hours; keep the rest of the batch.
+
+        The guard runs before the first upsert and the transaction was rolled
+        back, so none of this batch reached storage, and nothing will ever
+        restore the purged raw evidence these rows would rebuild from. Retrying
+        them forever would block the queue and every fresh minute behind it, so
+        they are dropped and counted apart from ``rows_written`` (never written)
+        and from ``dropped_rows`` (which means queue overflow).
+        """
+        hours = error.refused_hours
+        kept = [r for r in batch if floor_hour(r.ts) not in hours]
+        refused = [r for r in batch if floor_hour(r.ts) in hours]
+        with self._lock:
+            self._protected = kept
+            self.refused_rows += len(refused)
+            self.last_refusal = {
+                "at": iso_utc(now),
+                "hours": [iso_utc(h) for h in sorted(hours)],
+                "rows": len(refused),
+                "reason": str(error),
+            }
+        log.warning("refused %d minute(s) for purged rolled hour(s) %s; %d row(s) of the batch remain",
+                    len(refused), ", ".join(iso_utc(h) for h in sorted(hours)), len(kept))
 
     # ------------------------------------------------------------- rollup and purge
 
@@ -366,6 +454,9 @@ class Recorder:
                     "waiting_capacity": self.buffer_rows,
                     "flush_in_progress": self._flushing,
                     "dropped_rows": self.dropped_rows,
+                    # Definitively unwritable: refused before any write and never retried.
+                    "refused_rows": self.refused_rows,
+                    "last_refusal": self.last_refusal,
                     "schema_ready": self.schema_ready,
                     "db_last_ok_at": iso_utc(self.db_last_ok_at),
                     "db_last_error": self.db_last_error,

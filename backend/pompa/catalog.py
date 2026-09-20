@@ -3,8 +3,8 @@
 Topic facts come from docs/reference/heishamon/. TOP topics are published as
 ``{prefix}/main/<Name>`` (MQTT-Topics.md). The checked-in reference names the
 XTOP values (realne_dane.md) but does not state their topic path; ``extra/`` is
-the assumed HeishaMon sub-topic and is verified by the Stage 1 runtime
-measurement (``/api/v1/status`` lists uncatalogued topics seen under the prefix).
+the HeishaMon sub-topic, confirmed live by the Stage 1 runtime measurement on
+CT109 (``/api/v1/status`` lists uncatalogued topics seen under the prefix).
 """
 
 from __future__ import annotations

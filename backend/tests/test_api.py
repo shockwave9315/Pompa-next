@@ -54,11 +54,12 @@ def test_status_facts(client):
     assert body["now"] == "2027-01-15T08:02:30Z"
     assert body["database"] == {"available": True, "error": None,
                                 "oldest_minute": Z.format(0), "newest_minute": Z.format(2),
-                                "rolled_until": None, "raw_floor": None}
+                                "rolled_until": None, "purge_cutoff": None}
     assert body["mqtt"]["connected"] is False and body["mqtt"]["alive"] is False
     assert body["mqtt"]["stale_after_seconds"] == 600
     rec = body["recorder"]
     assert (rec["protected_rows"], rec["waiting_rows"], rec["dropped_rows"]) == (0, 0, 0)
+    assert rec["refused_rows"] == 0 and rec["last_refusal"] is None
     assert rec["waiting_capacity"] == 60 and rec["flush_in_progress"] is False
     assert rec["retention_1m_days"] == 365
     assert rec["rollup"] == {"last_rolled_hour": None, "last_rolled_at": None, "error": None, "error_at": None}
@@ -75,7 +76,7 @@ def test_status_reports_database_unavailable(client, db):
     body = client.get("/api/v1/status").json()
     assert body["database"] == {"available": False, "error": "fake outage",
                                 "oldest_minute": None, "newest_minute": None, "rolled_until": None,
-                                "raw_floor": None}
+                                "purge_cutoff": None}
 
 
 def test_history_exact_1m(client):

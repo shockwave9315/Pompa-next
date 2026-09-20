@@ -64,7 +64,7 @@ def main() -> None:
 
     @asynccontextmanager
     async def lifespan(_app):
-        log.info("process start %.3f, STALE_AFTER_SECONDS=%d (bootstrap value), buffer %d rows,"
+        log.info("process start %.3f, STALE_AFTER_SECONDS=%d, buffer %d rows,"
                  " RETENTION_1M_DAYS=%d, calendar days in %s",
                  process_start, settings.stale_after_seconds, settings.write_buffer_rows,
                  settings.retention_1m_days, LOCAL_TZ_NAME)
