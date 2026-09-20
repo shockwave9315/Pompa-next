@@ -16,7 +16,7 @@ from . import history as history_engine
 from .minute import MINUTE, iso_utc
 from .recorder import Recorder
 from .storage import Storage, StorageUnavailable
-from .timegrid import BUCKETS, Unrepresentable, local_midnight, raw_floor
+from .timegrid import BUCKETS, Unrepresentable, local_midnight, purge_cutoff
 
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # Instants must fit the INT UNSIGNED minute keys; the upper bound keeps local-day math in range.
@@ -85,10 +85,12 @@ def create_app(recorder: Recorder, storage: Storage, clock: Callable[[], float] 
             database = {"available": True, "error": None,
                         "oldest_minute": iso_utc(oldest), "newest_minute": iso_utc(newest),
                         "rolled_until": iso_utc(rolled_until),
-                        "raw_floor": iso_utc(raw_floor(now, rolled_until, recorder.retention_days))}
+                        # Prospective policy, not history: what purge may delete next. What it
+                        # already deleted is a per-hour fact, not one boundary (natural gaps are legal).
+                        "purge_cutoff": iso_utc(purge_cutoff(now, rolled_until, recorder.retention_days))}
         except StorageUnavailable as e:
             database = {"available": False, "error": str(e), "oldest_minute": None, "newest_minute": None,
-                        "rolled_until": None, "raw_floor": None}
+                        "rolled_until": None, "purge_cutoff": None}
         return {
             "now": iso_utc(now),
             "mqtt": facts["mqtt"],
@@ -112,7 +114,7 @@ def create_app(recorder: Recorder, storage: Storage, clock: Callable[[], float] 
             raise _bad(f"unknown bucket {bucket!r}; expected one of {', '.join(BUCKETS)}")
         names = _parse_series(series)
         try:
-            return history_engine.query(storage, start, end, bucket, names, clock(), recorder.retention_days)
+            return history_engine.query(storage, start, end, bucket, names, clock())
         except Unrepresentable as e:
             raise HTTPException(status_code=422, detail=str(e)) from None
         except StorageUnavailable as e:

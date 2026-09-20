@@ -91,14 +91,16 @@ class FakeSession:
             del self.rows[t]
         return len(doomed)
 
-    def has_raw_minutes(self, start, end):
-        return any(start <= ts < end for ts in self.rows)
-
     def rolled_until(self):
         return max(h for h, _ in self.rollup) + 3600 if self.rollup else None
 
-    def rollup_exists(self, hour_ts):
-        return any(h == hour_ts for h, _ in self.rollup)
+    def first_purged_hour(self, start, end):
+        """Same fact as MariaDB: whole overlapped hours, rollup present, no raw inside."""
+        lo, hi = start - start % 3600, -(-end // 3600) * 3600
+        for h in sorted({h for h, _ in self.rollup if lo <= h < hi}):
+            if not any(h <= ts < h + 3600 for ts in self.rows):
+                return h
+        return None
 
     def replace_rollup_hour(self, hour_ts, values):
         assert hour_ts % 3600 == 0

@@ -168,11 +168,27 @@ def test_late_minute_into_a_purged_rolled_hour_is_refused(any_storage):
     with any_storage.session() as s:
         s.delete_minutes_before(H0 + H)  # simulate purge: raw gone, rollup stays
     late = row(H0 + 30 * 60, main_outlet_temp=-40.0)
-    with pytest.raises(RebuildRefused):
+    with pytest.raises(RebuildRefused) as caught:
         persist(any_storage, [late])
+    assert caught.value.refused_hours == frozenset({H0})  # the recorder needs the exact hours
     assert rolled(any_storage) == before  # existing rollup left byte-for-byte unchanged
     with any_storage.session() as s:
         assert s.read_minutes(H0, H0 + H) == []  # the new minute was not written either
+
+
+def test_refusal_names_every_purged_hour_the_batch_touches(any_storage):
+    persist(any_storage, minutes(H0, 3 * 60))
+    roll_all(any_storage)
+    with any_storage.session() as s:
+        s.delete_minutes_before(H0 + 2 * H)  # hours 0 and 1 purged, hour 2 intact
+    batch = [row(H0 + 60, outside_temp=1.0), row(H0 + H + 60, outside_temp=2.0),
+             row(H0 + 2 * H + 60, outside_temp=3.0)]
+    with pytest.raises(RebuildRefused) as caught:
+        persist(any_storage, batch)
+    assert caught.value.refused_hours == frozenset({H0, H0 + H})
+    with any_storage.session() as s:  # the writable row was not committed either: one transaction
+        (_, values), = s.read_minutes(H0 + 2 * H + 60, H0 + 2 * H + 120, ["outside_temp"])
+    assert values["outside_temp"] != 3.0
 
 
 def test_late_minute_into_rolled_hour_with_raw_still_present_is_unaffected(any_storage):

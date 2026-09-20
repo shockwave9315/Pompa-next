@@ -14,8 +14,9 @@ Runtime measurement: 22.768 h uninterrupted on CT109, accepted short of the orig
 
 ### Stage 2
 
-Implementation complete. Adversarial review complete. Not merged, not deployed to CT109. Ready for
-external/final review.
+Implementation complete. Independent adversarial review complete, and its finding applied: reads,
+writes and the write queue now share one database fact for purged raw evidence (see
+`docs/ARCHITECTURE.md` §8). Not merged, not deployed to CT109. Ready for final review.
 
 ## Goal
 
@@ -29,9 +30,10 @@ raw/rollup reads, energy, paired COP, coverage facts, calendar days and safe ret
 - Late-write correctness: a minute write and the rebuild of every rolled hour it touches commit in
   one transaction.
 - Mixed `rollup_1h`/`sample_1m` reads for `1h`, `1d` and `total`; `sample_1m` only for `1m` and `5m`.
-- `auto`, the 3000-bucket limit and exact `[from, to)` edges, including 422 for unrepresentable ones.
+- `auto`, the 3000-bucket limit and exact `[from, to)` edges, with 422 only for provably purged raw.
 - Europe/Warsaw calendar days with 1380- and 1500-minute DST days, validated at startup.
-- Coverage facts, `RETENTION_1M_DAYS` and the fail-closed hourly purge.
+- Coverage facts, `RETENTION_1M_DAYS` and the fail-closed hourly purge, whose per-hour proof is
+  what makes a surviving rollup row evidence that raw was deleted.
 - `GET /api/v1/history` extended in place; factual rollup, purge and retention status.
 
 ## Out of scope

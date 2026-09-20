@@ -1,4 +1,4 @@
-"""Bucket alignment, Europe/Warsaw calendar days and DST, auto selection, retention floor."""
+"""Bucket alignment, Europe/Warsaw calendar days and DST, auto selection, purge cutoff."""
 
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
@@ -7,8 +7,8 @@ import pytest
 
 from pompa import timegrid
 from pompa.timegrid import (
-    DAY, HOUR, MAX_BUCKETS, Unrepresentable, bucket_edges, ceil_hour, choose_auto, expected_minutes,
-    floor_hour, local_date, local_midnight, raw_floor, validate_local_days,
+    DAY, HOUR, MAX_BUCKETS, Unrepresentable, auto_bucket, bucket_edges, ceil_hour, expected_minutes,
+    floor_hour, local_date, local_midnight, purge_cutoff, validate_local_days,
 )
 
 T0 = 1_800_000_000  # 2027-01-15T08:00:00Z
@@ -137,27 +137,21 @@ def test_startup_validation_accepts_warsaw_and_rejects_half_hour_zones(monkeypat
         validate_local_days()
 
 
-# ------------------------------------------------------------------ auto and retention floor
+# ------------------------------------------------------------------ auto and purge cutoff
 
 
 @pytest.mark.parametrize("length,bucket", [
     (HOUR, "1m"), (36 * HOUR, "1m"), (36 * HOUR + 60, "5m"), (10 * DAY, "5m"), (10 * DAY + 60, "1h"),
     (120 * DAY, "1h"), (120 * DAY + 60, "1d"), (3000 * DAY, "1d")])
 def test_auto_uses_range_length(length, bucket):
-    assert choose_auto(T0, T0 + length, floor=None) == bucket
+    assert auto_bucket(T0, T0 + length) == bucket
 
 
-def test_auto_promotes_only_minute_buckets_below_the_raw_floor():
-    assert choose_auto(T0, T0 + HOUR, floor=T0 + 60) == "1h"
-    assert choose_auto(T0, T0 + HOUR, floor=T0) == "1m"
-    assert choose_auto(T0, T0 + 11 * DAY, floor=T0 + 60) == "1h"  # already 1h
-    assert choose_auto(T0, T0 + 200 * DAY, floor=T0 + 60) == "1d"  # daily reads rollups
-
-
-def test_raw_floor_is_the_purge_cutoff():
+def test_purge_cutoff_is_prospective_policy():
+    """What purge may delete next. What it already deleted is ``Session.first_purged_hour``."""
     now = T0 + 400 * DAY
-    assert raw_floor(now, rolled_until=None, retention_days=365) is None  # nothing rolled, nothing purged
-    assert raw_floor(now, rolled_until=T0, retention_days=0) is None  # purge disabled
-    assert raw_floor(now, rolled_until=now, retention_days=365) == floor_hour(now - 365 * DAY)
-    # A rollup lagging behind retention holds the floor at its own reprocessing margin.
-    assert raw_floor(now, rolled_until=T0 + HOUR, retention_days=365) == T0 - HOUR
+    assert purge_cutoff(now, rolled_until=None, retention_days=365) is None  # nothing rolled yet
+    assert purge_cutoff(now, rolled_until=T0, retention_days=0) is None  # purge disabled
+    assert purge_cutoff(now, rolled_until=now, retention_days=365) == floor_hour(now - 365 * DAY)
+    # A rollup lagging behind retention holds the cutoff at its own reprocessing margin.
+    assert purge_cutoff(now, rolled_until=T0 + HOUR, retention_days=365) == T0 - HOUR

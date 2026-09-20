@@ -19,7 +19,7 @@ import pymysql
 
 from .catalog import RECORDED_KEYS
 from .minute import MINUTE, MinuteRow
-from .timegrid import HOUR
+from .timegrid import HOUR, ceil_hour, floor_hour
 
 _IDENT = re.compile(r"^[a-z][a-z0-9_]*$")
 assert all(_IDENT.match(k) for k in RECORDED_KEYS)
@@ -114,11 +114,6 @@ class Session:
         self._cur.execute(f"DELETE FROM {TABLE} WHERE ts < %s", (cutoff,))
         return self._cur.rowcount
 
-    def has_raw_minutes(self, start: int, end: int) -> bool:
-        """Whether any ``sample_1m`` row falls in ``[start, end)``."""
-        self._cur.execute(f"SELECT 1 FROM {TABLE} WHERE ts >= %s AND ts < %s LIMIT 1", (start, end))
-        return self._cur.fetchone() is not None
-
     # ---------------------------------------------------------------- rollup_1h
 
     def rolled_until(self) -> int | None:
@@ -127,11 +122,32 @@ class Session:
         (value,) = self._cur.fetchone()
         return None if value is None else int(value) + HOUR
 
-    def rollup_exists(self, hour_ts: int) -> bool:
-        """Whether ``rollup_1h`` already has a row for this hour."""
-        _check_hour(hour_ts)
-        self._cur.execute(f"SELECT 1 FROM {ROLLUP} WHERE hour_ts = %s LIMIT 1", (hour_ts,))
-        return self._cur.fetchone() is not None
+    def first_purged_hour(self, start: int, end: int) -> int | None:
+        """Lowest UTC hour overlapping ``[start, end)`` whose raw minutes were purged.
+
+        ``purged(H)`` is a rollup row for ``H`` and no ``sample_1m`` row inside
+        it. That is exact, not a guess: ``rebuild_hour`` never writes a rollup
+        for an hour with no minutes, so the row proves the hour once held raw
+        data, and purge refuses to delete an hour whose rollup it cannot prove
+        complete, so a deleted hour always leaves that row behind. An hour with
+        neither raw minutes nor a rollup row was never recorded and is not
+        reported here.
+
+        Whole overlapped hours are examined, so a partial edge at ``08:30``
+        still sees the purged hour starting at ``08:00``.
+        """
+        lo, hi = floor_hour(start), ceil_hour(end)
+        # Anti-join, not a correlated NOT EXISTS: both sides are one indexed range scan of the
+        # requested span, so the cost follows the span and never the size of the tables.
+        self._cur.execute(
+            f"SELECT MIN(r.hour_ts) FROM (SELECT DISTINCT hour_ts FROM {ROLLUP}"
+            f" WHERE hour_ts >= %s AND hour_ts < %s) AS r"
+            f" LEFT JOIN (SELECT DISTINCT ts - ts MOD {HOUR} AS h FROM {TABLE}"
+            f" WHERE ts >= %s AND ts < %s) AS m ON m.h = r.hour_ts"
+            " WHERE m.h IS NULL",
+            (lo, hi, lo, hi))
+        (value,) = self._cur.fetchone()
+        return None if value is None else int(value)
 
     def replace_rollup_hour(self, hour_ts: int, values: Iterable[RollupValues]) -> None:
         """Replace every series row of one hour (within this session's transaction)."""

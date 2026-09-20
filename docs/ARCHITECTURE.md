@@ -191,7 +191,21 @@ Each closed hour is rebuilt idempotently in one transaction: delete its rollup r
 
 A minute can still arrive after its hour was rolled: a protected batch retried through an outage longer than the rolled hour, a minute closed while its hour was being rolled, or a clock stepped back across a restart. No time window makes that safe, so minute persistence is the repair point: one transaction upserts the batch and rebuilds every touched hour below `rolled_until`. Raw minute and corrected rollup therefore commit together or not at all, a lost acknowledgement leaves both committed, and the idempotent retry reproduces the same state. Hours at or above `rolled_until` need no repair because they are not rolled yet.
 
-A rolled hour whose raw evidence has already been purged is never rebuilt from newly arriving partial raw data: the write is refused, before anything is upserted, when a touched hour already has a rollup but no stored raw minute at all (a wall clock stepped back across a restart by more than raw retention).
+A rolled hour whose raw evidence has already been purged is never rebuilt from newly arriving partial raw data: the write is refused, before anything is upserted (a wall clock stepped back across a restart by more than raw retention).
+
+### Purged raw evidence
+
+One database fact decides, everywhere, whether raw minutes were physically deleted:
+
+```text
+purged(H) = a rollup_1h row exists for UTC hour H
+            and no sample_1m row exists in [H, H+1h)
+```
+
+It is exact, not heuristic. A `rollup_1h` row proves the hour once held raw minutes, because an hour with none is never given one. Purge deletes only whole hours and only after proving that hour's rollup complete (§13), so a deleted hour always leaves its rollup row behind as evidence. An hour with neither raw minutes nor a rollup row is therefore not evidence of purge at all — it was simply never recorded, and stays truthfully empty.
+
+This fact is the single source of truth for late-write refusal, raw representability, `auto` promotion, and the recorder's refusal semantics. No watermark, scalar, or third table records it; `rollup_1h` already does.
+The purge cutoff (§13) is the opposite kind of value: it is the prospective policy of what purge *may* delete next, it follows the wall clock and the configured retention, and it may move backwards when either does. It never decides representability.
 
 ## 9. Aggregation algebra
 
@@ -273,7 +287,7 @@ delete sample_1m where ts < cutoff
 ```
 
 If no contiguous rollup exists, `rolled_until` is absent and purge deletes nothing. Purge cannot delete a minute from an unrolled hour, from the two-hour margin below `rolled_until`, or from an hour a pending write can still enter and force a rebuild of.
-Each bounded step additionally proves per hour that the rollup accounts for exactly as many minutes as the hour still stores; any mismatch, missing rollup row or error deletes nothing. The same `cutoff` is the read path's raw floor, so no query ever depends on minutes that purge may already have removed.
+Each bounded step additionally proves per hour that the rollup accounts for exactly as many minutes as the hour still stores; any mismatch, missing rollup row or error deletes nothing. That proof is what makes a surviving rollup row conclusive evidence of deletion (§8), which is how reads learn what purge removed; the `cutoff` itself is prospective policy and is never used to answer that question.
 Activity/event timelines and minute-order cycle reconstruction are guaranteed only while raw `sample_1m` exists. Hourly flags preserve duration but not order.
 Compressor-start reconstruction from positive `operations_counter` steps across resets is likewise guaranteed only in the raw 1-minute retention window. A future feature requiring indefinite starts must explicitly add a persisted derived series; the core does not anticipate it.
 
@@ -283,12 +297,12 @@ Every query uses an exact half-open interval `[from,to)`.
 
 | Requested bucket | Read source |
 |---|---|
-| `1m`, `5m` | `sample_1m`; reject if required data predates its retention. |
+| `1m`, `5m` | `sample_1m`; reject if a required hour's raw evidence was purged. |
 | `1h`, `1d`, `total` | `rollup_1h` for complete rolled UTC hours, plus `sample_1m` for unrolled data and partial edge hours. |
 
 There is no data-dependent resolver or fallback chain. Missing raw minutes remain missing in every aggregate.
 
-`bucket=auto` is selected only from range length and retention:
+`bucket=auto` is selected from range length alone:
 
 | Range | Bucket |
 |---|---|
@@ -297,12 +311,13 @@ There is no data-dependent resolver or fallback chain. Missing raw minutes remai
 | Up to 120 days | `1h` |
 | Longer | `1d` |
 
-If raw retention cannot serve an automatically chosen 1m/5m range, auto promotes it to 1h. Responses are limited to 3000 buckets.
+If an automatically chosen 1m/5m range contains a purged hour, auto promotes it to 1h. Responses are limited to 3000 buckets.
 
 ## 15. Partial-hour old-range rule
 
-Non-hour-aligned `from` or `to` edges require `sample_1m` for the affected UTC hour. If an edge hour is older than raw retention, the exact interval cannot be reconstructed from its complete `rollup_1h` row.
+Non-hour-aligned `from` or `to` edges require `sample_1m` for the affected UTC hour. If that hour is purged (§8), the exact interval cannot be reconstructed from its complete `rollup_1h` row.
 The API returns HTTP 422 in that case. It never silently rounds, widens, narrows, or truncates the requested range.
+422 means the backend knows the minutes existed and were deleted. Age alone never causes it: a range that was never recorded — no raw minutes and no rollup row — is answered with `recorded_minutes = 0`, because that is exactly what "no row" means (§6). A range predating the recorder is answered the same way.
 Local calendar-date ranges remain representable from hourly rollups because Europe/Warsaw day boundaries align to whole UTC hours. Startup validates this assumption for the configured timezone.
 
 ## 16. Timezone and DST
@@ -334,7 +349,7 @@ Period summary is `bucket=total`; daily reporting is `bucket=1d`. Separate daily
 
 Bad parameters return 400. Unrepresentable retained-history resolution or old partial-hour edges return 422. Database unavailability returns 503 for history while live may remain available.
 
-Status returns facts, not health verdicts: MQTT connection/LWT/alive/last-message and parse rejects; recorder last minute, buffer size, drops, configured retention, and the last rollup and purge outcomes; database availability, rolled boundary, raw floor, and oldest/newest raw minute.
+Status returns facts, not health verdicts: MQTT connection/LWT/alive/last-message and parse rejects; recorder last minute, buffer size, drops, refused rows and the last refusal, configured retention, and the last rollup and purge outcomes; database availability, rolled boundary, prospective purge cutoff, and oldest/newest raw minute.
 
 ## 18. Live versus history
 
@@ -350,7 +365,8 @@ Live state does not survive restart. Historical state does. The current open min
 - Invalid payloads become unknown for that source/metric and increment a factual reject counter; callbacks do not crash.
 - If MariaDB is unavailable at startup, the process and live path start while schema bootstrap retries on recorder ticks.
 - Closed `MinuteRow` values enter an in-memory FIFO waiting queue of at most 60 rows. Every tick retries idempotent upserts.
-- A batch submitted to storage stays protected until a write returns success, because a failed write may still have committed. It holds at most 60 rows in addition to the waiting queue, is retried unchanged, and is never dropped.
+- A storage write has three distinguishable outcomes. A success commits the batch. An *ambiguous* failure — the database was unreachable or the acknowledgement was lost — may or may not have committed, so the batch stays protected, is retried unchanged, and is never dropped. A *definite refusal* (§8) is raised before anything is upserted, so nothing was written and nothing ever can be: exactly the rows of the refused hours are dropped and counted as `refused_rows`, and the rest of the batch is written immediately. A permanently unwritable row therefore never blocks the queue, the fresh minutes behind it, or rollup and purge.
+- The protected batch holds at most 60 rows in addition to the waiting queue.
 - On waiting-queue overflow, the oldest never-submitted row is dropped, `dropped_rows` increments, and the resulting gap remains visible.
 - Rollup or purge errors are logged and retried on a later tick. Purge safety still derives from contiguous rollup state.
 - Clock reversal cannot duplicate primary keys because minute writes upsert by `ts`.
@@ -374,7 +390,7 @@ Required ingest cases include real zero versus sentinels, invalid payloads, XTOP
 
 Required aggregation cases include associativity, ordered `last`, trailing `NULL`, raw/rollup equivalence, energy from incomplete minutes, paired COP rather than averaged COP, zero denominators, empty buckets, and both Europe/Warsaw DST transitions.
 
-Required storage/recorder cases include idempotent upsert and rollup, fail-closed purge, buffered database outages, overflow counters, delayed minutes entering reprocessed hours, exact partial edges, and HTTP 422 outside raw retention.
+Required storage/recorder cases include idempotent upsert and rollup, fail-closed purge, buffered database outages, overflow counters, delayed minutes entering reprocessed hours, exact partial edges, and HTTP 422 for purged raw — proven to survive a backward clock step and a raised or disabled retention, and proven not to fire for a range that was never recorded. The three write outcomes are covered separately: an ambiguous failure retried unchanged, and a definite refusal that drops only its own rows.
 
 A slice test covers fake MQTT messages through minute closure, storage, and `GET /api/v1/history`. MariaDB runtime smoke runs beside legacy with separate client identity, database, and port. Browser/dev-server validation is used only when a frontend task requires it.
 
@@ -395,10 +411,10 @@ Substantive stages deliver a complete vertical outcome and use a feature branch 
 5. Historical priority uses the first valid, `seen_live`, fresh source, so confirmed TOP may beat unconfirmed XTOP.
 6. The 600-second freshness value is the accepted Stage 1 policy, decided from a 22.768 h real-runtime measurement (max observed gap 305.1 s, no gap over 600 s).
 7. `rollup_1h` is exactly the time-ordered fold of its raw minutes, including `last`.
-8. A persisted minute below `rolled_until` is rebuilt into its rollup in the same transaction, unless that hour's raw evidence was already purged — then the whole write is refused before anything is upserted; purge cannot delete an unrolled minute, the two-hour margin, a pending write's hour, or any hour whose rollup it cannot prove complete.
+8. A rolled hour with a `rollup_1h` row and no `sample_1m` row is the one fact proving its raw evidence was purged; an hour with neither was never recorded. Every path uses it. A persisted minute below `rolled_until` is rebuilt into its rollup in the same transaction, unless its hour is purged — then the write is refused before anything is upserted, its rows are dropped and counted, and the rest of the batch still commits. Purge cannot delete an unrolled minute, the two-hour margin, a pending write's hour, or any hour whose rollup it cannot prove complete.
 9. Energy is `ΣW/60000`; period COP is `Σout/Σin` over paired minutes and is never an average of COP values.
 10. Coverage is expressed only as counts and percentages, without arbitrary completeness verdicts.
-11. All query intervals are exact `[from,to)`; an old unresolvable partial-hour edge returns 422 without rounding.
+11. All query intervals are exact `[from,to)`; 422 without rounding means a needed hour's raw evidence was provably purged, never merely that the range is old or never recorded.
 12. UTC is storage truth; Europe/Warsaw calendar days include correct 23/25-hour DST behavior.
 13. Activity/timeline and reset-aware compressor starts are guaranteed only while raw 1-minute data remains.
 14. Backend owns domain truth; frontend only renders backend facts.

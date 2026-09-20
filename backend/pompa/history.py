@@ -13,6 +13,14 @@ partial is its rollup row). Buckets never straddle an hour except ``1d`` and
 ``total``, whose boundaries are whole hours or the exact request edges. The
 raw-only and mixed paths therefore perform identical floating-point work.
 
+A span that must be read from ``sample_1m`` is answered only when every hour
+it overlaps can still be read truthfully. ``Session.first_purged_hour`` decides
+that from the database alone; the wall clock and ``RETENTION_1M_DAYS`` are not
+consulted, because they describe what purge may delete next, not what it
+already deleted. A 422 therefore means the minutes provably existed and are
+gone — never merely that the range is old, and never that it was never
+recorded, which is an ordinary empty answer.
+
 Missing minutes stay missing: nothing is filled, interpolated or extrapolated.
 All reads happen in one storage session, i.e. one consistent snapshot.
 """
@@ -30,7 +38,8 @@ from .catalog import METRICS_BY_KEY, RECORDED_KEYS
 from .minute import iso_utc
 from .storage import Storage
 from .timegrid import (
-    HOUR, Unrepresentable, bucket_edges, ceil_hour, choose_auto, expected_minutes, floor_hour, raw_floor,
+    HOUR, MINUTE_BUCKETS, Unrepresentable, auto_bucket, bucket_edges, ceil_hour, expected_minutes,
+    floor_hour,
 )
 
 COP_SERIES: dict[str, str] = {f"cop_{name}": name for name in PAIRS}
@@ -57,7 +66,7 @@ def _hour_pieces(a: int, b: int):
 
 
 def query(storage: Storage, start: int, end: int, bucket: str, series: Sequence[str],
-          now: float, retention_days: int) -> dict:
+          now: float) -> dict:
     """History for minute-aligned ``start < end``. Raises ``Unrepresentable`` (422)."""
     unknown = [s for s in series if s not in HISTORY_SERIES]
     if unknown:
@@ -66,8 +75,12 @@ def query(storage: Storage, start: int, end: int, bucket: str, series: Sequence[
 
     with storage.session() as s:
         rolled_until = s.rolled_until()
-        floor = raw_floor(now, rolled_until, retention_days)
-        resolved = choose_auto(start, end, floor) if bucket == "auto" else bucket
+        if bucket == "auto":
+            resolved = auto_bucket(start, end)
+            if resolved in MINUTE_BUCKETS and s.first_purged_hour(start, end) is not None:
+                resolved = "1h"  # the raw minutes are gone; whole rolled hours can still answer
+        else:
+            resolved = bucket
         edges = bucket_edges(start, end, resolved)
 
         # Complete rolled hours [roll_lo, roll_hi) come from rollup_1h, everything else from raw.
@@ -76,11 +89,12 @@ def query(storage: Storage, start: int, end: int, bucket: str, series: Sequence[
             roll_hi = max(roll_lo, min(floor_hour(end), rolled_until))
         raw_spans = [(start, end)] if roll_lo == roll_hi else [
             (a, b) for a, b in ((start, roll_lo), (roll_hi, end)) if a < b]
-        for a, _ in raw_spans:
-            if floor is not None and a < floor:
+        for a, b in raw_spans:
+            purged = s.first_purged_hour(a, b)
+            if purged is not None:
                 raise Unrepresentable(
-                    f"bucket={resolved} needs raw minutes from {iso_utc(a)}, but raw minutes are retained"
-                    f" only from {iso_utc(floor)}; the range is not rounded")
+                    f"bucket={resolved} needs the raw minutes of {iso_utc(a)}–{iso_utc(b)}, but the raw"
+                    f" evidence of hour {iso_utc(purged)} was purged; the range is not rounded")
 
         columns = minute_columns(needed)
         raw = [r for a, b in raw_spans for r in s.read_minutes(a, b, columns)]
