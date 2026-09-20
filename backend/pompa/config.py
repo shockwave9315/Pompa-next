@@ -26,7 +26,7 @@ class Settings:
     db_name: str
     api_host: str
     api_port: int
-    # Stage 1 bootstrap value only; the >=24h measurement decides the real policy.
+    # Accepted Stage 1 global freshness policy; configurable through STALE_AFTER_SECONDS.
     stale_after_seconds: int
     write_buffer_rows: int
     log_level: str

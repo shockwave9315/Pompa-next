@@ -85,12 +85,18 @@ scripts/smoke.sh                         # health, status, last-hour gaps, per-t
 Update: `git pull && docker compose up -d --build backend`. Stop: `docker compose down`
 (keeps the `db-data` volume). Run exactly one backend container.
 
-## 24-hour freshness measurement
+## Freshness re-measurement procedure
+
+Stage 1's real-runtime freshness measurement is complete: an owner-accepted 22.768 h
+uninterrupted run on CT109 decided `STALE_AFTER_SECONDS=600` as the accepted global policy (see
+[`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) §4). The procedure below is kept for any
+future re-measurement if new evidence prompts revisiting the policy.
 
 The process accumulates the evidence in memory from its start; a restart resets it.
 
 1. Deploy, then note `recorder.process_start` from `scripts/smoke.sh`.
-2. Leave it running for at least 24 hours without restarting the backend.
+2. Leave it running for the desired observation window without restarting the backend (the
+   original Stage 1 target was at least 24 hours).
 3. Archive the evidence:
 
    ```sh

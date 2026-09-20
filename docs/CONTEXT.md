@@ -68,7 +68,7 @@ An MQTT retained message is not history evidence. Each physical source/topic mus
 
 Historical source selection uses the highest-priority source that is valid, `seen_live`, and fresh. A fresh lower-priority TOP source can therefore beat a retained or unconfirmed XTOP source.
 
-`STALE_AFTER_SECONDS=600` is only a bootstrap default. Stage 1 must measure relevant publication gaps, LWT, and retained behavior for at least 24 hours before freshness policy is accepted.
+`STALE_AFTER_SECONDS=600` is the accepted Stage 1 global freshness policy, decided from a real-runtime measurement on CT109 (22.768 h uninterrupted, owner-accepted short of the originally planned ≥24 h target; see `docs/ARCHITECTURE.md` §4).
 
 Canonical history is stored in a wide `sample_1m` table. Long-term history later uses a narrow `rollup_1h` table.
 
