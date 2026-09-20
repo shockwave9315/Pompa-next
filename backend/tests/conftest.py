@@ -91,8 +91,14 @@ class FakeSession:
             del self.rows[t]
         return len(doomed)
 
+    def has_raw_minutes(self, start, end):
+        return any(start <= ts < end for ts in self.rows)
+
     def rolled_until(self):
         return max(h for h, _ in self.rollup) + 3600 if self.rollup else None
+
+    def rollup_exists(self, hour_ts):
+        return any(h == hour_ts for h, _ in self.rollup)
 
     def replace_rollup_hour(self, hour_ts, values):
         assert hour_ts % 3600 == 0

@@ -191,6 +191,8 @@ Each closed hour is rebuilt idempotently in one transaction: delete its rollup r
 
 A minute can still arrive after its hour was rolled: a protected batch retried through an outage longer than the rolled hour, a minute closed while its hour was being rolled, or a clock stepped back across a restart. No time window makes that safe, so minute persistence is the repair point: one transaction upserts the batch and rebuilds every touched hour below `rolled_until`. Raw minute and corrected rollup therefore commit together or not at all, a lost acknowledgement leaves both committed, and the idempotent retry reproduces the same state. Hours at or above `rolled_until` need no repair because they are not rolled yet.
 
+A rolled hour whose raw evidence has already been purged is never rebuilt from newly arriving partial raw data: the write is refused, before anything is upserted, when a touched hour already has a rollup but no stored raw minute at all (a wall clock stepped back across a restart by more than raw retention).
+
 ## 9. Aggregation algebra
 
 All stored metrics and derived series use:
@@ -393,7 +395,7 @@ Substantive stages deliver a complete vertical outcome and use a feature branch 
 5. Historical priority uses the first valid, `seen_live`, fresh source, so confirmed TOP may beat unconfirmed XTOP.
 6. The 600-second freshness value is the accepted Stage 1 policy, decided from a 22.768 h real-runtime measurement (max observed gap 305.1 s, no gap over 600 s).
 7. `rollup_1h` is exactly the time-ordered fold of its raw minutes, including `last`.
-8. A persisted minute below `rolled_until` is rebuilt into its rollup in the same transaction, and purge cannot delete an unrolled minute, the two-hour margin, a pending write's hour, or any hour whose rollup it cannot prove complete.
+8. A persisted minute below `rolled_until` is rebuilt into its rollup in the same transaction, unless that hour's raw evidence was already purged — then the whole write is refused before anything is upserted; purge cannot delete an unrolled minute, the two-hour margin, a pending write's hour, or any hour whose rollup it cannot prove complete.
 9. Energy is `ΣW/60000`; period COP is `Σout/Σin` over paired minutes and is never an average of COP values.
 10. Coverage is expressed only as counts and percentages, without arbitrary completeness verdicts.
 11. All query intervals are exact `[from,to)`; an old unresolvable partial-hour edge returns 422 without rounding.

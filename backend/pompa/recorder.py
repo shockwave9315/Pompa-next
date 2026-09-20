@@ -27,6 +27,9 @@ Rollup and purge (after a tick whose flush fully succeeded):
   rolled, a clock step back across a restart — therefore commits together with
   its corrected rollup, or not at all. A lost acknowledgement leaves both
   committed; the retry repeats an idempotent upsert and an idempotent rebuild.
+  A rolled hour whose raw evidence has already been purged is never rebuilt
+  from newly arriving partial raw data; the write fails closed instead
+  (``RebuildRefused``).
 * Closed hours are rolled in ascending order, one transaction per hour, so
   ``rolled_until = MAX(hour_ts) + 1 h`` bounds a contiguous rolled range.
   Raw minutes at or above it are simply not rolled yet.
@@ -60,6 +63,15 @@ class PurgeRefused(Exception):
     """Purge could not prove that deleting raw minutes loses nothing; nothing was deleted."""
 
 
+class RebuildRefused(Exception):
+    """A touched hour is already rolled but its raw evidence was already purged.
+
+    Rebuilding it from a newly arrived partial write would silently replace a
+    complete rollup with a partial one, so the whole write is refused before
+    anything is upserted.
+    """
+
+
 def rebuild_hour(session: Session, hour_ts: int) -> None:
     """Replace one hour of ``rollup_1h`` with the ordered fold of its stored minutes.
 
@@ -75,13 +87,26 @@ def rebuild_hour(session: Session, hour_ts: int) -> None:
 
 
 def persist(storage: Storage, rows: list[MinuteRow]) -> None:
-    """Upsert minutes and rebuild every touched, already rolled hour in one transaction."""
+    """Upsert minutes and rebuild every touched, already rolled hour in one transaction.
+
+    A touched hour that is already rolled but whose raw evidence was already
+    purged (a wall clock stepped back across a restart by more than raw
+    retention) cannot be rebuilt from the newly arriving minute alone: doing
+    so would replace its complete rollup with a partial one. That case is
+    checked before the upsert and refuses the whole transaction.
+    """
     with storage.session() as s:
-        s.upsert_minutes(rows)
         rolled_until = s.rolled_until()
-        if rolled_until is not None:
-            for hour_ts in sorted({floor_hour(r.ts) for r in rows if r.ts < rolled_until}):
-                rebuild_hour(s, hour_ts)
+        touched = (sorted({floor_hour(r.ts) for r in rows if r.ts < rolled_until})
+                  if rolled_until is not None else [])
+        for hour_ts in touched:
+            if s.rollup_exists(hour_ts) and not s.has_raw_minutes(hour_ts, hour_ts + HOUR):
+                raise RebuildRefused(
+                    f"hour {iso_utc(hour_ts)} is rolled but its raw evidence was already purged;"
+                    " refusing to rebuild it from a new partial write")
+        s.upsert_minutes(rows)
+        for hour_ts in touched:
+            rebuild_hour(s, hour_ts)
 
 
 def roll_next_hour(storage: Storage, closed_before: int) -> int | None:

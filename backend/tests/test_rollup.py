@@ -12,7 +12,7 @@ from pompa import recorder as recorder_module
 from pompa.aggregation import SERIES, fold_minutes
 from pompa.ingest import Ingest
 from pompa.minute import MinuteAccumulator
-from pompa.recorder import Recorder, persist, rebuild_hour, roll_next_hour
+from pompa.recorder import Recorder, RebuildRefused, persist, rebuild_hour, roll_next_hour
 from pompa.storage import StorageUnavailable
 
 H = 3600
@@ -154,6 +154,46 @@ def test_batch_touching_rolled_and_unrolled_hours(any_storage):
     got = rolled(any_storage)
     assert got[(H0, "outside_temp")][3] == 50.0 and got[(H0 + H, "outside_temp")][3] == 51.0
     assert (H0 + 2 * H, "outside_temp") not in got
+    assert_exact(any_storage)
+
+
+# ------------------------------------------------------------------ purged rolled hour
+
+
+def test_late_minute_into_a_purged_rolled_hour_is_refused(any_storage):
+    """Raw evidence of a rolled hour fully purged, then a late minute lands in it: refuse, don't rebuild."""
+    persist(any_storage, minutes(H0, 60))
+    roll_all(any_storage)
+    before = rolled(any_storage)
+    with any_storage.session() as s:
+        s.delete_minutes_before(H0 + H)  # simulate purge: raw gone, rollup stays
+    late = row(H0 + 30 * 60, main_outlet_temp=-40.0)
+    with pytest.raises(RebuildRefused):
+        persist(any_storage, [late])
+    assert rolled(any_storage) == before  # existing rollup left byte-for-byte unchanged
+    with any_storage.session() as s:
+        assert s.read_minutes(H0, H0 + H) == []  # the new minute was not written either
+
+
+def test_late_minute_into_rolled_hour_with_raw_still_present_is_unaffected(any_storage):
+    """The ordinary late-write repair is untouched when the hour's raw evidence still exists."""
+    persist(any_storage, minutes(H0, 60))
+    roll_all(any_storage)
+    late = row(H0 + 30 * 60, main_outlet_temp=123.0)
+    persist(any_storage, [late])  # not refused: raw for the hour still exists
+    assert rolled(any_storage)[(H0, "main_outlet_temp")][3] == 123.0
+    assert_exact(any_storage)
+
+
+def test_never_rolled_empty_hour_is_not_treated_as_purged(any_storage):
+    """An hour with no rollup row of its own, inside the rolled range, is not mistaken for purged."""
+    persist(any_storage, minutes(H0, 30) + minutes(H0 + 2 * H, 30))  # hour 1 always empty
+    roll_all(any_storage, closed_before=H0 + 3 * H)
+    assert until(any_storage) == H0 + 3 * H
+    assert (H0 + H, "recorded") not in rolled(any_storage)  # never had a rollup row
+    late = row(H0 + H + 600, outside_temp=-10.0)
+    persist(any_storage, [late])  # not refused: no rollup ever existed for this hour
+    assert rolled(any_storage)[(H0 + H, "outside_temp")] == [1, -10.0, -10.0, -10.0, -10.0]
     assert_exact(any_storage)
 
 

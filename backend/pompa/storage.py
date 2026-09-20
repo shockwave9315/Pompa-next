@@ -114,6 +114,11 @@ class Session:
         self._cur.execute(f"DELETE FROM {TABLE} WHERE ts < %s", (cutoff,))
         return self._cur.rowcount
 
+    def has_raw_minutes(self, start: int, end: int) -> bool:
+        """Whether any ``sample_1m`` row falls in ``[start, end)``."""
+        self._cur.execute(f"SELECT 1 FROM {TABLE} WHERE ts >= %s AND ts < %s LIMIT 1", (start, end))
+        return self._cur.fetchone() is not None
+
     # ---------------------------------------------------------------- rollup_1h
 
     def rolled_until(self) -> int | None:
@@ -121,6 +126,12 @@ class Session:
         self._cur.execute(f"SELECT MAX(hour_ts) FROM {ROLLUP}")
         (value,) = self._cur.fetchone()
         return None if value is None else int(value) + HOUR
+
+    def rollup_exists(self, hour_ts: int) -> bool:
+        """Whether ``rollup_1h`` already has a row for this hour."""
+        _check_hour(hour_ts)
+        self._cur.execute(f"SELECT 1 FROM {ROLLUP} WHERE hour_ts = %s LIMIT 1", (hour_ts,))
+        return self._cur.fetchone() is not None
 
     def replace_rollup_hour(self, hour_ts: int, values: Iterable[RollupValues]) -> None:
         """Replace every series row of one hour (within this session's transaction)."""
