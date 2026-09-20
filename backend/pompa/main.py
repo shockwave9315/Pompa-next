@@ -21,6 +21,7 @@ from .minute import MinuteAccumulator
 from .mqtt import MqttAdapter
 from .recorder import Recorder
 from .storage import Storage
+from .timegrid import LOCAL_TZ_NAME, validate_local_days
 
 log = logging.getLogger("pompa")
 
@@ -38,12 +39,19 @@ def main() -> None:
     logging.basicConfig(level=settings.log_level, datefmt="%Y-%m-%dT%H:%M:%SZ",
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
+    try:
+        # Daily buckets are composed of whole UTC hours; stop if the timezone database disagrees.
+        validate_local_days()
+    except RuntimeError as e:
+        print(f"timezone error: {e}", file=sys.stderr)
+        sys.exit(2)
+
     process_start = time.time()
     ingest = Ingest(settings.stale_after_seconds)
     storage = Storage(settings.db_host, settings.db_port, settings.db_user,
                       settings.db_password, settings.db_name)
     recorder = Recorder(ingest, MinuteAccumulator(ingest, process_start), storage,
-                        settings.write_buffer_rows)
+                        settings.write_buffer_rows, settings.retention_1m_days)
     adapter = MqttAdapter(settings, recorder)
     stop = threading.Event()
 
@@ -56,8 +64,10 @@ def main() -> None:
 
     @asynccontextmanager
     async def lifespan(_app):
-        log.info("process start %.3f, STALE_AFTER_SECONDS=%d, buffer %d rows",
-                 process_start, settings.stale_after_seconds, settings.write_buffer_rows)
+        log.info("process start %.3f, STALE_AFTER_SECONDS=%d, buffer %d rows,"
+                 " RETENTION_1M_DAYS=%d, calendar days in %s",
+                 process_start, settings.stale_after_seconds, settings.write_buffer_rows,
+                 settings.retention_1m_days, LOCAL_TZ_NAME)
         thread = threading.Thread(target=run_recorder, name="recorder", daemon=True)
         thread.start()
         adapter.start()

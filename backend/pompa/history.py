@@ -1,51 +1,163 @@
-"""1-minute history composition from stored minutes (Stage 1 read path).
+"""History engine: exact ``[from, to)`` buckets composed from ``sample_1m`` and ``rollup_1h``.
 
-Pure function of the stored rows: no row → ``recorded_minutes = 0``; a stored
-``NULL`` → ``recorded_minutes = 1`` with a null series value. Nothing is filled.
+Read paths are fixed by the bucket, never by the data:
+
+* ``1m``, ``5m``: ``sample_1m`` only.
+* ``1h``, ``1d``, ``total``: ``rollup_1h`` for complete UTC hours below
+  ``rolled_until``; ``sample_1m`` for partial edge hours and for hours at or
+  above ``rolled_until``.
+
+Every bucket is the time-ordered combine of per-UTC-hour partials, each the
+fold of that hour's minutes inside the bucket (a complete rolled hour's
+partial is its rollup row). Buckets never straddle an hour except ``1d`` and
+``total``, whose boundaries are whole hours or the exact request edges. The
+raw-only and mixed paths therefore perform identical floating-point work.
+
+A span that must be read from ``sample_1m`` is answered only when every hour
+it overlaps can still be read truthfully. ``Session.first_purged_hour`` decides
+that from the database alone; the wall clock and ``RETENTION_1M_DAYS`` are not
+consulted, because they describe what purge may delete next, not what it
+already deleted. A 422 therefore means the minutes provably existed and are
+gone — never merely that the range is old, and never that it was never
+recorded, which is an ordinary empty answer.
+
+Missing minutes stay missing: nothing is filled, interpolated or extrapolated.
+All reads happen in one storage session, i.e. one consistent snapshot.
 """
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections.abc import Sequence
 
-from .catalog import METRICS_BY_KEY
-from .minute import MINUTE, iso_utc
+from .aggregation import (
+    PAIRS, RECORDED, Stats, combine_maps, cop, coverage_percent, energy_kwh, fold_minutes, is_power,
+    minute_columns,
+)
+from .catalog import METRICS_BY_KEY, RECORDED_KEYS
+from .minute import iso_utc
+from .storage import Storage
+from .timegrid import (
+    HOUR, MINUTE_BUCKETS, Unrepresentable, auto_bucket, bucket_edges, ceil_hour, expected_minutes,
+    floor_hour,
+)
+
+COP_SERIES: dict[str, str] = {f"cop_{name}": name for name in PAIRS}
+COP_LABELS = {"cop_co": "COP CO", "cop_dhw": "COP CWU", "cop_total": "COP łącznie"}
+HISTORY_SERIES: tuple[str, ...] = RECORDED_KEYS + tuple(COP_SERIES)
+HOURLY_BUCKETS = ("1h", "1d", "total")
 
 
-def build_1m(start: int, end: int, keys: Sequence[str],
-             rows: Sequence[tuple[int, dict[str, float | None]]], now: float) -> dict:
-    """``start``/``end`` are minute-aligned; ``rows`` are ``(ts, values)`` in ``[start, end)``."""
-    by_ts = dict(rows)
-    starts = range(start, end, MINUTE)
+def _needed(series: Sequence[str]) -> tuple[str, ...]:
+    needed = {RECORDED}
+    for name in series:
+        if name in COP_SERIES:
+            needed.update(PAIRS[COP_SERIES[name]])
+        else:
+            needed.add(name)
+    return tuple(sorted(needed))
 
+
+def _hour_pieces(a: int, b: int):
+    h = floor_hour(a)
+    while h < b:
+        yield max(a, h), min(b, h + HOUR)
+        h += HOUR
+
+
+def query(storage: Storage, start: int, end: int, bucket: str, series: Sequence[str],
+          now: float) -> dict:
+    """History for minute-aligned ``start < end``. Raises ``Unrepresentable`` (422)."""
+    unknown = [s for s in series if s not in HISTORY_SERIES]
+    if unknown:
+        raise ValueError(f"unknown series: {', '.join(unknown)}")
+    needed = _needed(series)
+
+    with storage.session() as s:
+        rolled_until = s.rolled_until()
+        if bucket == "auto":
+            resolved = auto_bucket(start, end)
+            if resolved in MINUTE_BUCKETS and s.first_purged_hour(start, end) is not None:
+                resolved = "1h"  # the raw minutes are gone; whole rolled hours can still answer
+        else:
+            resolved = bucket
+        edges = bucket_edges(start, end, resolved)
+
+        # Complete rolled hours [roll_lo, roll_hi) come from rollup_1h, everything else from raw.
+        roll_lo = roll_hi = ceil_hour(start)
+        if resolved in HOURLY_BUCKETS and rolled_until is not None:
+            roll_hi = max(roll_lo, min(floor_hour(end), rolled_until))
+        raw_spans = [(start, end)] if roll_lo == roll_hi else [
+            (a, b) for a, b in ((start, roll_lo), (roll_hi, end)) if a < b]
+        for a, b in raw_spans:
+            purged = s.first_purged_hour(a, b)
+            if purged is not None:
+                raise Unrepresentable(
+                    f"bucket={resolved} needs the raw minutes of {iso_utc(a)}–{iso_utc(b)}, but the raw"
+                    f" evidence of hour {iso_utc(purged)} was purged; the range is not rounded")
+
+        columns = minute_columns(needed)
+        raw = [r for a, b in raw_spans for r in s.read_minutes(a, b, columns)]
+        rolled: dict[int, dict[str, Stats]] = {}
+        for h, name, n, v_sum, v_min, v_max, v_last in s.read_rollup(roll_lo, roll_hi, needed):
+            rolled.setdefault(h, {})[name] = Stats(n, v_sum, v_min, v_max, v_last)
+
+    raw_ts = [ts for ts, _ in raw]
+    per_bucket: list[dict[str, Stats]] = []
+    for a, b in edges:
+        acc: dict[str, Stats] = {}
+        for pa, pb in _hour_pieces(a, b):
+            if roll_lo <= pa and pb <= roll_hi:
+                part = rolled.get(pa, {})
+            else:
+                part = fold_minutes(raw[bisect_left(raw_ts, pa):bisect_left(raw_ts, pb)], needed)
+            acc = combine_maps(acc, part)
+        per_bucket.append(acc)
+
+    return _response(start, end, bucket, resolved, edges, per_bucket, series, now)
+
+
+def _response(start, end, requested, resolved, edges, per_bucket, series, now) -> dict:
     buckets = []
-    for ts in starts:
-        recorded = 1 if ts in by_ts else 0
-        expected = 1 if ts + MINUTE <= now else 0  # elapsed minutes only
+    for (a, b), acc in zip(edges, per_bucket):
+        expected = expected_minutes(a, b, now)
+        recorded = acc[RECORDED].n if RECORDED in acc else 0
         buckets.append({
-            "start": iso_utc(ts),
-            "end": iso_utc(ts + MINUTE),
+            "start": iso_utc(a),
+            "end": iso_utc(b),
             "expected_minutes": expected,
             "recorded_minutes": recorded,
-            "coverage_percent": round(100.0 * recorded / expected, 1) if expected else None,
+            "coverage_percent": coverage_percent(recorded, expected),
         })
 
-    series = {}
-    for key in keys:
-        metric = METRICS_BY_KEY[key]
-        values = [by_ts[ts][key] if ts in by_ts else None for ts in starts]
-        entry = {"label": metric.label, "unit": metric.unit, "kind": metric.kind}
-        # A 1-minute bucket holds at most one value, so it is its own avg/last, min and max.
-        entry["avg" if metric.kind == "mean" else "last"] = values
-        entry["min"] = values
-        entry["max"] = values
-        entry["minutes"] = [0 if v is None else 1 for v in values]
-        series[key] = entry
+    out = {}
+    for name in series:
+        if name in COP_SERIES:
+            pair_in, pair_out = PAIRS[COP_SERIES[name]]
+            facts = [cop(acc.get(pair_in), acc.get(pair_out)) for acc in per_bucket]
+            entry = {"label": COP_LABELS[name], "unit": None, "kind": "cop"}
+            for field in ("cop", "paired_minutes", "input_kwh", "output_kwh"):
+                entry[field] = [f[field] for f in facts]
+        else:
+            metric = METRICS_BY_KEY[name]
+            stats = [acc.get(name) for acc in per_bucket]
+            entry = {"label": metric.label, "unit": metric.unit, "kind": metric.kind}
+            if metric.kind == "mean":
+                entry["avg"] = [None if st is None else st.avg for st in stats]
+            else:
+                entry["last"] = [None if st is None else st.last for st in stats]
+            entry["min"] = [None if st is None else st.min for st in stats]
+            entry["max"] = [None if st is None else st.max for st in stats]
+            entry["minutes"] = [0 if st is None else st.n for st in stats]
+            if is_power(name):
+                entry["kwh"] = [energy_kwh(st) for st in stats]
+        out[name] = entry
 
     return {
         "from": iso_utc(start),
         "to": iso_utc(end),
-        "bucket": "1m",
+        "bucket": resolved,
+        "requested_bucket": requested,
         "buckets": buckets,
-        "series": series,
+        "series": out,
     }

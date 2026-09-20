@@ -29,6 +29,8 @@ class Settings:
     # Accepted Stage 1 global freshness policy; configurable through STALE_AFTER_SECONDS.
     stale_after_seconds: int
     write_buffer_rows: int
+    # sample_1m retention in days; 0 disables purge. rollup_1h is kept indefinitely.
+    retention_1m_days: int
     log_level: str
 
 
@@ -79,5 +81,6 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         api_port=_int(env, "API_PORT", 8001, 1, 65535),
         stale_after_seconds=_int(env, "STALE_AFTER_SECONDS", 600, 60, 86400),
         write_buffer_rows=_int(env, "WRITE_BUFFER_ROWS", 60, 1, 10000),
+        retention_1m_days=_int(env, "RETENTION_1M_DAYS", 365, 0, 36500),
         log_level=log_level,
     )

@@ -2,40 +2,46 @@
 
 ## Current stage
 
-**Stage 1 — Core Backend**
+**Stage 2 — Historical Engine**.
 
-Implementation complete. Runtime validation complete: a 22.768 h uninterrupted real-runtime
-measurement on CT109 (owner-accepted short of the originally planned ≥24 h target). Freshness
-decision complete: `STALE_AFTER_SECONDS=600` is the accepted global policy (max observed gap
-305.1 s, no gap over 600 s). Ready for merge.
+### Stage 1
+
+DONE. Merged to `main` (merge commit `ba70fefa94b3000f518e2273283bf69a4abec05f`). Freshness policy
+accepted: `STALE_AFTER_SECONDS=600`.
+
+Runtime measurement: 22.768 h uninterrupted on CT109, accepted short of the originally planned
+≥24 h target (max observed gap 305.059 s, no gap over 600 s).
+
+### Stage 2
+
+Implementation complete. Independent adversarial review complete, and its finding applied: reads,
+writes and the write queue now share one database fact for purged raw evidence (see
+`docs/ARCHITECTURE.md` §8). Not merged, not deployed to CT109. Ready for final review.
 
 ## Goal
 
-Build the first complete vertical slice from live MQTT input to a queryable canonical minute history.
+Turn canonical minutes into exact aggregates: one aggregation algebra, hourly rollups, mixed
+raw/rollup reads, energy, paired COP, coverage facts, calendar days and safe retention.
 
 ## In scope
 
-- Configuration and the metric catalog for core recorded metrics.
-- MQTT ingest and retained/per-source `seen_live` semantics.
-- `MinuteAccumulator` and the full-minute source-alive rule.
-- Wide `sample_1m` storage in MariaDB.
-- Recorder and bounded write buffer.
-- `GET /api/v1/history` with the initial 1-minute contract.
-- `GET /api/v1/status` and `GET /health`.
-- Focused unit, storage, slice, and runtime-smoke tests.
-- Runtime smoke beside legacy using separate identity, database, and port.
-- Topic-gap, LWT, and retained-message measurements: a 22.768 h uninterrupted run, accepted
-  short of the originally planned ≥24 h target.
-
-`/api/v1` is the fresh Pompa Next API namespace. It does not retain legacy `/api/v2` numbering or compatibility.
+- `Stats` algebra, derived minute series, energy and paired-minute COP.
+- `rollup_1h`, built from `sample_1m` in timestamp order, rebuilt idempotently per hour.
+- Late-write correctness: a minute write and the rebuild of every rolled hour it touches commit in
+  one transaction.
+- Mixed `rollup_1h`/`sample_1m` reads for `1h`, `1d` and `total`; `sample_1m` only for `1m` and `5m`.
+- `auto`, the 3000-bucket limit and exact `[from, to)` edges, with 422 only for provably purged raw.
+- Europe/Warsaw calendar days with 1380- and 1500-minute DST days, validated at startup.
+- Coverage facts, `RETENTION_1M_DAYS` and the fail-closed hourly purge, whose per-hour proof is
+  what makes a surviving rollup row evidence that raw was deleted.
+- `GET /api/v1/history` extended in place; factual rollup, purge and retention status.
 
 ## Out of scope
 
-- `rollup_1h`, purge, and 5m/1h/1d/total aggregation.
-- Energy and COP reports, coverage aggregation, and DST query behavior.
-- Frontend, activity/timeline, cycles, and compressor-start statistics.
-- 193-capability explorer, control/SET, and user settings.
+- Frontend, live and metrics endpoints, timeline/activity, cycles and compressor starts.
+- Control/SET, user settings, and any legacy compatibility or migration.
+- Changing the accepted Stage 1 freshness policy or its runtime measurement result.
 
 ## Next
 
-**Stage 2 — Historical Engine**
+**Stage 3 — Complete Backend API**

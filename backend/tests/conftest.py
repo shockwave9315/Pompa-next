@@ -1,5 +1,6 @@
 import os
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -38,14 +39,106 @@ IDLE = {
 
 
 
+def row(ts, **values):
+    """A MinuteRow; unspecified metrics are NULL."""
+    from pompa.catalog import RECORDED_KEYS
+    from pompa.minute import MinuteRow
+
+    return MinuteRow(ts, {k: values.get(k) for k in RECORDED_KEYS})
+
+
+def sample(ts, i):
+    """A varied minute: real zeros, NULLs and an unpaired power channel now and then."""
+    return row(ts, main_outlet_temp=30.0 + (i % 7) * 0.125, outside_temp=None if i % 5 == 0 else -2.5 + i % 3,
+               co_power_consumption=0.0 if i % 11 == 0 else 800.0 + i,
+               co_power_production=None if i % 13 == 0 else 3000.0 + 2 * i,
+               dhw_power_consumption=18.0, dhw_power_production=0.0 if i % 2 else 1500.0,
+               operating_mode=float(i % 4), operations_counter=7000.0 + i // 10)
+
+
+def minutes(start, count, step=60):
+    return [sample(start + step * i, i) for i in range(count)]
+
+
+class FakeSession:
+    """Mirrors ``pompa.storage.Session`` over the dictionaries of a FakeStorage transaction."""
+
+    def __init__(self, rows, rollup):
+        self.rows = rows  # ts -> values
+        self.rollup = rollup  # (hour_ts, series) -> (n, sum, min, max, last)
+
+    def upsert_minutes(self, rows):
+        for r in rows:
+            if r.ts % 60:
+                raise ValueError(f"unaligned minute ts {r.ts}")
+            self.rows[r.ts] = dict(r.values)
+
+    def read_minutes(self, start, end, keys=None):
+        from pompa.catalog import RECORDED_KEYS
+
+        keys = RECORDED_KEYS if keys is None else keys
+        return [(ts, {k: v[k] for k in keys}) for ts, v in sorted(self.rows.items()) if start <= ts < end]
+
+    def first_minute_at_or_after(self, ts):
+        return min((t for t in self.rows if t >= ts), default=None)
+
+    def minute_bounds(self):
+        return (min(self.rows), max(self.rows)) if self.rows else (None, None)
+
+    def delete_minutes_before(self, cutoff):
+        doomed = [t for t in self.rows if t < cutoff]
+        for t in doomed:
+            del self.rows[t]
+        return len(doomed)
+
+    def rolled_until(self):
+        return max(h for h, _ in self.rollup) + 3600 if self.rollup else None
+
+    def first_purged_hour(self, start, end):
+        """Same fact as MariaDB: whole overlapped hours, rollup present, no raw inside."""
+        lo, hi = start - start % 3600, -(-end // 3600) * 3600
+        for h in sorted({h for h, _ in self.rollup if lo <= h < hi}):
+            if not any(h <= ts < h + 3600 for ts in self.rows):
+                return h
+        return None
+
+    def replace_rollup_hour(self, hour_ts, values):
+        assert hour_ts % 3600 == 0
+        for key in [k for k in self.rollup if k[0] == hour_ts]:
+            del self.rollup[key]
+        for series, n, *stats in values:
+            assert n > 0
+            self.rollup[(hour_ts, series)] = (n, *stats)
+
+    def read_rollup(self, start, end, series):
+        return [(h, s, *v) for (h, s), v in sorted(self.rollup.items()) if start <= h < end and s in series]
+
+    def hour_counts(self, start, end, series):
+        counts = {}
+        for ts in self.rows:
+            if start <= ts < end:
+                counts[ts - ts % 3600] = counts.get(ts - ts % 3600, 0) + 1
+        return [(h, c, self.rollup[(h, series)][0] if (h, series) in self.rollup else None)
+                for h, c in sorted(counts.items())]
+
+
 class FakeStorage:
-    """In-memory stand-in for Storage with a switchable outage."""
+    """In-memory stand-in for Storage: one transaction per session, switchable faults.
+
+    ``available=False`` fails every session before it starts. ``fail_commit``
+    (a count) makes that many sessions raise instead of committing; with
+    ``ack_lost=True`` those sessions commit first and then raise.
+    """
 
     def __init__(self):
         self.available = True
         self.rows = {}  # ts -> values
+        self.rollup = {}  # (hour_ts, series) -> (n, sum, min, max, last)
         self.schema_calls = 0
         self.upsert_calls = 0
+        self.sessions = 0
+        self.fail_commit = 0
+        self.ack_lost = False
 
     def _check(self):
         from pompa.storage import StorageUnavailable
@@ -57,19 +150,33 @@ class FakeStorage:
         self.schema_calls += 1
         self._check()
 
-    def upsert(self, rows):
-        self.upsert_calls += 1
-        self._check()
-        for r in rows:
-            self.rows[r.ts] = dict(r.values)
+    @contextmanager
+    def session(self):
+        from pompa.storage import StorageUnavailable
 
-    def read(self, start, end, keys):
+        self.sessions += 1
         self._check()
-        return [(ts, {k: v[k] for k in keys}) for ts, v in sorted(self.rows.items()) if start <= ts < end]
+        tx = FakeSession(dict(self.rows), dict(self.rollup))
+        tx.upsert_minutes = self._counting(tx.upsert_minutes)
+        yield tx
+        if self.fail_commit:
+            self.fail_commit -= 1
+            if self.ack_lost:
+                self.rows, self.rollup = tx.rows, tx.rollup
+                raise StorageUnavailable("ack lost")
+            raise StorageUnavailable("commit failed")
+        self.rows, self.rollup = tx.rows, tx.rollup
 
-    def bounds(self):
+    def _counting(self, upsert):
+        def wrapped(rows):
+            self.upsert_calls += 1
+            return upsert(rows)
+        return wrapped
+
+    def facts(self):
         self._check()
-        return (min(self.rows), max(self.rows)) if self.rows else (None, None)
+        tx = FakeSession(self.rows, self.rollup)
+        return (*tx.minute_bounds(), tx.rolled_until())
 
 
 @pytest.fixture
@@ -89,4 +196,15 @@ def mariadb():
     )
     with storage._connection() as conn, conn.cursor() as cur:
         cur.execute("DROP TABLE IF EXISTS sample_1m")
+        cur.execute("DROP TABLE IF EXISTS rollup_1h")
+    return storage
+
+
+@pytest.fixture(params=["fake", "mariadb"])
+def any_storage(request):
+    """Both backends: tests using it must behave identically on FakeStorage and MariaDB."""
+    if request.param == "fake":
+        return FakeStorage()
+    storage = request.getfixturevalue("mariadb")
+    storage.ensure_schema()
     return storage

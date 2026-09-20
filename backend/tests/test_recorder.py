@@ -1,8 +1,10 @@
 """Recorder: event coordination, bounded write buffer, outage and recovery."""
 
 import threading
+from contextlib import contextmanager
 
 from conftest import RUNNING, T0, FakeStorage
+from conftest import row as conf_row
 from pompa.ingest import Ingest
 from pompa.minute import MinuteAccumulator
 from pompa.recorder import Recorder
@@ -70,13 +72,7 @@ class AckLostStorage(FakeStorage):
 
     def __init__(self):
         super().__init__()
-        self.lose_ack = True
-
-    def upsert(self, rows):
-        super().upsert(rows)
-        if self.lose_ack:
-            self.lose_ack = False
-            raise StorageUnavailable("ack lost")
+        self.fail_commit, self.ack_lost = 1, True
 
 
 def test_repeated_flush_is_safe():
@@ -203,10 +199,10 @@ def test_concurrent_events_and_ticks():
 
 
 class BlockingStorage(FakeStorage):
-    """upsert() records each submitted batch; the first call blocks until released.
+    """Records each submitted minute batch; the first write blocks until released.
 
-    ``outcome`` of that first call: "ok" writes, "fail" writes nothing and
-    raises, "ack_lost" writes and then raises. Later calls succeed at once.
+    ``outcome`` of that first write: "ok" commits, "fail" commits nothing and
+    raises, "ack_lost" commits and then raises. Later writes succeed at once.
     """
 
     def __init__(self, outcome="ok"):
@@ -215,19 +211,25 @@ class BlockingStorage(FakeStorage):
         self.batches = []
         self.started = threading.Event()
         self.release = threading.Event()
+        if outcome == "ack_lost":
+            self.fail_commit, self.ack_lost = 1, True
 
-    def upsert(self, rows):
-        self.batches.append([r.ts for r in rows])
-        if len(self.batches) > 1:
-            return super().upsert(rows)
-        self.started.set()
-        assert self.release.wait(5), "test never released the write"
-        if self.outcome == "fail":
-            self.upsert_calls += 1
-            raise StorageUnavailable("write failed")
-        super().upsert(rows)
-        if self.outcome == "ack_lost":
-            raise StorageUnavailable("ack lost")
+    @contextmanager
+    def session(self):
+        with super().session() as tx:
+            upsert = tx.upsert_minutes
+
+            def blocking_upsert(rows):
+                self.batches.append([r.ts for r in rows])
+                if len(self.batches) == 1:
+                    self.started.set()
+                    assert self.release.wait(5), "test never released the write"
+                    if self.outcome == "fail":
+                        raise StorageUnavailable("write failed")
+                upsert(rows)
+
+            tx.upsert_minutes = blocking_upsert
+            yield tx
 
 
 def minutes_ts(*offsets):
@@ -336,3 +338,112 @@ def test_waiting_overflow_while_flush_blocked_drops_oldest_waiting():
     finish(flush, db)
     assert sorted(db.rows) == minutes_ts(0, 1, 3, 4)
     assert rec.dropped_rows == 1
+
+
+# ------------------------------------------------------------ definite refusal (unwritable rows)
+
+
+H = 3600
+
+
+def purged_rolled_hour(db, hour_ts):
+    """A rolled hour whose raw evidence is gone: exactly what purge leaves behind."""
+    from pompa.recorder import persist, roll_next_hour
+
+    from conftest import minutes
+    persist(db, minutes(hour_ts, 60))
+    while roll_next_hour(db, 2**32 - 1) is not None:
+        pass
+    with db.session() as s:
+        s.delete_minutes_before(hour_ts + H)
+
+
+def test_refused_row_is_dropped_instead_of_blocking_the_queue():
+    """A row that can never be written must not hold the protected batch or the minutes behind it."""
+    db = FakeStorage()
+    purged_rolled_hour(db, T0)
+    rec, _ = make(start=T0 + 600, storage=db)
+    rec.schema_ready = True
+    rec._protected = [conf_row(T0 + 600, outside_temp=1.0)]
+
+    rec.tick(T0 + 660)
+    snap = rec.snapshot(T0 + 660)["recorder"]
+    assert (snap["protected_rows"], snap["waiting_rows"]) == (0, 0)  # nothing stuck
+    assert (snap["refused_rows"], snap["rows_written"], snap["dropped_rows"]) == (1, 0, 0)
+    assert snap["last_refusal"] == {"at": "2027-01-15T08:11:00Z", "hours": ["2027-01-15T08:00:00Z"],
+                                    "rows": 1, "reason": snap["last_refusal"]["reason"]}
+    assert "already purged" in snap["last_refusal"]["reason"]
+    assert snap["db_last_error"] is None  # the database was fine; the refusal was ours
+    with db.session() as s:
+        assert s.read_minutes(T0, T0 + H) == []  # nothing rebuilt the purged hour
+
+    # The recorder keeps working: a later minute in a writable hour is persisted normally.
+    rec._waiting.append(conf_row(T0 + H, outside_temp=2.0))
+    rec.tick(T0 + H + 120)
+    assert sorted(db.rows) == [T0 + H]
+    snap = rec.snapshot(T0 + H + 120)["recorder"]
+    assert (snap["refused_rows"], snap["rows_written"], snap["protected_rows"]) == (1, 1, 0)
+
+
+def test_a_clock_stepped_back_into_a_purged_hour_does_not_wedge_the_recorder():
+    """The end-to-end path: restart under an old wall clock, real minutes, no permanent block."""
+    db = FakeStorage()
+    purged_rolled_hour(db, T0)
+    rec, _ = make(start=T0 + 600, storage=db)
+    rec.on_connect(T0 + 600)
+    feed(rec, T0 + 600, T0 + 780)
+    rec.tick(T0 + 780)
+    assert queued(rec) == ([], [])  # the protected batch is not wedged
+    assert rec.refused_rows == 3 and rec.rows_written == 0 and rec.dropped_rows == 0
+    with db.session() as s:
+        assert s.read_minutes(T0, T0 + H) == []
+
+    # The clock is corrected; minutes of a writable hour flow again.
+    feed(rec, T0 + H, T0 + H + 180)
+    rec.tick(T0 + H + 180)
+    assert sorted(db.rows) == [T0 + H, T0 + H + 60, T0 + H + 120]
+    assert rec.rows_written == 3 and rec.dropped_rows == 0
+    assert all(ts >= T0 + H for ts in db.rows)  # the purged hour stayed empty
+
+
+def test_refusal_keeps_the_writable_rows_of_a_mixed_batch():
+    db = FakeStorage()
+    purged_rolled_hour(db, T0)
+    rec, _ = make(start=T0 + 600, storage=db)
+    rec._protected = [conf_row(T0 + 600, outside_temp=1.0), conf_row(T0 + H, outside_temp=2.0)]
+    rec.schema_ready = True
+
+    rec.tick(T0 + H + 120)
+    assert sorted(db.rows) == [T0 + H]  # only the writable row landed
+    snap = rec.snapshot(T0 + H + 120)["recorder"]
+    assert (snap["refused_rows"], snap["rows_written"]) == (1, 1)
+    assert (snap["protected_rows"], snap["waiting_rows"], snap["dropped_rows"]) == (0, 0, 0)
+
+
+def test_refusal_does_not_stop_rollup_and_purge():
+    """Maintenance must not be starved by a batch that can never be written."""
+    db = FakeStorage()
+    purged_rolled_hour(db, T0)
+    rec, _ = make(start=T0 + 600, storage=db)
+    rec.retention_days = 365
+    rec._protected = [conf_row(T0 + 600, outside_temp=1.0)]
+    rec.schema_ready = True
+
+    rec.tick(T0 + 400 * 86400)
+    assert rec.refused_rows == 1
+    assert rec.last_purge_at is not None  # the flush completed, so maintenance ran
+
+
+def test_ambiguous_outcome_is_never_treated_as_a_refusal():
+    """Regression: an outage must still protect and retry the batch unchanged."""
+    rec, db = make()
+    db.available = False
+    rec.on_connect(T0)
+    feed(rec, T0, T0 + 120)
+    rec.tick(T0 + 120)
+    assert (rec.refused_rows, rec.last_refusal) == (0, None)
+    assert queued(rec)[0] == [T0, T0 + 60]  # protected, unchanged
+    db.available = True
+    rec.tick(T0 + 121)
+    assert sorted(db.rows) == [T0, T0 + 60]
+    assert (rec.refused_rows, rec.dropped_rows, rec.rows_written) == (0, 0, 2)
