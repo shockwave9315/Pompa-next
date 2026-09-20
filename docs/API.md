@@ -49,8 +49,9 @@ It is not a readiness probe: it says nothing about MQTT or MariaDB. Those are re
 ## `GET /api/v1/live`
 
 Current in-memory metric state. No parameters. No database I/O: it stays `200` during a MariaDB
-outage. The snapshot is taken under the recorder lock, so one response never mixes state from
-before and after an MQTT message.
+outage. The snapshot *and its `now`* are taken under the recorder lock in one observation, so a
+response never mixes state from before and after an MQTT message, and `received_at` never follows
+the `now` of the response carrying it.
 
 ```json
 {
@@ -147,6 +148,10 @@ live in `/api/v1/status`; there is no control/SET surface in this API.
 Facts about MQTT, the recorder, the database and every physical source. No parameters. Stays `200`
 while the process is alive, including when MariaDB is unavailable — that failure is reported inside
 `database`.
+
+`now`, the MQTT and recorder facts, every source entry and the `alive` verdict are one locked
+observation, so no timestamp in them is later than `now`. The `database` object is read afterwards
+and is not part of that observation; `raw_floor` is still computed from the same `now`.
 
 Top-level keys: `now`, `mqtt`, `recorder`, `database`, `sources`.
 

@@ -41,6 +41,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections import deque
+from collections.abc import Callable
 
 from .aggregation import RECORDED, SERIES, fold_minutes
 from .ingest import Ingest
@@ -287,15 +288,21 @@ class Recorder:
 
     # ------------------------------------------------------------- facts
 
-    def live(self, now: float) -> dict:
+    def live(self, clock: Callable[[], float]) -> dict:
         """Canonical live metric state for ``/api/v1/live``.
 
-        Pure in-memory reading under the same lock as MQTT mutation, so one
-        response can never mix values from before and after a message. No
-        database I/O and no state change: minutes are closed by ``tick``, never
-        by an API thread.
+        ``clock`` is read *inside* the lock, so the observation instant belongs
+        to the same atomic observation as the state it describes: a message the
+        MQTT thread applies while an API thread waits for the lock is either
+        wholly in the response, with a ``now`` at or after its receipt, or not
+        in it at all. Sampling the clock first would let a later receipt appear
+        under an earlier ``now`` without any wall-clock reversal.
+
+        No database I/O and no state change: minutes are closed by ``tick``,
+        never by an API thread.
         """
         with self._lock:
+            now = clock()
             ing = self.ingest
             return {
                 "now": iso_utc(now),
@@ -312,11 +319,18 @@ class Recorder:
                 },
             }
 
-    def snapshot(self, now: float) -> dict:
-        """Factual in-memory state for ``/api/v1/status``."""
+    def snapshot(self, clock: Callable[[], float]) -> tuple[float, dict]:
+        """Factual in-memory state for ``/api/v1/status``, with its observation instant.
+
+        Like ``live``, ``clock`` is read inside the lock: ``now``, the freshness
+        of every source and the ``alive`` verdict are one observation. The
+        instant is returned because the caller needs it for facts computed
+        outside this lock, such as the raw retention floor.
+        """
         with self._lock:
+            now = clock()
             ing, acc = self.ingest, self.accumulator
-            return {
+            return now, {
                 "mqtt": {
                     "connected": ing.connected,
                     "epoch": ing.epoch,

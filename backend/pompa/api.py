@@ -79,7 +79,7 @@ def create_app(recorder: Recorder, storage: Storage, clock: Callable[[], float] 
     @app.get("/api/v1/live")
     def live() -> dict:
         """In-memory only: unaffected by database availability."""
-        return recorder.live(clock())
+        return recorder.live(clock)
 
     @app.get("/api/v1/metrics")
     def metrics() -> dict:
@@ -88,8 +88,9 @@ def create_app(recorder: Recorder, storage: Storage, clock: Callable[[], float] 
 
     @app.get("/api/v1/status")
     def status() -> dict:
-        now = clock()
-        facts = recorder.snapshot(now)
+        # now and the in-memory facts are one locked observation; the database
+        # facts below are read afterwards and are not part of it.
+        now, facts = recorder.snapshot(clock)
         try:
             oldest, newest, rolled_until = storage.facts()
             database = {"available": True, "error": None,

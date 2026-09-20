@@ -217,7 +217,7 @@ def test_concurrent_mqtt_updates_never_tear_a_snapshot():
 
     def read():
         while not stop.is_set():
-            body = live.recorder.live(live.now)
+            body = live.recorder.live(lambda: live.now)
             entry = body["metrics"][CO_IN]
             if entry["mode"] != "live" or entry["source_id"] != "XTOP0":
                 failures.append(f"lost live state: {entry}")

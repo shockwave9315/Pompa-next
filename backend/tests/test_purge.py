@@ -75,7 +75,7 @@ def test_disabled_retention_purges_nothing(any_storage):
     rec = recorder_on(any_storage, retention_days=0)
     rec.tick(H0 + 400 * DAY)
     assert len(stored(any_storage)) == 600
-    assert rec.snapshot(H0)["recorder"]["purge"]["last_run_at"] is None
+    assert rec.snapshot(lambda: H0)[1]["recorder"]["purge"]["last_run_at"] is None
 
 
 def test_pending_minute_holds_the_cutoff_above_its_hour(any_storage):
@@ -154,7 +154,7 @@ def test_recorder_purges_hourly_and_reports_facts(any_storage):
     now = H0 + 400 * DAY
     rec = recorder_on(any_storage)
     rec.tick(now)
-    facts = rec.snapshot(now)["recorder"]["purge"]
+    facts = rec.snapshot(lambda: now)[1]["recorder"]["purge"]
     assert facts["last_deleted_rows"] == 8 * 60 and facts["deleted_rows"] == 8 * 60
     assert facts["last_cutoff"] == "2027-01-15T16:00:00Z" and facts["error"] is None
     persist(any_storage, minutes(H0 + 10 * H, 60))
@@ -170,7 +170,7 @@ def test_recorder_records_a_refusal_without_deleting(any_storage):
         s.replace_rollup_hour(H0 + 5 * H, [("recorded", 60, 60.0, 1.0, 1.0, 1.0)])
     rec = recorder_on(any_storage)
     rec.tick(H0 + 400 * DAY)
-    facts = rec.snapshot(H0)["recorder"]["purge"]
+    facts = rec.snapshot(lambda: H0)[1]["recorder"]["purge"]
     assert "accounts for 0 of 60" in facts["error"] and facts["last_deleted_rows"] == 0
     assert len(stored(any_storage)) == 600
 

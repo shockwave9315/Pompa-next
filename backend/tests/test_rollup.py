@@ -254,7 +254,7 @@ def test_recorder_rolls_closed_hours_only(any_storage):
     rec = recorder_on(any_storage, H0 + 2 * H + 1800)  # process runs inside hour 2
     rec.tick(H0 + 2 * H + 1801)
     assert until(any_storage) == H0 + 2 * H
-    assert rec.snapshot(H0)["recorder"]["rollup"]["last_rolled_hour"] == "2027-01-15T09:00:00Z"
+    assert rec.snapshot(lambda: H0)[1]["recorder"]["rollup"]["last_rolled_hour"] == "2027-01-15T09:00:00Z"
     rec.tick(H0 + 3 * H + 1)
     assert until(any_storage) == H0 + 3 * H
     assert_exact(any_storage)
