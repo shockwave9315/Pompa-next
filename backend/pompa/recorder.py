@@ -413,7 +413,7 @@ class Recorder:
         Like ``live``, ``clock`` is read inside the lock: ``now``, the freshness
         of every source and the ``alive`` verdict are one observation. The
         instant is returned because the caller needs it for facts computed
-        outside this lock, such as the raw retention floor.
+        outside this lock, such as the prospective purge cutoff.
         """
         with self._lock:
             now = clock()

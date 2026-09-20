@@ -367,7 +367,7 @@ def test_refused_row_is_dropped_instead_of_blocking_the_queue():
     rec._protected = [conf_row(T0 + 600, outside_temp=1.0)]
 
     rec.tick(T0 + 660)
-    snap = rec.snapshot(T0 + 660)["recorder"]
+    snap = rec.snapshot(lambda: T0 + 660)[1]["recorder"]
     assert (snap["protected_rows"], snap["waiting_rows"]) == (0, 0)  # nothing stuck
     assert (snap["refused_rows"], snap["rows_written"], snap["dropped_rows"]) == (1, 0, 0)
     assert snap["last_refusal"] == {"at": "2027-01-15T08:11:00Z", "hours": ["2027-01-15T08:00:00Z"],
@@ -381,7 +381,7 @@ def test_refused_row_is_dropped_instead_of_blocking_the_queue():
     rec._waiting.append(conf_row(T0 + H, outside_temp=2.0))
     rec.tick(T0 + H + 120)
     assert sorted(db.rows) == [T0 + H]
-    snap = rec.snapshot(T0 + H + 120)["recorder"]
+    snap = rec.snapshot(lambda: T0 + H + 120)[1]["recorder"]
     assert (snap["refused_rows"], snap["rows_written"], snap["protected_rows"]) == (1, 1, 0)
 
 
@@ -415,7 +415,7 @@ def test_refusal_keeps_the_writable_rows_of_a_mixed_batch():
 
     rec.tick(T0 + H + 120)
     assert sorted(db.rows) == [T0 + H]  # only the writable row landed
-    snap = rec.snapshot(T0 + H + 120)["recorder"]
+    snap = rec.snapshot(lambda: T0 + H + 120)[1]["recorder"]
     assert (snap["refused_rows"], snap["rows_written"]) == (1, 1)
     assert (snap["protected_rows"], snap["waiting_rows"], snap["dropped_rows"]) == (0, 0, 0)
 

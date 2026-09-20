@@ -8,6 +8,7 @@ failure, and none of them invents a health verdict.
 import pytest
 
 from conftest import RUNNING, T0, Api, minutes
+from conftest import row as make_row
 from pompa.recorder import persist, roll_next_hour
 from pompa.timegrid import HOUR
 
@@ -43,7 +44,7 @@ def test_database_down_matrix(api):
     status = api.get("/api/v1/status", now)
     assert status.status_code == 200
     assert status.json()["database"] == {"available": False, "error": "fake outage", "oldest_minute": None,
-                                         "newest_minute": None, "rolled_until": None, "raw_floor": None}
+                                         "newest_minute": None, "rolled_until": None, "purge_cutoff": None}
     assert api.get("/api/v1/history", now, **RANGE).status_code == 503
 
 
@@ -151,6 +152,25 @@ def test_status_reports_a_purge_refusal_as_a_fact():
     purge = api.body("/api/v1/status", H0 + 400 * 86400)["recorder"]["purge"]
     assert "accounts for 1 of" in purge["error"] and purge["last_deleted_rows"] == 0
     assert len(api.storage.rows) == stored
+
+
+def test_status_reports_a_rebuild_refusal_as_a_fact_through_http():
+    """A minute landing in a purged rolled hour must surface as refused_rows/last_refusal, via HTTP."""
+    api = Api()
+    persist(api.storage, minutes(H0, 60))  # one rolled hour
+    while roll_next_hour(api.storage, H0 + HOUR) is not None:
+        pass
+    with api.storage.session() as s:  # the hour's raw evidence is now physically gone
+        s.delete_minutes_before(H0 + HOUR)
+
+    api.recorder.schema_ready = True
+    api.recorder._protected = [make_row(H0, outside_temp=1.0)]
+    api.tick(H0 + HOUR + 60)
+
+    recorder = api.body("/api/v1/status", H0 + HOUR + 60)["recorder"]
+    assert recorder["refused_rows"] == 1
+    assert recorder["last_refusal"] is not None
+    assert recorder["last_refusal"]["hours"] == ["2027-01-15T08:00:00Z"]
 
 
 def test_status_reports_a_pending_protected_batch_and_waiting_rows():

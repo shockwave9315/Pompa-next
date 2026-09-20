@@ -16,7 +16,9 @@ the HTTP surface promises.
 | `GET /api/v1/metrics` | Metric and COP catalog | no | no |
 | `GET /api/v1/history` | All historical charts and summaries | no | yes |
 
-There is no other path. `/api/v1` is a fresh namespace, not inherited legacy versioning.
+The application contract exposes the five product API endpoints above; FastAPI may additionally
+expose its standard documentation/OpenAPI routes (`/docs`, `/redoc`, `/openapi.json`). `/api/v1` is
+a fresh namespace, not inherited legacy versioning.
 
 ## Shared truths
 
@@ -91,6 +93,14 @@ freshness, makes MQTT neither alive nor connected, and enters no `MinuteRow`. A 
 sentinel message hides the retained value behind it: the mode becomes `none`, not the older
 retained number.
 
+`mode="retained"` means the last retained delivery is still factually available as cached state —
+it is not confirmation that the source or device is currently alive. This survives LWT `Offline`,
+an MQTT disconnect, and a reconnect into a new connection epoch: none of those events clear a
+source's retained cache, because it was never evidence of life in the first place. After any of
+them, `/api/v1/live` may keep showing `mode="retained"` with its original value and `received_at`,
+while `mqtt.alive` is `false` and no historical evidence is created. A client must not read a
+retained value as a current/live confirmation.
+
 `mqtt.connected`, `mqtt.alive` and `mqtt.epoch` are the same facts `/api/v1/status` reports.
 Per-source diagnostics belong to `/api/v1/status`, not here.
 
@@ -149,9 +159,13 @@ Facts about MQTT, the recorder, the database and every physical source. No param
 while the process is alive, including when MariaDB is unavailable — that failure is reported inside
 `database`.
 
-`now`, the MQTT and recorder facts, every source entry and the `alive` verdict are one locked
-observation, so no timestamp in them is later than `now`. The `database` object is read afterwards
-and is not part of that observation; `raw_floor` is still computed from the same `now`.
+`now`, the MQTT facts, the recorder facts, every source entry and the `alive` verdict are one locked
+observation, so no timestamp among them is later than `now`. The `database` object is fetched
+afterwards and is not part of that observation, though `purge_cutoff` inside it is still computed
+from the same `now`. This atomicity is scoped to that one locked read; it is not a claim that every
+field in the response is one byte-atomic multi-field transaction — some recorder maintenance facts
+(rollup/purge outcomes) are updated by the recorder thread between ticks and are factual snapshots
+of their own last run, not part of the `now`-locked observation.
 
 Top-level keys: `now`, `mqtt`, `recorder`, `database`, `sources`.
 
@@ -160,15 +174,32 @@ Top-level keys: `now`, `mqtt`, `recorder`, `database`, `sources`.
 `last_live_message_at`, `stale_after_seconds`, `parse_rejects`, `uncatalogued_topics`.
 
 `recorder`: `process_start`, `last_closed_minute`, `last_row_minute`, `last_written_minute`,
-`rows_closed`, `rows_written`, `protected_rows` (submitted to storage, write not yet confirmed;
-retried unchanged, never dropped), `waiting_rows` (closed, never submitted), `waiting_capacity`,
-`flush_in_progress`, `dropped_rows`, `schema_ready`, `db_last_ok_at`, `db_last_error`,
-`db_last_error_at`, `retention_1m_days`, `rollup` (`last_rolled_hour`, `last_rolled_at`, `error`,
-`error_at`) and `purge` (`last_run_at`, `last_cutoff`, `last_deleted_rows`, `deleted_rows`,
-`error`, `error_at`).
+`rows_closed`, `rows_written`, `protected_rows`, `waiting_rows`, `waiting_capacity`,
+`flush_in_progress`, `dropped_rows`, `refused_rows`, `last_refusal`, `schema_ready`,
+`db_last_ok_at`, `db_last_error`, `db_last_error_at`, `retention_1m_days`, `rollup`
+(`last_rolled_hour`, `last_rolled_at`, `error`, `error_at`) and `purge` (`last_run_at`,
+`last_cutoff`, `last_deleted_rows`, `deleted_rows`, `error`, `error_at`).
 
-`database`: `available`, `error`, `oldest_minute`, `newest_minute`, `rolled_until`, `raw_floor`.
+Three counters distinguish why a row never reached the database, and none of them overlap:
+
+- `dropped_rows` — waiting-queue overflow: a closed minute was never even submitted to storage,
+  because the FIFO waiting queue was already at `waiting_capacity`.
+- `protected_rows` — a submitted batch whose write outcome is ambiguous (the database was
+  unreachable or its acknowledgement was lost). It may already be committed; it is retried
+  unchanged, idempotently, until a write returns success. Never dropped, never counted anywhere.
+- `refused_rows` — a submitted row that was definitely, permanently unwritable: it would have
+  landed in an already-rolled hour whose raw evidence was already purged, so rebuilding that hour
+  from it would replace a complete rollup with a partial one. The write is refused before anything
+  is upserted, so nothing is lost from storage, and retrying could never succeed. `last_refusal`
+  carries the most recent such event: `at`, `hours` (the refused hour(s)), `rows` (how many), and
+  `reason`.
+
+`database`: `available`, `error`, `oldest_minute`, `newest_minute`, `rolled_until`, `purge_cutoff`.
 When `available` is `false`, `error` carries the failure text and the other four are `null`.
+`purge_cutoff` is the prospective purge policy — what purge may delete next, following the wall
+clock and `RETENTION_1M_DAYS`, and it can move backwards with either. It is never evidence of what
+raw data was already deleted; that fact is per-hour (§8/§13 of `ARCHITECTURE.md`) and surfaces
+through `422` and `auto` promotion in `/api/v1/history`, not through this field.
 
 `sources`: one entry per physical MQTT source with `id`, `topic`, `metric`, `seen_live`,
 `historical_value`, `epoch_last_live_at`, `last_value`, `last_outcome`, `last_retained`,
@@ -176,8 +207,10 @@ When `available` is `false`, `error` carries the failure text and the other four
 `live_messages`, `retained_messages`, `sentinel_messages`, `rejected_messages`, `gap_count`,
 `gap_sum_seconds`, `max_live_gap_seconds`, `mean_live_gap_seconds`).
 
-`stale_after_seconds` is still the bootstrap value 600 and not an accepted freshness policy; the
-source gap counters exist to decide it.
+`stale_after_seconds` is `600`, the accepted Stage 1 global freshness policy, decided from a
+22.768 h uninterrupted real-runtime measurement on CT109 (max observed gap 305.059 s, no gap over
+600 s; see `ARCHITECTURE.md` §4). The source gap counters remain in the response as the ongoing
+evidence trail, not because the policy is undecided.
 
 ## `GET /api/v1/history`
 
@@ -190,9 +223,12 @@ All historical charts and summaries. The only endpoint that reads persisted data
 | `bucket` | no, default `auto` | `auto`, `1m`, `5m`, `1h`, `1d`, `total`. |
 | `series` | no, default all | Comma-separated metric keys plus `cop_co`, `cop_dhw`, `cop_total`. No duplicates. |
 
-`auto` resolves from range length only: ≤36 h → `1m`, ≤10 days → `5m`, ≤120 days → `1h`, longer →
-`1d`, promoted to `1h` when raw retention cannot serve minutes. `1d` is a Europe/Warsaw calendar
-day, so DST days are 1380 or 1500 minutes. A response never exceeds 3000 buckets.
+`auto` chooses its base bucket from range length alone: ≤36 h → `1m`, ≤10 days → `5m`, ≤120 days →
+`1h`, longer → `1d`. If that chosen `1m`/`5m` bucket would require the raw minutes of an hour that
+was factually purged, `auto` promotes to `1h` instead — a whole rolled hour still answers from
+`rollup_1h`. The exact partial edge of a promoted request can still be `422` (see below). `1d` is a
+Europe/Warsaw calendar day, so DST days are 1380 or 1500 minutes. A response never exceeds 3000
+buckets.
 
 ```json
 {
@@ -218,8 +254,11 @@ day, so DST days are 1380 or 1500 minutes. A response never exceeds 3000 buckets
   order requested.
 - `expected_minutes` counts elapsed minutes of the bucket and is never trimmed to recorder start.
   `recorded_minutes` counts stored rows. `coverage_percent` is `null` when `expected_minutes` is 0.
-- `minutes` is `0` where a bucket has no known value; every other series field is `null` there.
-  A `null` value with `recorded_minutes > 0` means the metric was unknown in the recorded minutes.
+- For an ordinary metric, `minutes` is `0` where a bucket has no known value, and its other fields
+  (`avg`/`last`, `min`, `max`, `kwh`) are `null` there. For a COP series, `paired_minutes` is `0`
+  where a bucket has no paired minutes, and `cop`, `input_kwh`, `output_kwh` are `null` there.
+  A `null` value alongside `recorded_minutes > 0` means the metric was unknown in the recorded
+  minutes, not that the minutes are missing.
 - `kwh` is `Σ W / 60000` over known minutes only, never extrapolated over missing ones.
 - `cop` is `Σ paired output / Σ paired input` over minutes where all required power channels are
   known. It is `null` when there are no paired minutes or the paired input sum is 0. Instantaneous
@@ -233,11 +272,16 @@ bucket.
 | Status | When |
 |---|---|
 | `400` | Malformed parameters: missing `from`/`to`, unparseable or naive timestamps, non-minute alignment, `from >= to`, unknown bucket, unknown or duplicate series. |
-| `422` | Well-formed but unrepresentable: more than 3000 buckets, a range or partial edge hour older than raw retention, instants outside 1970–2100. |
+| `422` | Well-formed but unrepresentable: more than 3000 buckets, a range or partial edge hour whose raw minutes were provably purged, instants outside 1970–2100. |
 | `503` | `/api/v1/history` only: the database is unavailable. |
 
-The body is `{"detail": "…"}`. `422` never results in a rounded or truncated range — the request is
-refused instead.
+The body is `{"detail": "…"}`. `422` for purged raw means the backend knows the minutes existed and
+were physically deleted — it is never a consequence of a range simply being old. A range that was
+never recorded at all — no raw minutes and no rollup row for it, including one predating the
+recorder — is answered normally with `recorded_minutes = 0`, not `422`. A whole rolled hour whose
+raw was purged is still served, as `1h`/`1d`/`total`, from its surviving `rollup_1h` row; only an
+exact partial-hour edge into a purged hour is unrepresentable. `422` never results in a rounded or
+truncated range — the request is refused instead.
 
 ## Subsystem independence
 

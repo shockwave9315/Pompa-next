@@ -24,10 +24,11 @@ STATUS_MQTT_KEYS = {"connected", "epoch", "connects", "disconnects", "connected_
                     "parse_rejects", "uncatalogued_topics"}
 STATUS_RECORDER_KEYS = {"process_start", "last_closed_minute", "last_row_minute", "last_written_minute",
                         "rows_closed", "rows_written", "protected_rows", "waiting_rows",
-                        "waiting_capacity", "flush_in_progress", "dropped_rows", "schema_ready",
-                        "db_last_ok_at", "db_last_error", "db_last_error_at", "retention_1m_days",
-                        "rollup", "purge"}
-STATUS_DATABASE_KEYS = {"available", "error", "oldest_minute", "newest_minute", "rolled_until", "raw_floor"}
+                        "waiting_capacity", "flush_in_progress", "dropped_rows", "refused_rows",
+                        "last_refusal", "schema_ready", "db_last_ok_at", "db_last_error",
+                        "db_last_error_at", "retention_1m_days", "rollup", "purge"}
+STATUS_DATABASE_KEYS = {"available", "error", "oldest_minute", "newest_minute", "rolled_until",
+                        "purge_cutoff"}
 STATUS_SOURCE_KEYS = {"id", "topic", "metric", "seen_live", "historical_value", "epoch_last_live_at",
                       "last_value", "last_outcome", "last_retained", "last_received_at", "first_live_at",
                       "latest_live_at", "live_messages", "retained_messages", "sentinel_messages",
@@ -124,6 +125,14 @@ def test_status_shape(api):
     assert all(set(source) == STATUS_SOURCE_KEYS for source in body["sources"])
     assert [source["id"] for source in body["sources"]] == [
         s.id for m in METRICS for s in m.sources]
+
+
+def test_purge_cutoff_replaces_raw_floor(api):
+    """Stage 2's stale ``raw_floor`` naming must never resurface (§10, purged-history truth)."""
+    body = api.body("/api/v1/status")
+    assert "raw_floor" not in body["database"]
+    assert "purge_cutoff" in body["database"]
+    assert "raw_floor" not in body["recorder"]
 
 
 # ----------------------------------------------------------------- /history

@@ -173,6 +173,38 @@ def test_retained_redelivery_after_reconnect_stays_retained(live):
     assert live.body(T0 + 13)["mqtt"]["alive"] is False
 
 
+def test_retained_survives_lwt_offline(live):
+    """A retained cache is factual cached state, not liveness proof; Offline must not erase it.
+
+    Frozen decision: after Offline, ``/live`` may keep showing the retained
+    value, but it never sets ``alive=true`` or ``seen_live``, and it is never
+    historical evidence.
+    """
+    live.connect(T0).msg(T0 + 1, XTOP0, "900", retained=True)
+    live.lwt(T0 + 5, "Offline")
+    entry = live.metric(CO_IN, T0 + 6)
+    assert selected(entry) == (900.0, "retained", "XTOP0")
+    assert entry["received_at"] == Z.format(0, 1)
+    assert live.body(T0 + 6)["mqtt"]["alive"] is False
+
+
+def test_retained_survives_disconnect_and_reconnect_until_new_delivery(live):
+    """A retained cache outlives disconnect and a reconnect epoch; only new evidence replaces it."""
+    live.connect(T0).msg(T0 + 1, XTOP0, "900", retained=True)
+    live.disconnect(T0 + 5)
+    entry = live.metric(CO_IN, T0 + 6)
+    assert selected(entry) == (900.0, "retained", "XTOP0")
+    assert live.body(T0 + 6)["mqtt"]["alive"] is False
+
+    live.connect(T0 + 10)
+    entry = live.metric(CO_IN, T0 + 11)
+    assert selected(entry) == (900.0, "retained", "XTOP0")  # still retained; no qualifying delivery yet
+    assert live.body(T0 + 11)["mqtt"]["alive"] is False
+
+    live.msg(T0 + 12, XTOP0, "950")  # first non-retained message of the new epoch
+    assert selected(live.metric(CO_IN, T0 + 13)) == (950.0, "live", "XTOP0")
+
+
 # ------------------------------------------------------------- independence
 
 

@@ -5,12 +5,13 @@ from datetime import date, timedelta
 import pytest
 from fastapi.testclient import TestClient
 
-from conftest import T0, FakeStorage
+from conftest import T0, FakeStorage, minutes
 from pompa.api import create_app
 from pompa.catalog import RECORDED_KEYS
 from pompa.ingest import Ingest
-from pompa.minute import MinuteAccumulator
-from pompa.recorder import Recorder
+from pompa.minute import MinuteAccumulator, iso_utc
+from pompa.recorder import Recorder, persist, purge_step, roll_next_hour
+from pompa.timegrid import HOUR
 
 Z = "2027-01-15T08:{:02d}:00Z"  # T0 + n minutes
 
@@ -170,6 +171,58 @@ def test_history_database_unavailable_503(client, db):
     r = get_history(client, **{"from": Z.format(0), "to": Z.format(1)})
     assert r.status_code == 503
     assert client.get("/health").status_code == 200  # process liveness unaffected
+
+
+# ------------------------------------------------- purged raw and never-recorded ranges, over HTTP
+
+H0 = T0 - T0 % HOUR  # already hour-aligned
+GAP_HOUR = H0 + 30 * HOUR  # never recorded at all: no raw, no rollup
+
+
+def purged_and_gapped(storage):
+    """72 recorded hours with one never-recorded hour, rolled, then really purged below hour 48.
+
+    Mirrors ``test_history.purged_history`` but exercised through the real HTTP layer, as required
+    by the Stage 3 review: contract tests must prove the 422/200 split at the API boundary, not
+    only inside the history engine.
+    """
+    persist(storage, [r for r in minutes(H0, 72 * 60) if not GAP_HOUR <= r.ts < GAP_HOUR + HOUR])
+    while roll_next_hour(storage, H0 + 72 * HOUR) is not None:
+        pass
+    now = H0 + 72 * HOUR
+    more = True
+    while more:
+        _, _, more = purge_step(storage, now, retention_days=1, pending_from=None, max_hours=24)
+    return now
+
+
+def test_history_purged_raw_is_422_through_http():
+    storage = FakeStorage()
+    now = purged_and_gapped(storage)
+    ingest = Ingest(600)
+    recorder = Recorder(ingest, MinuteAccumulator(ingest, T0), storage, 60)
+    app_client = TestClient(create_app(recorder, storage, clock=lambda: now))
+    purged_hour = H0 + 24 * HOUR  # below PURGED_UNTIL = H0 + 48h, so its raw is really gone
+    r = app_client.get("/api/v1/history", params={
+        "from": iso_utc(purged_hour), "to": iso_utc(purged_hour + HOUR), "bucket": "1m"})
+    assert r.status_code == 422
+    assert "purged" in r.json()["detail"]
+
+
+def test_history_never_recorded_old_range_is_200_through_http():
+    """No raw and no rollup means the range was never recorded, never a 422 (age alone is not cause)."""
+    storage = FakeStorage()
+    now = purged_and_gapped(storage)
+    ingest = Ingest(600)
+    recorder = Recorder(ingest, MinuteAccumulator(ingest, T0), storage, 60)
+    app_client = TestClient(create_app(recorder, storage, clock=lambda: now))
+    r = app_client.get("/api/v1/history", params={
+        "from": iso_utc(GAP_HOUR), "to": iso_utc(GAP_HOUR + HOUR), "bucket": "1m",
+        "series": "outside_temp"})
+    assert r.status_code == 200
+    body = r.json()
+    assert all(b["recorded_minutes"] == 0 for b in body["buckets"])
+    assert sum(body["series"]["outside_temp"]["minutes"]) == 0
 
 
 def test_history_accepts_calendar_dates_as_local_midnight(client):

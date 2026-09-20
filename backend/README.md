@@ -144,7 +144,7 @@ MQTT client id `pompa-next` and port 8001. Nothing in `/opt/pompa` is touched.
 ```sh
 git clone https://github.com/shockwave9315/Pompa-next.git /opt/pompa-next
 cd /opt/pompa-next
-git checkout stage-1-core-backend   # Stage 2 is not deployed
+git checkout stage-1-core-backend   # Stage 2 and Stage 3 are not deployed
 cp .env.example .env && chmod 600 .env   # set MQTT_HOST, credentials, DB passwords
 docker compose up -d --build
 docker compose logs -f backend           # connection epochs, LWT, database state
