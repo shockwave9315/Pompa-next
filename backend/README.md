@@ -141,18 +141,29 @@ POMPA_TEST_DB_HOST=127.0.0.1 POMPA_TEST_DB_PORT=33306 ../.venv/bin/python -m pyt
 Pompa Next uses its own compose project (`pompa-next`), its own MariaDB container and volume,
 MQTT client id `pompa-next` and port 8001. Nothing in `/opt/pompa` is touched.
 
+Fresh install:
+
 ```sh
 git clone https://github.com/shockwave9315/Pompa-next.git /opt/pompa-next
 cd /opt/pompa-next
-git checkout stage-1-core-backend   # Stage 2 and Stage 3 are not deployed
+git checkout main
 cp .env.example .env && chmod 600 .env   # set MQTT_HOST, credentials, DB passwords
 docker compose up -d --build
-docker compose logs -f backend           # connection epochs, LWT, database state
 scripts/smoke.sh                         # health, status, last-hour gaps, per-topic table
 ```
 
-Update: `git pull && docker compose up -d --build backend`. Stop: `docker compose down`
-(keeps the `db-data` volume). Run exactly one backend container.
+Update:
+
+```sh
+cd /opt/pompa-next
+git checkout main
+git pull --ff-only origin main
+docker compose up -d --build
+scripts/smoke.sh
+```
+
+Run exactly one backend container. The `db-data` volume must normally survive updates — do not run
+`docker compose down -v`.
 
 ## Freshness re-measurement procedure
 

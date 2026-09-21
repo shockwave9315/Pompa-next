@@ -2,8 +2,7 @@
 
 ## Current stage
 
-**Stage 3 — Complete Backend API**, developed on `stage-3-complete-backend-api`. Not deployed to
-CT109.
+**Stage 4 — Frontend**.
 
 ### Stage 1
 
@@ -18,37 +17,36 @@ Runtime measurement: 22.768 h uninterrupted on CT109, accepted short of the orig
 DONE. Merged to `main` (merge commit `9ea192967b7ab24d4b961d22f4280c19069ad4b8`). Independent
 adversarial review complete, and its finding applied: reads, writes and the write queue share one
 database fact for purged raw evidence — `purged(H)` from `rollup_1h`/`sample_1m` presence, never the
-wall clock or retention config (see `docs/ARCHITECTURE.md` §8). Not deployed to CT109.
+wall clock or retention config (see `docs/ARCHITECTURE.md` §8).
 
 ### Stage 3
 
-Current stage.
+DONE. Merged to `main` (merge commit `3e1c260388d8144222df407f0b6af741a39d2350`). Deployed and
+runtime-validated on CT109 alongside legacy, in a separate Docker Compose project with its own
+MariaDB, MQTT client id and port. The frontend-facing `/api/v1` contract is frozen; see
+`docs/API.md`.
 
 ## Goal
 
-Complete the backend contract the Stage 4 frontend needs: canonical live state, a frontend-safe
-metric and COP catalog, a final factual status contract, cross-endpoint consistency, and a frozen,
-documented and tested `/api/v1`.
+Build the Stage 4 frontend: Teraz, Historia, Statystyki and Status views that consume the frozen
+Stage 3 `/api/v1` contract. The frontend is a thin renderer of backend facts and performs no domain
+calculations.
 
 ## In scope
 
-- One canonical live selection path in ingest: confirmed fresh source, else explicit retained
-  fallback, else nothing; `GET /api/v1/live` serialises it under the recorder lock without
-  database I/O.
-- `GET /api/v1/metrics`: metric and COP metadata, timezone, buckets and `MAX_BUCKETS`, derived from
-  the existing catalog and time grid so no second list of metadata exists.
-- `GET /api/v1/status` reviewed against the final architecture and proven complete and factual.
-- Subsystem independence: MQTT and MariaDB failures stay local to the endpoints they are facts of.
-- `docs/API.md` and structural contract tests that freeze the frontend-facing `/api/v1` surface.
+- Teraz, Historia, Statystyki and Status views.
+- Consuming `docs/API.md` as-is.
 
 ## Out of scope
 
-- Frontend, timeline/activity, cycles, compressor starts, the 193-capability explorer.
-- Control/SET, user settings, legacy compatibility, legacy aliases and historical migration.
-- Live COP: COP is defined on canonical minutes and stays in `/api/v1/history`.
-- Changing the accepted Stage 1 freshness policy or its runtime measurement result, or Stage 2
-  aggregation, rollup, purge, retention and purged-history semantics.
+- Any backend semantic redesign.
+- Control/SET.
+- Timeline/activity.
+- Cycles or compressor-start statistics.
+- The 193-capability explorer.
+- Legacy frontend compatibility.
+- Frontend domain math: energy, COP, state, alignment and coverage stay backend-owned.
 
 ## Next
 
-**Stage 4 — Frontend**
+**Stage 5 — Cutover**
