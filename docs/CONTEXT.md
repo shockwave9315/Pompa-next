@@ -114,10 +114,10 @@ Use focused validation for the assigned task. Do not run browsers, development s
 ## Runtime map
 
 - Development and forensic host: `CT112 ai-devbox`
-- Existing legacy production: `CT109 /opt/pompa`
-- Future Pompa Next deployment: `CT109 /opt/pompa-next`
+- Legacy production: `CT109 /opt/pompa`
+- Pompa Next: `CT109 /opt/pompa-next`
 
-Pompa Next must initially run beside legacy with:
+Pompa Next runs beside legacy with:
 
 - A separate MQTT `client_id`
 - A separate database
