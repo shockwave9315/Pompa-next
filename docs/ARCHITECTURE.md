@@ -436,7 +436,7 @@ container freeze/resume or a slow boot before the clock is disciplined) all rema
 degrade safely.
 
 Freshness is measured only between two `CLOCK_REALTIME` readings taken on the same side of a
-correction. Three rules implement that, and nothing else is needed:
+correction. Four rules implement that, and nothing else is needed:
 
 1. Event *sequencing* keeps its own clamp: `Recorder._advance` never lets the accumulator's cursor
    regress, so a step produces a gap and never a duplicate primary key. The cursor is an ordering
@@ -450,6 +450,9 @@ correction. Three rules implement that, and nothing else is needed:
    retained provenance are untouched. The very next ordinary message re-establishes the source, so
    the cost is at most one publication interval of `mode="none"`, and a message that itself carries
    the step forward re-establishes its own source in the same call.
+4. A detected backward step also invalidates any partially integrated open minute. Pre-correction
+   integration is never combined with post-correction evidence in one `MinuteRow`; the affected
+   minute is a gap.
 
 A step therefore never makes a source look confirmed alive for longer than `STALE_AFTER_SECONDS` of
 real elapsed time — in `/api/v1/live`, `/api/v1/status` or `sample_1m`. A step too small to move two

@@ -557,11 +557,18 @@ class Recorder:
         sources out until the wall clock caught up. Detection runs before the
         caller applies its event, so a message that carries the step forward
         immediately re-establishes its own source.
+
+        The same step also poisons the accumulator's open minute
+        (``MinuteAccumulator.discard_open``): a minute that already integrated
+        any pre-correction state must never be combined with post-correction
+        evidence in one row, so it becomes a gap instead. An empty open minute
+        (nothing integrated yet) is left usable.
         """
         if t < self._last_wall - CLOCK_STEP_BACK_SECONDS:
             log.warning("CLOCK_REALTIME stepped back %.3fs to %s; confirmed source evidence discarded",
                         self._last_wall - t, iso_utc(t))
             self.ingest.clock_stepped_back(t)
+            self.accumulator.discard_open()
         self._last_wall = t
         t = max(t, self.accumulator.cursor)
         for row in self.accumulator.advance(t):

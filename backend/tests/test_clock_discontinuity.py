@@ -322,3 +322,121 @@ def test_backward_clock_step_does_not_corrupt_gap_statistics():
     ing.message(XTOP0, "1000", False, T0 + 5)   # backward step: raw t below the previous baseline
     s = ing.sources[XTOP0]
     assert (s.gap_count, s.gap_sum, s.max_live_gap) == (1, 5.0, 5.0)
+
+
+# ------------------------------------------------ C-1: the open minute leak
+#
+# ``Ingest.clock_stepped_back`` discards confirmed source evidence, but a detected step can still
+# find ``MinuteAccumulator`` mid-integration on the minute it interrupted. Left alone, that open
+# minute's cursor does not move, so once the wall clock catches back up the same buffer keeps
+# accumulating — mixing pre-step and post-step segments into one ``MinuteRow`` that was never
+# observed on a single timeline (30 s of 900 W folded with 30 s of a post-step 0 W becomes a
+# fabricated 450 W row). ``MinuteAccumulator.discard_open`` poisons exactly that open minute.
+
+MODE_TOPIC = "main/Operating_Mode_State"
+
+
+def close_minute_starting_at(rec, start, storage, step_seconds=5):
+    """Drive real ticks past ``start + 60`` so whatever is open at ``start`` gets a chance to close."""
+    t = start
+    while t < start + 65:
+        rec.tick(t)
+        t += step_seconds
+
+
+def test_canonical_reproducer_a_partially_integrated_minute_is_never_fabricated():
+    """The exact scenario from the audit: 30s of 900W, a 30s backward step, 30s of 0W afterwards.
+
+    Before this fix this closed as 450W (the wrong, blended average). The only correct outcome is
+    that the minute never exists at all.
+    """
+    storage = FakeStorage()
+    ing = Ingest(600)
+    rec = Recorder(ing, MinuteAccumulator(ing, T0), storage, 60)
+    rec.on_connect(T0)
+    rec.on_message(XTOP0, "900", False, T0)
+    rec.tick(T0 + 30)                        # 30s integrated at 900W; minute [T0, T0+60) still open
+    rec.on_message(XTOP0, "0", False, T0)    # detected 30s backward step; new evidence is 0W
+    close_minute_starting_at(rec, T0, storage)
+    assert T0 not in storage.rows            # never 450W, never any row at all
+
+
+def test_recovery_the_discarded_minute_becomes_a_gap_and_the_next_minute_is_clean():
+    """A finite gap, not permanent damage: the very next minute closes normally from clean evidence."""
+    storage = FakeStorage()
+    ing = Ingest(600)
+    rec = Recorder(ing, MinuteAccumulator(ing, T0), storage, 60)
+    rec.on_connect(T0)
+    rec.on_message(XTOP0, "900", False, T0)
+    rec.tick(T0 + 30)
+    rec.on_message(XTOP0, "0", False, T0)
+    t = T0
+    while t < T0 + 130:                      # keep the source alive through the next minute too
+        rec.on_message(XTOP0, "0", False, t)
+        rec.tick(t)
+        t += 10
+    assert T0 not in storage.rows                    # M: discarded, a gap
+    assert storage.rows[T0 + 60][CO_IN] == 0.0        # M+1: exists, and holds only post-step evidence
+
+
+@pytest.mark.parametrize("step", STEPS)
+def test_a_minute_with_any_pre_step_integration_is_discarded_across_every_step_size(step):
+    """Row absence must not depend on the step's magnitude: discard_open never inspects step size."""
+    storage = FakeStorage()
+    ing = Ingest(600)
+    rec = Recorder(ing, MinuteAccumulator(ing, T0), storage, 60)
+    rec.on_connect(T0)
+    rec.on_message(XTOP0, "900", False, T0)
+    rec.tick(T0 + 30)                        # into=30s, comfortably mid-minute
+    step_to = T0 + 30 - step
+    rec.on_message(XTOP0, "0", False, step_to)
+    close_minute_starting_at(rec, T0, storage)
+    assert T0 not in storage.rows, step
+
+
+@pytest.mark.parametrize("into", [1, 30, 59])
+def test_any_amount_of_pre_step_integration_poisons_the_minute(into):
+    """Even a single integrated second is enough: there is no partial-credit threshold."""
+    storage = FakeStorage()
+    ing = Ingest(600)
+    rec = Recorder(ing, MinuteAccumulator(ing, T0), storage, 60)
+    rec.on_connect(T0)
+    rec.on_message(XTOP0, "900", False, T0)
+    rec.tick(T0 + into)
+    rec.on_message(XTOP0, "0", False, T0 + into - 90)   # a representative 90s detected step
+    close_minute_starting_at(rec, T0, storage)
+    assert T0 not in storage.rows, into
+
+
+def test_an_empty_open_minute_is_left_usable_by_the_step():
+    """The refinement: nothing pre-step means nothing to poison, so fresh evidence can still close it."""
+    storage = FakeStorage()
+    ing = Ingest(600)
+    rec = Recorder(ing, MinuteAccumulator(ing, T0), storage, 60)
+    rec.on_connect(T0)
+    # No message and no tick yet: cursor == minute_start == T0, nothing integrated at all.
+    rec.on_message(XTOP0, "0", False, T0 - 90)  # a detected step landing on an entirely empty minute
+    t = T0 - 90
+    while t < T0 + 65:
+        rec.on_message(XTOP0, "0", False, t)
+        rec.tick(t)
+        t += 5
+    assert storage.rows[T0][CO_IN] == 0.0       # never poisoned: it may close normally
+
+
+def test_discard_applies_to_the_whole_row_not_only_the_integrated_mean_metric():
+    """A ``kind=last`` field must be discarded too: the whole row is poisoned, not patched field by
+    field. Neither a blended mean with a good ``last``, nor a null mean with a fresh ``last``, may
+    survive as a row.
+    """
+    storage = FakeStorage()
+    ing = Ingest(600)
+    rec = Recorder(ing, MinuteAccumulator(ing, T0), storage, 60)
+    rec.on_connect(T0)
+    rec.on_message(XTOP0, "900", False, T0)
+    rec.on_message(MODE_TOPIC, "2", False, T0)
+    rec.tick(T0 + 30)
+    rec.on_message(XTOP0, "0", False, T0)       # backward step; both fields get different post-step
+    rec.on_message(MODE_TOPIC, "3", False, T0)  # evidence than what was already integrated
+    close_minute_starting_at(rec, T0, storage)
+    assert T0 not in storage.rows

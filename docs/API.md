@@ -268,6 +268,11 @@ buckets.
   order requested.
 - `expected_minutes` counts elapsed minutes of the bucket and is never trimmed to recorder start.
   `recorded_minutes` counts stored rows. `coverage_percent` is `null` when `expected_minutes` is 0.
+  Immediately after a real backward `CLOCK_REALTIME` step (`ARCHITECTURE.md` §24), a range that
+  reaches up to the current, now-corrected instant can transiently report `coverage_percent` above
+  `100` — rows persisted before the correction carry their original timestamps and can briefly look
+  like they belong to a range that has not fully elapsed yet by the corrected clock. This is not
+  clamped: doing so would hide what is actually stored. It resolves on its own as real time passes.
 - For an ordinary metric, `minutes` is `0` where a bucket has no known value, and its other fields
   (`avg`/`last`, `min`, `max`, `kwh`) are `null` there. For a COP series, `paired_minutes` is `0`
   where a bucket has no paired minutes, and `cop`, `input_kwh`, `output_kwh` are `null` there.

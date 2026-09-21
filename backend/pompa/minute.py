@@ -83,6 +83,20 @@ class MinuteAccumulator:
         self._sum = {k: 0.0 for k in RECORDED_KEYS}
         self._whole = {k: complete for k in RECORDED_KEYS}
         self._end_value: dict[str, float | None] = {k: None for k in RECORDED_KEYS}
+        self._valid = True
+
+    def discard_open(self) -> None:
+        """Poison the open minute after a detected clock discontinuity.
+
+        A minute that already integrated any pre-correction state can never be
+        combined with post-correction evidence on one timeline, so it must
+        never become a ``MinuteRow``: not a null metric, not a recalculation,
+        a whole discarded minute. A minute that has not integrated anything
+        yet (``cursor == minute_start``) holds no pre-correction state, so it
+        is left usable and may still close normally from fresh evidence.
+        """
+        if self.cursor != self.minute_start:
+            self._valid = False
 
     def _integrate(self, a: float, b: float) -> None:
         dt = b - a
@@ -99,7 +113,9 @@ class MinuteAccumulator:
 
     def _close(self) -> MinuteRow | None:
         m = self.minute_start
-        self.last_closed_minute = m
+        self.last_closed_minute = m  # sequencing fact, independent of the minute's own validity
+        if not self._valid:
+            return None  # poisoned by a detected clock discontinuity: a gap, never a mixed row
         if m < self.process_start:
             return None  # never a minute beginning before process start
         if not self.ingest.alive_through(m, m + MINUTE):
