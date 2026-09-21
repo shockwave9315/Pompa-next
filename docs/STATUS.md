@@ -2,7 +2,8 @@
 
 ## Current stage
 
-**Stage 2 — Historical Engine**.
+**Stage 3 — Complete Backend API**, developed on `stage-3-complete-backend-api`. Not deployed to
+CT109.
 
 ### Stage 1
 
@@ -14,34 +15,40 @@ Runtime measurement: 22.768 h uninterrupted on CT109, accepted short of the orig
 
 ### Stage 2
 
-Implementation complete. Independent adversarial review complete, and its finding applied: reads,
-writes and the write queue now share one database fact for purged raw evidence (see
-`docs/ARCHITECTURE.md` §8). Not merged, not deployed to CT109. Ready for final review.
+DONE. Merged to `main` (merge commit `9ea192967b7ab24d4b961d22f4280c19069ad4b8`). Independent
+adversarial review complete, and its finding applied: reads, writes and the write queue share one
+database fact for purged raw evidence — `purged(H)` from `rollup_1h`/`sample_1m` presence, never the
+wall clock or retention config (see `docs/ARCHITECTURE.md` §8). Not deployed to CT109.
+
+### Stage 3
+
+Current stage.
 
 ## Goal
 
-Turn canonical minutes into exact aggregates: one aggregation algebra, hourly rollups, mixed
-raw/rollup reads, energy, paired COP, coverage facts, calendar days and safe retention.
+Complete the backend contract the Stage 4 frontend needs: canonical live state, a frontend-safe
+metric and COP catalog, a final factual status contract, cross-endpoint consistency, and a frozen,
+documented and tested `/api/v1`.
 
 ## In scope
 
-- `Stats` algebra, derived minute series, energy and paired-minute COP.
-- `rollup_1h`, built from `sample_1m` in timestamp order, rebuilt idempotently per hour.
-- Late-write correctness: a minute write and the rebuild of every rolled hour it touches commit in
-  one transaction.
-- Mixed `rollup_1h`/`sample_1m` reads for `1h`, `1d` and `total`; `sample_1m` only for `1m` and `5m`.
-- `auto`, the 3000-bucket limit and exact `[from, to)` edges, with 422 only for provably purged raw.
-- Europe/Warsaw calendar days with 1380- and 1500-minute DST days, validated at startup.
-- Coverage facts, `RETENTION_1M_DAYS` and the fail-closed hourly purge, whose per-hour proof is
-  what makes a surviving rollup row evidence that raw was deleted.
-- `GET /api/v1/history` extended in place; factual rollup, purge and retention status.
+- One canonical live selection path in ingest: confirmed fresh source, else explicit retained
+  fallback, else nothing; `GET /api/v1/live` serialises it under the recorder lock without
+  database I/O.
+- `GET /api/v1/metrics`: metric and COP metadata, timezone, buckets and `MAX_BUCKETS`, derived from
+  the existing catalog and time grid so no second list of metadata exists.
+- `GET /api/v1/status` reviewed against the final architecture and proven complete and factual.
+- Subsystem independence: MQTT and MariaDB failures stay local to the endpoints they are facts of.
+- `docs/API.md` and structural contract tests that freeze the frontend-facing `/api/v1` surface.
 
 ## Out of scope
 
-- Frontend, live and metrics endpoints, timeline/activity, cycles and compressor starts.
-- Control/SET, user settings, and any legacy compatibility or migration.
-- Changing the accepted Stage 1 freshness policy or its runtime measurement result.
+- Frontend, timeline/activity, cycles, compressor starts, the 193-capability explorer.
+- Control/SET, user settings, legacy compatibility, legacy aliases and historical migration.
+- Live COP: COP is defined on canonical minutes and stays in `/api/v1/history`.
+- Changing the accepted Stage 1 freshness policy or its runtime measurement result, or Stage 2
+  aggregation, rollup, purge, retention and purged-history semantics.
 
 ## Next
 
-**Stage 3 — Complete Backend API**
+**Stage 4 — Frontend**

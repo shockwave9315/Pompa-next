@@ -18,7 +18,7 @@ Domain rules are in [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 | `pompa/storage.py` | `sample_1m`/`rollup_1h` DDL and parameterized PyMySQL queries, one transaction per session. |
 | `pompa/history.py` | Bucket composition from rollups and raw minutes. |
 | `pompa/mqtt.py` | paho adapter: subscribe `{prefix}/#`, reconnect, forward retain flag and LWT. |
-| `pompa/api.py` | `/health`, `/api/v1/status`, `/api/v1/history`. |
+| `pompa/api.py` | `/health`, `/api/v1/status`, `/api/v1/live`, `/api/v1/metrics`, `/api/v1/history`. |
 | `pompa/main.py` | Process wiring and shutdown. |
 
 ## Configuration
@@ -40,6 +40,9 @@ Domain rules are in [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 
 ## API
 
+The frozen frontend-facing contract is [`docs/API.md`](../docs/API.md); this section is the
+operator's summary.
+
 - `GET /health` — process liveness only: `{"status": "ok"}`.
 - `GET /api/v1/status` — facts: MQTT connection/epoch/LWT/alive/last live message/parse rejects,
   recorder process start/last closed and written minute, `protected_rows` (submitted batch whose
@@ -49,6 +52,11 @@ Domain rules are in [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
   will never let be written), configured retention, last rollup and purge outcomes, database
   availability, oldest/newest stored minute, `rolled_until` and `purge_cutoff` (what purge may
   delete next, not what it already deleted). No verdicts.
+- `GET /api/v1/live` — current in-memory state of every catalog metric: value, `mode`
+  (`live` | `retained` | `none`), physical source and receipt time. In-memory only, so it stays
+  available during a database outage. A retained value is labelled and never enters history.
+- `GET /api/v1/metrics` — catalog-derived metric and COP metadata, presentation timezone, history
+  buckets and the 3000-bucket limit. No database or MQTT dependency.
 - `GET /api/v1/history?from=…&to=…[&bucket=…][&series=a,b]` — exact `[from, to)`, never rounded.
 
 `from` and `to` are ISO 8601 instants with an explicit offset (`Z`, `+02:00`) or `YYYY-MM-DD`
@@ -136,7 +144,7 @@ MQTT client id `pompa-next` and port 8001. Nothing in `/opt/pompa` is touched.
 ```sh
 git clone https://github.com/shockwave9315/Pompa-next.git /opt/pompa-next
 cd /opt/pompa-next
-git checkout stage-1-core-backend   # Stage 2 is not deployed
+git checkout stage-1-core-backend   # Stage 2 and Stage 3 are not deployed
 cp .env.example .env && chmod 600 .env   # set MQTT_HOST, credentials, DB passwords
 docker compose up -d --build
 docker compose logs -f backend           # connection epochs, LWT, database state

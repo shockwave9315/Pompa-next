@@ -49,7 +49,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from enum import Enum
 
 from .aggregation import RECORDED, SERIES, fold_minutes
@@ -64,6 +64,12 @@ ROLL_HOURS_PER_TICK = 24
 PURGE_HOURS_PER_STEP = 24  # at most 1440 minute rows deleted per step
 PURGE_INTERVAL_SECONDS = HOUR
 MAINTENANCE_RETRY_SECONDS = 60
+# A backward CLOCK_REALTIME step is detected by comparing consecutive readings. Ordinary thread
+# interleaving can also invert two readings — the MQTT and recorder threads sample the clock before
+# they contend for the lock — but only by the lock wait, measured well under a second even under
+# synthetic contention. A real NTP step is orders of magnitude larger, and a step below this
+# threshold cannot meaningfully distort a 600-second freshness budget anyway.
+CLOCK_STEP_BACK_SECONDS = 1.0
 
 
 class PurgeRefused(Exception):
@@ -201,6 +207,8 @@ class Recorder:
         self.last_rolled_at: float | None = None
         self.rollup_error: str | None = None
         self.rollup_error_at: float | None = None
+        # Previous raw CLOCK_REALTIME reading, for detecting a backward step (see ``_advance``).
+        self._last_wall = accumulator.process_start
         self._purge_next_at = float("-inf")
         self.last_purge_at: float | None = None
         self.last_purge_cutoff: int | None = None
@@ -213,19 +221,23 @@ class Recorder:
 
     def on_connect(self, t: float) -> None:
         with self._lock:
-            self.ingest.connect(self._advance(t))
+            self._advance(t)
+            self.ingest.connect(t)
 
     def on_disconnect(self, t: float) -> None:
         with self._lock:
-            self.ingest.disconnect(self._advance(t))
+            self._advance(t)
+            self.ingest.disconnect(t)
 
     def on_lwt(self, payload: str, retained: bool, t: float) -> None:
         with self._lock:
-            self.ingest.lwt_message(payload, retained, self._advance(t))
+            self._advance(t)
+            self.ingest.lwt_message(payload, retained, t)
 
     def on_message(self, topic: str, payload: str, retained: bool, t: float) -> None:
         with self._lock:
-            self.ingest.message(topic, payload, retained, self._advance(t))
+            self._advance(t)
+            self.ingest.message(topic, payload, retained, t)
 
     # ------------------------------------------------------------- recorder tick
 
@@ -376,11 +388,61 @@ class Recorder:
 
     # ------------------------------------------------------------- facts
 
-    def snapshot(self, now: float) -> dict:
-        """Factual in-memory state for ``/api/v1/status``."""
+    def live(self, clock: Callable[[], float]) -> dict:
+        """Canonical live metric state for ``/api/v1/live``.
+
+        ``clock`` is read *inside* the lock, so the observation instant belongs
+        to the same atomic observation as the state it describes: a message the
+        MQTT thread applies while an API thread waits for the lock is either
+        wholly in the response, with a ``now`` at or after its receipt, or not
+        in it at all. Sampling the clock first would let a later receipt appear
+        under an earlier ``now`` without any wall-clock reversal.
+
+        ``now`` is the raw clock, the same reading freshness is measured
+        against, so ``alive`` and every ``mode`` in this response describe real
+        elapsed time. It is deliberately not floored at the accumulator's
+        cursor: doing that would mix a pre-step observation instant with
+        post-step receipt timestamps and make a just-received message look
+        stale for the size of the step. A backward step instead discards the
+        stamps taken before it (see ``_advance``), which is what keeps the two
+        operands of every freshness subtraction on one side of the correction.
+
+        No database I/O and no state change: minutes are closed by ``tick``,
+        never by an API thread.
+        """
         with self._lock:
-            ing, acc = self.ingest, self.accumulator
+            now = clock()
+            ing = self.ingest
             return {
+                "now": iso_utc(now),
+                "mqtt": {"connected": ing.connected, "alive": ing.alive_at(now), "epoch": ing.epoch},
+                "metrics": {
+                    key: {
+                        "value": v.value,
+                        "mode": v.mode,
+                        "source_id": v.source_id,
+                        "source_topic": v.source_topic,
+                        "received_at": iso_utc(v.received_at),
+                    }
+                    for key, v in ing.live_snapshot(now).items()
+                },
+            }
+
+    def snapshot(self, clock: Callable[[], float]) -> tuple[float, dict]:
+        """Factual in-memory state for ``/api/v1/status``, with its observation instant.
+
+        Like ``live``, ``clock`` is read raw inside the lock: ``now``, the
+        freshness of every source and the ``alive`` verdict are one
+        observation on one clock. The instant is returned because the caller
+        needs it for facts computed outside this lock, such as the prospective
+        purge cutoff — which ``Recorder._purge`` derives from the raw tick
+        clock, so reporting anything else here would describe a cutoff purge
+        will not use.
+        """
+        with self._lock:
+            now = clock()
+            ing, acc = self.ingest, self.accumulator
+            return now, {
                 "mqtt": {
                     "connected": ing.connected,
                     "epoch": ing.epoch,
@@ -399,6 +461,8 @@ class Recorder:
                     "last_live_message_at": iso_utc(ing.latest_live_message_at),
                     "stale_after_seconds": ing.stale_after,
                     "parse_rejects": ing.parse_rejects,
+                    "clock_steps": ing.clock_steps,
+                    "last_clock_step_at": iso_utc(ing.last_clock_step_at),
                     "uncatalogued_topics": sorted(ing.uncatalogued_topics),
                 },
                 "recorder": {
@@ -473,9 +537,39 @@ class Recorder:
     def _advance(self, t: float) -> float:
         """Close minutes up to ``t``; returns ``t`` clamped to never go backwards.
 
-        After a wall-clock step backwards, events are applied at the cursor and
-        no minute closes until real time passes it again: a gap, never a duplicate.
+        This clamp exists only for the accumulator's own monotonic sequencing
+        (segment integration, minute closing, upsert-by-``ts`` safety): after a
+        wall-clock step backwards, no minute closes until real time passes the
+        cursor again, so the result is a gap, never a duplicate. Callers must
+        still feed ``Ingest`` the *raw*, unclamped ``t`` for freshness purposes
+        (``on_connect``/``on_disconnect``/``on_lwt``/``on_message`` do this) —
+        clamping a source's confirmed-evidence timestamp to a cursor that is
+        temporarily ahead of the wall clock would inflate how long that
+        evidence counts as fresh by the size of the clock step.
+
+        Two consecutive readings that go backwards by more than
+        ``CLOCK_STEP_BACK_SECONDS`` are a real backward step, and every
+        confirmed timestamp taken before it is discarded
+        (``Ingest.clock_stepped_back``). The comparison is against the previous
+        reading, not against the cursor: the cursor stays ahead for the whole
+        replayed interval, so comparing against it would re-discard the
+        evidence of every message arriving in that interval and black the
+        sources out until the wall clock caught up. Detection runs before the
+        caller applies its event, so a message that carries the step forward
+        immediately re-establishes its own source.
+
+        The same step also poisons the accumulator's open minute
+        (``MinuteAccumulator.discard_open``): a minute that already integrated
+        any pre-correction state must never be combined with post-correction
+        evidence in one row, so it becomes a gap instead. An empty open minute
+        (nothing integrated yet) is left usable.
         """
+        if t < self._last_wall - CLOCK_STEP_BACK_SECONDS:
+            log.warning("CLOCK_REALTIME stepped back %.3fs to %s; confirmed source evidence discarded",
+                        self._last_wall - t, iso_utc(t))
+            self.ingest.clock_stepped_back(t)
+            self.accumulator.discard_open()
+        self._last_wall = t
         t = max(t, self.accumulator.cursor)
         for row in self.accumulator.advance(t):
             self.rows_closed += 1

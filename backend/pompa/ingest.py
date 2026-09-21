@@ -22,6 +22,28 @@ LWT_OFFLINE = "Offline"
 MAX_UNCATALOGUED_TOPICS = 500
 
 
+@dataclass(frozen=True)
+class LiveValue:
+    """One metric's current canonical value and where it came from.
+
+    ``mode`` is protocol provenance, not a health verdict:
+
+    * ``live``: a confirmed fresh non-retained source of the current epoch.
+    * ``retained``: a cached retained delivery, exposed only because no
+      confirmed source exists. It never entered history.
+    * ``none``: nothing current to show; every field is ``None``.
+    """
+
+    value: float | None
+    mode: str
+    source_id: str | None
+    source_topic: str | None
+    received_at: float | None
+
+
+NO_LIVE = LiveValue(None, "none", None, None, None)
+
+
 @dataclass
 class SourceState:
     metric: Metric
@@ -76,6 +98,8 @@ class Ingest:
         self.alive_since: float | None = None
         self.parse_rejects = 0
         self.uncatalogued_topics: set[str] = set()
+        self.clock_steps = 0  # detected backward CLOCK_REALTIME steps; each discarded confirmed evidence
+        self.last_clock_step_at: float | None = None
 
     # ------------------------------------------------------------------ events
 
@@ -138,7 +162,10 @@ class Ingest:
         if s.first_live_at is None:
             s.first_live_at = t
         s.latest_live_at = t
-        if s.gap_baseline_at is not None:
+        if s.gap_baseline_at is not None and t > s.gap_baseline_at:
+            # A non-positive delta means a backward wall-clock step landed between two live
+            # messages of this source; that is not a publication gap sample, so it is skipped
+            # rather than polluting the Stage 1 evidence trail with a negative or zero "gap".
             gap = t - s.gap_baseline_at
             s.gap_count += 1
             s.gap_sum += gap
@@ -183,6 +210,29 @@ class Ingest:
                 return s
         return None
 
+    def live(self, metric_key: str, t: float) -> LiveValue:
+        """Canonical current value: a confirmed source, else a retained cache, else nothing.
+
+        The confirmed path *is* ``historical``, so live display and historical
+        accumulation can never disagree about source priority, validity or
+        freshness. Only when it selects nothing may a retained delivery be
+        shown, labelled as such: it still proves no source life, sets no
+        ``seen_live`` and enters no minute. A stale non-retained value is not a
+        fallback — the latest delivery of a source is either its retained cache
+        or it is not.
+        """
+        s = self.historical(metric_key, t)
+        if s is not None:
+            return LiveValue(s.value, "live", s.source.id, s.source.topic, s.last_live_at)
+        for s in self._by_metric[metric_key]:
+            if s.last_retained and s.last_outcome is Outcome.VALID and s.last_value is not None:
+                return LiveValue(s.last_value, "retained", s.source.id, s.source.topic, s.last_received_at)
+        return NO_LIVE
+
+    def live_snapshot(self, t: float) -> dict[str, LiveValue]:
+        """Every catalog metric exactly once, in catalog order."""
+        return {m.key: self.live(m.key, t) for m in METRICS}
+
     def next_expiry_after(self, t: float) -> float | None:
         """Earliest moment after ``t`` at which a historical value stops being fresh."""
         expiries = [
@@ -194,8 +244,26 @@ class Ingest:
 
     # ------------------------------------------------------------------ internals
 
+    def clock_stepped_back(self, t: float) -> None:
+        """A backward ``CLOCK_REALTIME`` step: every confirmed timestamp predates the correction.
+
+        Freshness is an elapsed-time question, so both of its operands must be
+        readings of the same clock on the same side of a correction. A backward
+        step invalidates that for every stamp taken before it: those stamps
+        belong to a timeline the system has just been told was wrong, and
+        subtracting a post-step ``now`` from one of them understates the age by
+        the size of the step. They are therefore discarded exactly as a
+        disconnect discards them — the sources need new non-retained evidence,
+        which their next ordinary message supplies. ``seen_live`` and the
+        connection epoch are untouched: the broker connection did not change.
+        Retained provenance is untouched too; it never measured freshness.
+        """
+        self.clock_steps += 1
+        self.last_clock_step_at = t
+        self._invalidate()
+
     def _invalidate(self) -> None:
-        """Disconnect/Offline: values and source life need new non-retained evidence."""
+        """Disconnect/Offline/clock step: values and source life need new non-retained evidence."""
         for s in self.sources.values():
             s.value = None
             s.gap_baseline_at = None

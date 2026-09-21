@@ -52,7 +52,7 @@ def test_db_outage_buffers_then_recovery_flushes():
     assert db.rows == {}
     assert not rec.schema_ready
     assert db.schema_calls == 3  # schema bootstrap retried on every tick
-    snap = rec.snapshot(T0 + 180)["recorder"]
+    snap = rec.snapshot(lambda: T0 + 180)[1]["recorder"]
     # Minute 0 was claimed by the first (failed) flush; 1 and 2 never submitted.
     assert (snap["protected_rows"], snap["waiting_rows"]) == (1, 2)
     assert snap["db_last_error"] == "fake outage"
@@ -60,7 +60,7 @@ def test_db_outage_buffers_then_recovery_flushes():
     rec.tick(T0 + 181)
     assert sorted(db.rows) == [T0, T0 + 60, T0 + 120]
     assert rec.schema_ready and rec.db_last_error is None
-    snap = rec.snapshot(T0 + 181)["recorder"]
+    snap = rec.snapshot(lambda: T0 + 181)[1]["recorder"]
     assert (snap["protected_rows"], snap["waiting_rows"], snap["dropped_rows"]) == (0, 0, 0)
     calls = db.upsert_calls
     rec.tick(T0 + 182)  # nothing pending: no further write
@@ -100,16 +100,22 @@ def test_overflow_drops_oldest_and_counts():
     db.available = True
     rec.tick(T0 + 301)
     assert sorted(db.rows) == [T0 + 120, T0 + 180, T0 + 240]  # the loss stays a visible gap
-    assert rec.snapshot(T0 + 301)["recorder"]["dropped_rows"] == 2
+    assert rec.snapshot(lambda: T0 + 301)[1]["recorder"]["dropped_rows"] == 2
 
 
-def test_event_before_cursor_is_clamped():
+def test_event_before_cursor_clamps_sequencing_but_not_freshness():
+    """The accumulator's cursor clamps for safe sequencing; a source's freshness timestamp must not.
+
+    Clamping ``ingest.last_live_at`` to the cursor as well would inflate how long this evidence
+    counts as fresh by exactly the gap between its raw receipt and the cursor — the P2
+    clock-discontinuity bug. The cursor still floors accumulation; freshness uses the raw receipt.
+    """
     rec, _ = make()
     rec.on_connect(T0)
     rec.tick(T0 + 100)
     rec.on_message("main/Main_Outlet_Temp", "35", False, T0 + 50)
-    assert rec.ingest.last_live_at == T0 + 100
-    assert rec.accumulator.cursor == T0 + 100
+    assert rec.accumulator.cursor == T0 + 100  # sequencing floor: never regresses
+    assert rec.ingest.last_live_at == T0 + 50  # freshness: the true, raw receipt time
 
 
 def test_disconnect_at_boundary_closes_minute_first():
@@ -138,7 +144,7 @@ def test_retained_lwt_and_messages_after_reconnect_record_nothing():
         rec.on_message(topic, payload, True, T0 + 1)
     rec.tick(T0 + 900)
     assert db.rows == {}
-    snap = rec.snapshot(T0 + 900)
+    snap = rec.snapshot(lambda: T0 + 900)[1]
     assert snap["mqtt"]["alive"] is False
     assert snap["mqtt"]["lwt"] == {"state": "Online", "retained": True,
                                    "received_at": "2027-01-15T08:00:00Z", "messages": 1}
@@ -151,7 +157,7 @@ def test_snapshot_facts():
     rec.on_message("main/DHW_Target_Temp", "48", False, T0 + 31)
     feed(rec, T0 + 40, T0 + 200)
     rec.tick(T0 + 200)
-    snap = rec.snapshot(T0 + 200)
+    snap = rec.snapshot(lambda: T0 + 200)[1]
     mqtt, recorder = snap["mqtt"], snap["recorder"]
     assert mqtt["connected"] and mqtt["alive"] and mqtt["epoch"] == 1
     assert mqtt["alive_since"] == "2027-01-15T08:00:31Z"
@@ -268,7 +274,7 @@ def test_successful_blocked_flush_counts_nothing_as_dropped():
     db = BlockingStorage("ok")
     rec, flush = blocked_flush(3, db)
     close_minutes(rec, 3, 5)  # minutes 3, 4 close while the write is blocked
-    snap = rec.snapshot(T0 + 300)["recorder"]
+    snap = rec.snapshot(lambda: T0 + 300)[1]["recorder"]
     assert (snap["protected_rows"], snap["waiting_rows"], snap["flush_in_progress"]) == (3, 2, True)
     assert snap["dropped_rows"] == 0
     finish(flush, db)
@@ -301,7 +307,7 @@ def test_ack_lost_during_concurrent_close_never_counts_persisted_rows_as_dropped
     assert sorted(db.rows) == minutes_ts(0, 1, 2)
     assert rec.dropped_rows == 0
     assert queued(rec) == (minutes_ts(0, 1, 2), minutes_ts(3))  # protected for retry; 3 waiting
-    snap = rec.snapshot(T0 + 241)["recorder"]
+    snap = rec.snapshot(lambda: T0 + 241)[1]["recorder"]
     assert (snap["protected_rows"], snap["waiting_rows"], snap["flush_in_progress"]) == (3, 1, False)
     rec.tick(T0 + 241)
     assert db.batches == [minutes_ts(0, 1, 2), minutes_ts(0, 1, 2), minutes_ts(3)]  # idempotent retry, then waiting
@@ -367,7 +373,7 @@ def test_refused_row_is_dropped_instead_of_blocking_the_queue():
     rec._protected = [conf_row(T0 + 600, outside_temp=1.0)]
 
     rec.tick(T0 + 660)
-    snap = rec.snapshot(T0 + 660)["recorder"]
+    snap = rec.snapshot(lambda: T0 + 660)[1]["recorder"]
     assert (snap["protected_rows"], snap["waiting_rows"]) == (0, 0)  # nothing stuck
     assert (snap["refused_rows"], snap["rows_written"], snap["dropped_rows"]) == (1, 0, 0)
     assert snap["last_refusal"] == {"at": "2027-01-15T08:11:00Z", "hours": ["2027-01-15T08:00:00Z"],
@@ -381,7 +387,7 @@ def test_refused_row_is_dropped_instead_of_blocking_the_queue():
     rec._waiting.append(conf_row(T0 + H, outside_temp=2.0))
     rec.tick(T0 + H + 120)
     assert sorted(db.rows) == [T0 + H]
-    snap = rec.snapshot(T0 + H + 120)["recorder"]
+    snap = rec.snapshot(lambda: T0 + H + 120)[1]["recorder"]
     assert (snap["refused_rows"], snap["rows_written"], snap["protected_rows"]) == (1, 1, 0)
 
 
@@ -415,7 +421,7 @@ def test_refusal_keeps_the_writable_rows_of_a_mixed_batch():
 
     rec.tick(T0 + H + 120)
     assert sorted(db.rows) == [T0 + H]  # only the writable row landed
-    snap = rec.snapshot(T0 + H + 120)["recorder"]
+    snap = rec.snapshot(lambda: T0 + H + 120)[1]["recorder"]
     assert (snap["refused_rows"], snap["rows_written"]) == (1, 1)
     assert (snap["protected_rows"], snap["waiting_rows"], snap["dropped_rows"]) == (0, 0, 0)
 
