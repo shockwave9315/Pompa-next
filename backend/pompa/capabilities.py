@@ -172,6 +172,10 @@ def parse_documented(text: str) -> tuple[ReferenceIdentity, ...]:
         if len(headers) != 1:
             raise ReferenceError(f"Expected one {family} table header")
         header = headers[0]
+        # Any non-blank table-like line ("|") before the accepted header would
+        # otherwise disappear silently, exactly like one after the table body.
+        if any(line.strip() and "|" in line for line in section[:header]):
+            raise ReferenceError(f"Row outside {family} table")
         if tuple(cell.strip() for cell in section[header].split("|")) != _HEADERS[family]:
             raise ReferenceError(f"Malformed {family} table header")
         if header + 1 >= len(section) or not all(

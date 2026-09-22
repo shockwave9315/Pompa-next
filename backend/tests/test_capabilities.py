@@ -96,6 +96,23 @@ def test_reference_facts():
     # Any other unexpected table-like content (a "|") past the table end must
     # fail fast too, not just a stray identity-shaped row.
     DOCUMENTED + "\nnote | trailing content with a pipe",
+    # A table-like row *before* the accepted header must fail too: uppercase
+    # identity-like, lowercase, and arbitrary pipe-bearing content alike.
+    DOCUMENTED.replace(
+        "## Sensor Topics:\n\nID | Topic | Response/Description",
+        "## Sensor Topics:\n\nTOP999 | main/Fake | fake row\n\nID | Topic | Response/Description",
+        1,
+    ),
+    DOCUMENTED.replace(
+        "## Sensor Topics:\n\nID | Topic | Response/Description",
+        "## Sensor Topics:\n\ntop999 | main/fake | fake row\n\nID | Topic | Response/Description",
+        1,
+    ),
+    DOCUMENTED.replace(
+        "## Sensor Topics:\n\nID | Topic | Response/Description",
+        "## Sensor Topics:\n\nfoo | bar | baz\n\nID | Topic | Response/Description",
+        1,
+    ),
 ])
 def test_malformed_or_duplicate_documented_rows_fail(bad):
     with pytest.raises(ReferenceError):
