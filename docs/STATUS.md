@@ -33,10 +33,21 @@ MariaDB, MQTT client id and port. The frontend-facing `/api/v1` contract is froz
 
 ## Stage 4A
 
-DONE. The owner validated deployed head `eae56fe46f4940aa4940ab2f08f87436cb54a117` on CT109:
-health 200, MQTT connected/alive with zero parse rejects, unchanged default API, and 203 capabilities
-with 157 readable physical slots. All six XTOP readings, including real zeros on XTOP1 and XTOP4,
-were present through the opt-in live API.
+DONE. The owner validated two deployed heads on CT109. The original implementation head
+`eae56fe46f4940aa4940ab2f08f87436cb54a117`: health 200, MQTT connected/alive with zero parse
+rejects, unchanged default API, and 203 capabilities with 157 readable physical slots, with all six
+XTOP readings, including real zeros on XTOP1 and XTOP4, present through the opt-in live API. The
+adversarial-review correction head `5b3776c4d23a1aa98a0a567c9798486f211c78ee`, which removed the
+capability `key` field and added the explicit physical `available` contract, was separately
+runtime-validated: 203 capabilities with no `key` field; 157 readable slots (150 with a receipt
+timestamp, matching 144 TOP + 6 XTOP; the 7 absent OPT slots read `mode=none`/`available=false`);
+representative fresh TOP/XTOP readings, including the TOP15 sentinel `-200` and text payloads,
+read `available=true`; unchanged default `/live` (21 metrics) and `/metrics` (21 metrics, 3 COP
+entries) shapes; an identical immutable history query result and MariaDB schema before and after;
+and the expected unrecorded restart gap, with no backfill. The final head
+`0008226f3fa10c2aaece093f21a02f269fa24ae0` adds only parser-side rejection of malformed reference
+input; it does not change valid parse output or runtime/API/history semantics, so it required no
+further CT109 deployment.
 
 ## Implemented
 
