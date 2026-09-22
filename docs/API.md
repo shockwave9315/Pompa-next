@@ -336,8 +336,10 @@ OPT0–OPT6, SET1–SET46, XTOP0–XTOP5. Each entry has exactly:
 
 `readable` is `true` for TOP/OPT/XTOP and `false` for SET. A canonical physical source has its
 metric key and zero-based priority; other entries have `null` for both. TOP/OPT/SET topics come
-from the documented reference. XTOP0/2/3/5 topics come from verified canonical sources; XTOP1/4
-have `topic: null`. No type, history, safety or control policy is implied by these fields.
+from the documented reference. XTOP0/2/3/5 topics come from verified canonical sources; the exact
+received paths `extra/Cool_Power_Consumption_Extra` (XTOP1) and
+`extra/Cool_Power_Production_Extra` (XTOP4) were supplied from CT109 `mqtt.uncatalogued_topics`.
+No type, history, safety or control policy is implied by these fields.
 
 `GET /api/v1/live?include=readings` returns the default `/live` body plus exactly one top-level
 `readings` object. It contains all 157 readable identities in order: TOP0–TOP143, OPT0–OPT6,
@@ -362,8 +364,9 @@ readings, is one recorder-locked observation. Neither opt-in form reads MariaDB;
 MQTT connects.
 
 For an identity without a current reading, the entry is still present: `topic` is its known path
-or `null`, and `value`, `kind`, `raw` and `received_at` are `null`, with `mode: "none"`. Thus an
-unpublished OPT entry is absent data, and XTOP1/4 currently have `topic: null` and `mode: "none"`.
+or `null`, and `value`, `kind`, `raw` and `received_at` are `null`, with `mode: "none"`. All 157
+readable identities currently have known topics; an unpublished OPT or XTOP reading still has
+`mode: "none"` rather than a synthesized value.
 For a payload, `mode` is `retained` if the MQTT delivery was retained and `live` otherwise.
 Physical `mode="live"` means the latest non-retained receipt in the current valid connection
 lifecycle. It does **not** claim freshness under the canonical 600-second source rule; generic

@@ -53,8 +53,9 @@ separate roadmap stages.
 The catalog contains 203 reference-backed identities and 157 readable TOP/OPT/XTOP slots. Generic
 physical values use number/text typing, and opt-in `/metrics?include=capabilities` and
 `/live?include=readings` expose them. Default Stage 1–3 API and canonical history behavior remain
-unchanged. XTOP1 and XTOP4 still have unknown topic paths; only actual runtime evidence can resolve
-them. No CT109 result is claimed here.
+unchanged. Owner-supplied pre-deployment CT109 `mqtt.uncatalogued_topics` evidence verifies the
+exact physical paths for XTOP1 and XTOP4, so all six XTOP topics are now mapped. Deployment of this
+head and the remaining CT109 regression checks are still pending owner execution.
 
 ## Out of scope
 

@@ -1,7 +1,7 @@
 """Reference identities joined to the unchanged core metric catalog.
 
 Only the tracked Markdown supplies documented topics. XTOP names come from an
-observed snapshot; their paths are known only when a core Source supplies one.
+observed snapshot; their paths require separate runtime evidence.
 """
 
 from __future__ import annotations
@@ -17,6 +17,13 @@ from pompa.catalog import METRICS, Metric, Source
 
 Family = Literal["TOP", "OPT", "SET", "XTOP"]
 Provenance = Literal["documented", "observed"]
+
+# Exact received topics in the owner's pre-deployment CT109 mqtt.uncatalogued_topics.
+# The other four XTOP paths remain authoritative in their canonical Source objects.
+_VERIFIED_XTOP_TOPICS = {
+    "XTOP1": "extra/Cool_Power_Consumption_Extra",
+    "XTOP4": "extra/Cool_Power_Production_Extra",
+}
 
 
 class ReferenceError(ValueError):
@@ -42,6 +49,11 @@ class Capability:
     source: Source | None = None
     source_priority: int | None = None
 
+    @property
+    def topic(self) -> str | None:
+        return (self.reference.topic or (self.source.topic if self.source else None)
+                or _VERIFIED_XTOP_TOPICS.get(self.reference.identity))
+
 
 def capability_dict(capability: Capability) -> dict:
     """The factual public projection of one effective capability."""
@@ -51,7 +63,7 @@ def capability_dict(capability: Capability) -> dict:
         "key": capability.key,
         "family": reference.family,
         "name": reference.name,
-        "topic": reference.topic or (capability.source.topic if capability.source else None),
+        "topic": capability.topic,
         "description": reference.description,
         "provenance": reference.provenance,
         "readable": reference.family != "SET",
@@ -262,6 +274,12 @@ def build_capabilities(
             associations[source.id] = (metric, source, priority)
             if priority == 0:
                 primary_ids.add(source.id)
+    for identity, topic in _VERIFIED_XTOP_TOPICS.items():
+        reference = by_id.get(identity)
+        if reference is None or reference.family != "XTOP" or topic != f"extra/{reference.name}":
+            raise ReferenceError(f"Verified XTOP topic conflicts with observation: {identity}")
+        if identity in associations and associations[identity][1].topic != topic:
+            raise ReferenceError(f"Verified XTOP topic conflicts with core: {identity}")
     result = []
     for reference in baseline:
         association = associations.get(reference.identity)

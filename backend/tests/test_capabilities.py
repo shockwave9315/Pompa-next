@@ -60,7 +60,11 @@ def test_reference_facts_and_generic_keys():
     assert entries["SET16"].reference.topic == "commands/SetCurves"
     assert entries["XTOP1"].reference.name == "Cool_Power_Consumption_Extra"
     assert entries["XTOP1"].reference.topic is None
+    assert entries["XTOP1"].topic == "extra/Cool_Power_Consumption_Extra"
+    assert entries["XTOP4"].reference.topic is None
+    assert entries["XTOP4"].topic == "extra/Cool_Power_Production_Extra"
     assert entries["XTOP0"].source is METRICS[11].sources[0]
+    assert all(e.topic is not None for e in entries.values() if e.reference.family != "SET")
 
 
 @pytest.mark.parametrize("bad", [
@@ -166,6 +170,16 @@ def test_core_topic_conflicts_fail():
     wrong_xtop = replace(METRICS[11], sources=(Source("XTOP0", "extra/Wrong_Name"),))
     with pytest.raises(ReferenceError, match="Core XTOP name conflicts"):
         build_capabilities(documented, observed, (wrong_xtop,))
+
+
+@pytest.mark.parametrize("identity", ("XTOP1", "XTOP4"))
+def test_verified_xtop_override_rejects_observed_name_drift(identity):
+    documented = parse_documented(DOCUMENTED)
+    observed = parse_observed(OBSERVED, documented)
+    changed = tuple(replace(entry, name="Wrong_Name") if entry.identity == identity else entry
+                    for entry in observed)
+    with pytest.raises(ReferenceError, match=f"Verified XTOP topic conflicts with observation: {identity}"):
+        build_capabilities(documented, changed)
 
 
 def test_runtime_packaging_points_to_authoritative_docs():

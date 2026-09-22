@@ -93,9 +93,9 @@ class Ingest:
             reference = capability.reference
             if reference.family == "SET":
                 continue
-            # XTOP paths are absent from the reference. Only core Source paths
-            # already verified by Stage 1 can make those slots addressable.
-            topic = reference.topic or (capability.source.topic if capability.source else None)
+            # Documented topics, core Source paths, and exact verified XTOP overrides
+            # are resolved once by the effective capability model.
+            topic = capability.topic
             self.physical_readings[reference.identity] = PhysicalReading(reference.identity, topic)
             if topic is not None:
                 if topic in self._physical_by_topic:

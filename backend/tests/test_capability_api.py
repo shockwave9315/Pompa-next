@@ -54,16 +54,17 @@ def test_capabilities_have_exact_count_order_shape_and_factual_topics():
     assert by_id["SET1"]["topic"] == "commands/SetHeatpump"
     assert all(by_id[identity]["readable"] is False for identity in expected if identity.startswith("SET"))
     assert all(by_id[identity]["readable"] is True for identity in expected if not identity.startswith("SET"))
-    for identity in ("XTOP1", "XTOP4"):
-        assert by_id[identity]["topic"] is None
-        assert by_id[identity]["provenance"] == "observed"
     for identity, topic in {
         "XTOP0": "extra/Heat_Power_Consumption_Extra",
+        "XTOP1": "extra/Cool_Power_Consumption_Extra",
         "XTOP2": "extra/DHW_Power_Consumption_Extra",
         "XTOP3": "extra/Heat_Power_Production_Extra",
+        "XTOP4": "extra/Cool_Power_Production_Extra",
         "XTOP5": "extra/DHW_Power_Production_Extra",
     }.items():
         assert by_id[identity]["topic"] == topic
+        assert by_id[identity]["provenance"] == "observed"
+    assert all(entry["topic"] is not None for entry in entries if entry["readable"])
 
 
 def test_canonical_associations_and_source_priority_are_from_core_catalog():
@@ -101,11 +102,15 @@ def test_unseen_readings_include_every_slot_with_exact_none_shape():
         "topic": "optional/Z2_Mixing_Valve", "value": None, "kind": None,
         "raw": None, "mode": "none", "received_at": None,
     }
-    for identity in ("XTOP1", "XTOP4"):
+    for identity, topic in (
+        ("XTOP1", "extra/Cool_Power_Consumption_Extra"),
+        ("XTOP4", "extra/Cool_Power_Production_Extra"),
+    ):
         assert readings[identity] == {
-            "topic": None, "value": None, "kind": None,
+            "topic": topic, "value": None, "kind": None,
             "raw": None, "mode": "none", "received_at": None,
         }
+    assert all(entry["topic"] is not None for entry in readings.values())
     assert not any(identity.startswith("SET") for identity in readings)
     assert body["mqtt"] == {"connected": False, "alive": False, "epoch": 0}
 
@@ -135,6 +140,25 @@ def test_numeric_text_retained_live_and_physical_sentinel_values():
     }
     canonical = api.body("/api/v1/live", T0 + 5)["metrics"]["co_power_production"]
     assert canonical["value"] is None and canonical["mode"] == "none"
+
+
+def test_verified_cooling_xtop_paths_appear_in_opt_in_readings_only():
+    api = Api()
+    api.connect(T0)
+    api.msg(T0 + 1, "extra/Cool_Power_Consumption_Extra", "12.5")
+    api.msg(T0 + 2, "extra/Cool_Power_Production_Extra", "0", retained=True)
+    body = api.body("/api/v1/live", T0 + 3, include="readings")
+    assert body["readings"]["XTOP1"] == {
+        "topic": "extra/Cool_Power_Consumption_Extra", "value": 12.5,
+        "kind": "number", "raw": "12.5", "mode": "live",
+        "received_at": "2027-01-15T08:00:01Z",
+    }
+    assert body["readings"]["XTOP4"] == {
+        "topic": "extra/Cool_Power_Production_Extra", "value": 0,
+        "kind": "number", "raw": "0", "mode": "retained",
+        "received_at": "2027-01-15T08:00:02Z",
+    }
+    assert "readings" not in api.body("/api/v1/live", T0 + 3)
 
 
 def test_opt_in_forms_need_neither_mqtt_nor_database():

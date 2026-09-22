@@ -19,7 +19,8 @@ def test_all_and_only_readable_reference_identities_have_small_slots():
     assert tuple(ingest.physical_readings) == expected
     assert tuple(reading.identity for reading in ingest.physical_snapshot()) == expected
     assert len(ingest.physical_readings) == 157
-    assert len(ingest._physical_by_topic) == 155
+    assert len(ingest._physical_by_topic) == 157
+    assert all(reading.topic is not None for reading in ingest.physical_snapshot())
     assert not any(identity.startswith("SET") for identity in ingest.physical_readings)
     assert {field.name for field in fields(PhysicalReading)} == {
         "identity", "topic", "payload", "received_at", "retained",
@@ -28,7 +29,7 @@ def test_all_and_only_readable_reference_identities_have_small_slots():
     assert all(r.payload is r.received_at is r.retained is None for r in ingest.physical_snapshot())
 
 
-def test_documented_topics_and_only_verified_xtop_paths_are_mapped():
+def test_documented_topics_and_all_verified_xtop_paths_are_mapped():
     ingest = Ingest(600)
     for capability in effective_capabilities():
         reference = capability.reference
@@ -37,18 +38,16 @@ def test_documented_topics_and_only_verified_xtop_paths_are_mapped():
     assert ingest.physical_readings["TOP9"].topic == "main/DHW_Target_Temp"
     assert ingest.physical_readings["OPT3"].topic == "optional/Z2_Mixing_Valve"
     assert {identity: ingest.physical_readings[identity].topic for identity in (
-        "XTOP0", "XTOP2", "XTOP3", "XTOP5",
+        "XTOP0", "XTOP1", "XTOP2", "XTOP3", "XTOP4", "XTOP5",
     )} == {
         "XTOP0": "extra/Heat_Power_Consumption_Extra",
+        "XTOP1": "extra/Cool_Power_Consumption_Extra",
         "XTOP2": "extra/DHW_Power_Consumption_Extra",
         "XTOP3": "extra/Heat_Power_Production_Extra",
+        "XTOP4": "extra/Cool_Power_Production_Extra",
         "XTOP5": "extra/DHW_Power_Production_Extra",
     }
-    for identity in ("XTOP1", "XTOP4"):
-        reading = ingest.physical_readings[identity]
-        assert (reading.topic, reading.payload, reading.received_at, reading.retained) == (
-            None, None, None, None
-        )
+    assert len(set(ingest._physical_by_topic)) == 157
 
 
 def test_noncore_numeric_text_model_and_opt_readings_replace_in_place():
@@ -97,22 +96,52 @@ def test_core_xtop_and_physical_sentinel_coexist_with_canonical_processing():
     assert ingest.historical("co_power_production", T0 + 3) is None
 
 
-def test_absent_opt_unresolved_xtop_and_unknown_topic_create_no_reading():
+def test_absent_opt_and_unknown_topic_create_no_reading():
     ingest = Ingest(600)
     ingest.connect(T0)
     before = ingest.physical_snapshot()
     ingest.message("unrelated/Anything", "7", False, T0 + 1)
-    ingest.message("extra/Cool_Power_Consumption_Extra", "7", False, T0 + 2)
-    ingest.message("extra/Cool_Power_Production_Extra", "7", False, T0 + 3)
-    ingest.message("commands/SetHeatpump", "1", False, T0 + 4)
+    ingest.message("commands/SetHeatpump", "1", False, T0 + 2)
     assert ingest.physical_snapshot() == before
     assert ingest.physical_readings["OPT3"].payload is None
-    assert ingest.physical_readings["XTOP1"].topic is None
-    assert ingest.physical_readings["XTOP4"].topic is None
     assert ingest.uncatalogued_topics == {
-        "unrelated/Anything", "extra/Cool_Power_Consumption_Extra",
-        "extra/Cool_Power_Production_Extra", "commands/SetHeatpump",
+        "unrelated/Anything", "commands/SetHeatpump",
     }
+
+
+def test_verified_cooling_xtops_are_typed_physical_only_and_remain_uncatalogued():
+    api = Api()
+    api.connect(T0)
+    before_live = api.body("/api/v1/live", T0 + 3)
+    before_metrics = api.body("/api/v1/metrics", T0 + 3)
+    history_args = {"from": "2027-01-15T08:00:00Z", "to": "2027-01-15T08:01:00Z"}
+    before_history = api.body("/api/v1/history", T0 + 3, **history_args)
+
+    api.msg(T0 + 1, "extra/Cool_Power_Consumption_Extra", "12.5")
+    api.msg(T0 + 2, "extra/Cool_Power_Production_Extra", "No error", retained=True)
+
+    assert api.ingest.physical_readings["XTOP1"] == PhysicalReading(
+        "XTOP1", "extra/Cool_Power_Consumption_Extra",
+        TypedPayload("12.5", 12.5, "number"), T0 + 1, False
+    )
+    assert api.ingest.physical_readings["XTOP4"] == PhysicalReading(
+        "XTOP4", "extra/Cool_Power_Production_Extra",
+        TypedPayload("No error", "No error", "text"), T0 + 2, True
+    )
+    assert not any(topic.startswith("extra/Cool_") for topic in api.ingest.sources)
+    assert api.ingest.uncatalogued_topics == {
+        "extra/Cool_Power_Consumption_Extra", "extra/Cool_Power_Production_Extra"
+    }
+    assert api.body("/api/v1/live", T0 + 3) == before_live
+    assert api.body("/api/v1/metrics", T0 + 3) == before_metrics
+    assert api.body("/api/v1/history", T0 + 3, **history_args) == before_history
+    for identity in ("xtop_1", "xtop_4"):
+        assert api.get("/api/v1/history", T0 + 3, **{**history_args, "series": identity}).status_code == 400
+    api.tick(T0 + 60)
+    assert api.storage.rows == {}
+    assert api.storage.rollup == {}
+    assert api.storage.upsert_calls == 0
+    assert tuple(RECORDED_KEYS) == tuple(api.ingest._by_metric)
 
 
 def test_connection_disconnect_offline_and_clock_step_clear_current_readings():
