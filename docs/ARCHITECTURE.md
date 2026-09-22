@@ -582,13 +582,233 @@ must not automatically become a valid optional-history power value. Stage 4B mus
 eligibility, semantic type, sentinels and aggregation policy explicitly, per selection. Stage 4A's
 `available` is a live-surface fact only; it does not by itself define minute-history validity.
 
-**Candidate:** core-wide minutes plus separate dynamic optional history. **Deferred to 4B:**
-history-suitable types and aggregation rules, physical optional table/schema, policy persistence,
-participation representation, minute-boundary policy changes, and exact rollup/purge integration.
-Compare a participation pseudo-series, an eligible count in a rollup row, compact metadata, or a
-simpler factual source. Prove atomic retries and late-hour correction with the existing recorder
-invariants. Keep `RETENTION_1M_DAYS=365` during early Stage 4. Choose any later default only after
-CT109 table/index/bytes-per-day and backup measurements plus Stage 4C durability proof.
+**Candidate:** core-wide minutes plus separate dynamic optional history. Compare a participation
+pseudo-series, an eligible count in a rollup row, compact metadata, or a simpler factual source.
+Prove atomic retries and late-hour correction with the existing recorder invariants. Keep
+`RETENTION_1M_DAYS=365` during early Stage 4. Choose any later default only after CT109
+table/index/bytes-per-day and backup measurements plus Stage 4C durability proof.
+
+#### 25.2.1 Checkpoint A — architecture and contract freeze (DONE)
+
+Checkpoint A froze the architecture below and proved its two riskiest claims against real
+MariaDB — the `optional_sample_1m` JSON candidate's semantic round trip and the policy-head
+concurrency invariant — before any optional runtime recording exists. It changed no canonical
+Stage 1–4A behavior, added no production Stage 4B table, and made no CT109 change. The subsections
+that follow are the frozen target; later checkpoints implement them incrementally.
+
+**HistoryProfile is not canonical `Metric`.** Optional physical history has its own immutable
+semantic definition, conceptually:
+
+```text
+HistoryProfile
+--------------
+identity           expected_topic      profile_version     label
+unit                kind (mean|last)   semantic_type       sentinels
+min_value           max_value          energy
+```
+
+`kind` for a `HistoryProfile` is the aggregation semantic, exactly `mean` or `last` as for a
+canonical `Metric`, but a `HistoryProfile` is never modeled as a fake `Metric`. Canonical logical
+metric keys and physical capability identities (§25.1) remain two distinct namespaces; a
+`HistoryProfile` adds a third, its own historical-series identity (§25.2.7), and none of the three
+may be conflated. A future checkpoint may extract a small pure primitive shared by canonical
+`catalog.parse_value` and `HistoryProfile` parsing — finite-number validation, sentinel matching,
+min/max range checking, and the `Outcome` result — once `HistoryProfile` parsing has a concrete
+caller to prove the extraction against. Checkpoint A left `catalog.parse_value` and its tests
+untouched rather than extracting speculatively: nothing in checkpoint A calls a `HistoryProfile`
+parser yet, so there is nothing real to prove the shared primitive against.
+
+**Eligible optional sources are observed continuously; selection controls persistence only.** A
+later checkpoint maintains historical state for every history-eligible physical profile
+continuously, whether or not it is currently selected, so that a factual earlier receipt still
+fresh at a later minute boundary can support a newly selected minute — not backfill, the same
+report-by-exception validity window canonical sources already use (§4). Optional source state must
+stay outside `Ingest.sources`, because that collection drives canonical expiry segmentation
+(`MinuteAccumulator`); optional integration must never perturb it.
+
+**A separate `OptionalAccumulator`, not a change to `MinuteAccumulator`.** Canonical minute
+segmentation and arithmetic (§6) are not modified for optional expiries. A later checkpoint adds an
+independent optional integration path sharing the same event timestamps, the same minute
+boundaries, and the same connection/LWT/clock-discontinuity invalidation facts as the canonical
+accumulator, but computing its own, independent optional expiry splits. `minute.py`'s canonical
+arithmetic remains byte-for-byte unchanged; checkpoint A did not modify it.
+
+**A persisted policy timeline is the only selection truth**, never inferred from raw optional row
+presence, live availability, in-memory state, or recorder polling time. Conceptually:
+
+```text
+optional_series              optional_policy_revision      optional_policy_member
+----------------              -------------------------      -----------------------
+id                             id                              revision_id
+identity                       base_revision_id                series_id
+expected_topic                 effective_from_minute
+profile_version                created_at
+created_at
+
+optional_policy_head
+--------------------
+id = 1   (singleton)
+revision_id
+```
+
+A series row is one immutable historical meaning: a different `(identity, expected_topic,
+profile_version)` tuple is a different series, never a silent repoint of an old one. Series,
+revisions and members are immutable after creation; only the singleton head pointer mutates, and
+only to point at a later revision in the linear chain.
+
+**`effective_from_minute` is persisted on every revision**, so policy activation depends on
+database timeline truth, never on when recorder code happens to notice a revision. A minute is
+governed by the latest revision in the linear chain whose `effective_from_minute <= minute ts`.
+There is no partial-minute selection: a policy change affects only future complete minutes.
+
+**Policy concurrency uses one database serialization point.** Both a policy-replacement
+transaction and a minute-persistence transaction must serialize against the same singleton
+`optional_policy_head` row using a locking/current read equivalent to `SELECT revision_id FROM
+optional_policy_head WHERE id = 1 FOR UPDATE`. This repository's transactions already begin with
+`START TRANSACTION WITH CONSISTENT SNAPSHOT` (`Storage.session`, §21); an ordinary `SELECT` inside
+that snapshot is *not* sufficient here; it stays bound to the transaction's own consistent snapshot
+even after the row lock is acquired. Only a locking read forces a current read of the latest
+committed row, regardless of when the transaction's own snapshot was established. Checkpoint A
+proved exactly this against real MariaDB (§25.2.8): a plain read taken after unblocking still
+returned the pre-commit value, while the locking read taken in the same transaction, at the same
+point, returned the value the other transaction had just committed.
+
+Required race property: if minute persistence locks and commits first, the concurrent policy PUT
+must block on the same row and, once unblocked, must choose an `effective_from_minute` strictly
+after the already-committed minute frontier it observes through its own locking read — never
+through a plain read it might have cached while waiting. If the policy PUT locks and commits
+first, the concurrent minute-persistence transaction must block and, once unblocked, must resolve
+every minute it is about to write against the newly committed policy through its own locking read.
+No committed minute may ever be retroactively reclassified because a concurrent PUT was invisible
+to the transaction that wrote it.
+
+Conceptual sequencing: a policy PUT observes recorder/open-minute safety under the Python
+`Recorder` lock, releases it before any database I/O, then begins a transaction, locks the policy
+head with a locking read, validates `base_revision`, inspects the current committed canonical
+minute frontier with a locking/current read where needed, computes a future minute-aligned
+`effective_from_minute`, inserts the immutable revision and its members, updates the head, and
+commits. Minute persistence begins a transaction, locks/reads the same head, resolves the timeline
+policy applicable to each minute being written, persists accordingly, and commits.
+
+**Selection states are independent of optional raw row presence.** For any minute and physical
+series:
+
+| Combination | Meaning |
+|---|---|
+| recorded + selected + known value stored | `known` |
+| recorded + selected + no known value stored | `selected but unknown` |
+| recorded + not selected | `not selected` |
+| no canonical minute | `not recorded` |
+
+A missing optional row never by itself means "not selected"; the policy timeline is the only fact
+that can say that.
+
+#### 25.2.2 The `optional_sample_1m` JSON candidate — MariaDB feasibility proved
+
+The frozen storage candidate for raw optional values:
+
+```sql
+CREATE TABLE optional_sample_1m (
+  ts          INT UNSIGNED NOT NULL PRIMARY KEY,
+  values_json JSON NOT NULL
+) ENGINE=InnoDB
+```
+
+The JSON document contains only known, selected values for that canonical minute, keyed by
+persistent `series_id` as JSON object keys (e.g. `{"17": 21.25, "22": 0.0, "31": 46.8}`). No
+`revision_id` is stored in this row: selection truth comes entirely from the policy timeline
+(§25.2.1), never from this table. If no selected optional series is known for a canonical minute,
+no `optional_sample_1m` row exists for it at all — an empty document is never stored, matching the
+"selected but unknown" state above.
+
+This candidate is frozen *because* checkpoint A proved it against real MariaDB (test-only table
+`stage4b_json_feasibility`, `backend/tests/test_stage4b_json_feasibility.py`), not merely proposed:
+a deterministic encoding (`json.dumps(values, sort_keys=True, separators=(",", ":"),
+allow_nan=False)`) round-trips every tested value — `0.0`, `-0.0`, `0.1`, `1.0/3.0`, `21.123456`,
+`1e-12`, `1e12`, and a realistic negative telemetry reading — through MariaDB's `JSON` column
+(which is a `LONGTEXT` alias, so the server does not reformat a validated document) and back to an
+equal Python float; `NaN`/`Infinity` are rejected by `allow_nan=False` before anything reaches the
+database; a document that fails `JSON_VALID` is refused by an explicit `CHECK (JSON_VALID(...))`
+constraint rather than silently stored; an idempotent upsert replaces the complete document rather
+than merging old and new keys; a `DELETE` for a minute leaves no stale value; and a present key
+with numeric `0` is distinguishable from an absent key. This is semantic feasibility only — the
+test makes no claim about MariaDB's physical on-disk byte layout.
+
+Do not implement fixed `s1..s64` columns; the JSON candidate is proven sufficient. Do not implement
+an EAV table; JSON keeps one row per canonical minute, matching the canonical `sample_1m` shape.
+
+**One canonical minute universe:** `optional_sample_1m.ts ⊆ sample_1m.ts`. Optional history is
+logically defined only over canonical-recorded minutes; a canonical gap is also an optional gap.
+Selection truth, however, does not depend on atomic optional-row presence (§25.2.1).
+
+#### 25.2.3 Write model and failure classes
+
+The existing one protected/waiting minute write state machine (§19) is kept; checkpoint A adds no
+second optional write queue. A later checkpoint's minute writes contain the canonical minute plus
+optional known values for that minute, intended to commit in one database transaction together
+with the canonical and optional storage/rollup corrections. Two failure classes are distinguished:
+
+- **Optional domain/computation failure** (blocked topic drift, sentinel, rejected physical
+  payload, profile mismatch, or any failure building optional values before database work): these
+  degrade only the affected optional facts to unknown and must never prevent the canonical minute
+  from being queued or written.
+- **Optional storage/rollup failure**, once inside the database transaction: this fails the whole
+  transaction, exactly like a canonical storage failure (§19). A `SAVEPOINT` that committed
+  canonical data while leaving stale optional raw/rollup evidence behind is explicitly rejected: a
+  late rewrite or re-recorded `ts` could otherwise commit new canonical truth while old optional
+  history remained visible as if current. A pre-database optional domain failure leaves the
+  optional fact unknown while the canonical minute survives; a database/storage transaction failure
+  fails closed and retries using the existing protected-batch semantics (§19).
+
+#### 25.2.4 Long-term optional rollup, roll frontier and purge frontier
+
+Frozen candidate:
+
+```sql
+optional_rollup_1h
+------------------
+hour_ts             series_id            selected_minutes
+known_minutes       v_sum                v_min
+v_max                v_last
+
+PRIMARY KEY (hour_ts, series_id)
+```
+
+`selected_minutes > 0`; `0 <= known_minutes <= selected_minutes`; when `known_minutes == 0`,
+`v_sum`, `v_min`, `v_max` and `v_last` are `NULL`. `selected_minutes` comes from canonical recorded
+minutes intersected with policy-timeline participation, never from optional raw-row count.
+`known_minutes` and the value statistics come only from stored optional known values. Different
+series meanings (§25.2.6) are never automatically combined.
+
+One canonical `rolled_until` frontier is kept (§8); every canonical hour rebuild later rebuilds the
+optional rollup for the same hour. One raw retention frontier is kept; `RETENTION_1M_DAYS` remains
+365 unchanged. A later purge preserves the existing canonical proof unchanged, proves optional
+raw/rollup consistency, and deletes canonical and optional raw below the same cutoff in one
+transaction. Any doubt deletes nothing (§13); there is no independent optional retention policy.
+
+#### 25.2.5 Historical meaning and versioning
+
+One historical series is exactly `(identity, expected_topic, profile_version)`; different meanings
+are never concatenated automatically. A future convenience alias may resolve to the current
+meaning, but a historical query must ultimately resolve to exactly one persistent series id. Final
+public selector syntax is not frozen by checkpoint A.
+
+#### 25.2.6 Default selection
+
+Empty. The existing canonical 21 continue recording exactly as before; nothing additional is
+selected by default.
+
+#### 25.2.7 Deferred beyond checkpoint A
+
+Not yet frozen: the complete eligible physical-profile list (legacy product evidence is a seed
+only — candidates likely include TOP21, TOP50–TOP53, TOP55, TOP63–TOP64, TOP66, TOP90–TOP93,
+TOP142, XTOP1 and XTOP4, but each still needs factual semantics and publication-gap evidence before
+it is eligible); energy output for optional power; and an operational maximum selected-series
+count. A physical identity already serving a canonical logical metric is never also an optional
+history selection. `OptionalAccumulator` implementation, optional ingest runtime state, the
+production selection API, production policy/optional-sample/optional-rollup tables beyond the
+checkpoint A feasibility proof, optional raw recording, optional rollup, optional purge, optional
+history query endpoints, and any CT109 optional-history deployment all belong to later checkpoints.
 
 ### 25.3 Stage 4C — one activity interpretation and durable events
 

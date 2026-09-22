@@ -2,8 +2,12 @@
 
 ## Current stage
 
-**Stage 4A — DONE.** Unified HeishaMon capability foundation and full readable live surface.
-PR #6 remains draft for owner review before merge. Frontend work starts after Stage 4.
+**Stage 4B — checkpoint A DONE.** Configurable optional history. Checkpoint A is architecture/
+contract freeze plus MariaDB feasibility proof only; no optional runtime recording exists yet.
+Frontend work starts after Stage 4.
+
+Stage 4A — DONE and merged to `main` (PR #6, merge commit
+`a34aaead89fae3359769cf2737aab42fd274d145`).
 
 ### Stage 0
 
@@ -49,7 +53,7 @@ and the expected unrecorded restart gap, with no backfill. The final head
 input; it does not change valid parse output or runtime/API/history semantics, so it required no
 further CT109 deployment.
 
-## Implemented
+### Implemented in Stage 4A
 
 - Parse the tracked TOP/OPT/SET reference and observed XTOP identities into a deterministic
   baseline; combine it with existing canonical `Metric`/`Source` semantics and small verified
@@ -66,14 +70,54 @@ The owner's immutable historical-range response matched byte for byte before and
 MariaDB schemas were identical, canonical minutes continued advancing, and the restart left its
 expected unrecorded partial minute. No optional capability was persisted.
 
+## Stage 4B
+
+**Checkpoint A — architecture/contract freeze and feasibility proof — DONE.** Not yet the optional
+recorder implementation. Branch `stage-4b-optional-history`, draft PR, not merged.
+
+### Implemented in checkpoint A
+
+- Froze the Stage 4B architecture in `docs/ARCHITECTURE.md` §25.2: `HistoryProfile` as a distinct
+  namespace from canonical `Metric` and physical capability identity; continuous observation versus
+  selection-gated persistence; a separate future `OptionalAccumulator` leaving `MinuteAccumulator`
+  unchanged; a persisted, immutable policy timeline (`optional_series` /
+  `optional_policy_revision` / `optional_policy_member` / `optional_policy_head`) as the only
+  selection truth, with database-timeline-resolved `effective_from_minute`; the `recorded` /
+  `selected` / `known` state algebra; the `optional_sample_1m` JSON write model and its two
+  pre-DB-vs-in-transaction failure classes; the `optional_rollup_1h` candidate and shared
+  roll/purge frontiers; and default-empty selection.
+- Proved, against real MariaDB (test-only tables, no production Stage 4B schema): the
+  `optional_sample_1m` JSON candidate's semantic round trip, invalid-JSON rejection,
+  NaN/Infinity rejection before persistence, idempotent whole-document upsert, clean delete, and
+  missing-key-versus-zero distinguishability
+  (`backend/tests/test_stage4b_json_feasibility.py`); and the policy-head concurrency invariant —
+  a locking/current read on the singleton head row serializes a policy-replacement transaction
+  against a minute-persistence transaction even under this repository's
+  `START TRANSACTION WITH CONSISTENT SNAPSHOT`, in both commit orderings, with an explicit control
+  proving an ordinary snapshot read would give the wrong answer
+  (`backend/tests/test_stage4b_policy_concurrency.py`).
+- Left `catalog.parse_value` and canonical parsing untouched; no shared numeric-parsing primitive
+  was extracted, since checkpoint A has no `HistoryProfile` parser caller to prove it against yet
+  (`docs/ARCHITECTURE.md` §25.2.1).
+- Verified no Stage 1–4A behavior changed: full backend test suite, including the new feasibility
+  tests, against real MariaDB.
+
+### Deferred beyond checkpoint A
+
+See `docs/ARCHITECTURE.md` §25.2.7: the complete eligible physical-profile list, energy for
+optional power, an operational maximum selected-series count, `OptionalAccumulator`
+implementation, optional ingest runtime state, the production selection API, production Stage 4B
+tables, optional raw recording/rollup/purge/query, and any CT109 optional-history deployment.
+
 ## Out of scope
 
-- Database schema, optional history, logging policy, event engine, reports and SET publishing.
+- Optional-history runtime recording, logging-selection API, event engine, reports and SET
+  publishing.
 - Frontend and legacy compatibility or historical migration.
-- Changing the 21 canonical metric semantics, Stage 1–3 history invariants, or the 365-day default
-  raw retention.
+- Changing the 21 canonical metric semantics, Stage 1–4A history invariants, or the 365-day
+  default raw retention.
 
 ## Next
 
-After PR #6 review/merge: **Stage 4B — configurable optional history**. See `docs/ROADMAP.md` for
-later stages.
+Checkpoint B of Stage 4B: the optional recorder implementation building on the checkpoint A
+architecture freeze. See `docs/ROADMAP.md` for later stages.
