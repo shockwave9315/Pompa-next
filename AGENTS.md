@@ -10,7 +10,9 @@ Pompa Next is a clean implementation, not a refactor of the legacy source tree.
 4. Read `docs/reference/heishamon/*` only for MQTT or topic semantics.
 
 Do not scan the whole repository by default.
-Do not inspect the legacy repository unless the task explicitly requires legacy or reference evidence.
+For Stage 4/5 work in an area present in legacy, inspect only the corresponding legacy product
+behavior as evidence before finalizing scope or design; see `docs/CONTEXT.md`. Other legacy reads
+require a specific comparison or evidence need.
 Do not mine legacy code for reusable architecture, APIs, schemas, or implementation patterns.
 
 ## Sources of truth

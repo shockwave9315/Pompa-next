@@ -40,8 +40,8 @@ Domain rules are in [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 
 ## API
 
-The frozen frontend-facing contract is [`docs/API.md`](../docs/API.md); this section is the
-operator's summary.
+The current Stage 3 default API contract is [`docs/API.md`](../docs/API.md); this section is the
+operator's summary. Stage 4A's expanded capability/readings forms are planned, not yet deployed.
 
 - `GET /health` — process liveness only: `{"status": "ok"}`.
 - `GET /api/v1/status` — facts: MQTT connection/epoch/LWT/alive/last live message/parse rejects,
@@ -52,7 +52,7 @@ operator's summary.
   will never let be written), configured retention, last rollup and purge outcomes, database
   availability, oldest/newest stored minute, `rolled_until` and `purge_cutoff` (what purge may
   delete next, not what it already deleted). No verdicts.
-- `GET /api/v1/live` — current in-memory state of every catalog metric: value, `mode`
+- `GET /api/v1/live` — current in-memory state of the 21 canonical metrics: value, `mode`
   (`live` | `retained` | `none`), physical source and receipt time. In-memory only, so it stays
   available during a database outage. A retained value is labelled and never enters history.
 - `GET /api/v1/metrics` — catalog-derived metric and COP metadata, presentation timezone, history

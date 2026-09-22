@@ -26,9 +26,14 @@ Current repository: `shockwave9315/Pompa-next`
 
 Legacy/reference repository: `shockwave9315/pompa`
 
-Legacy is frozen reference material only. Pompa Next is a new implementation, not a refactor or continuation of the old source tree.
+**Product continuity, implementation reset:** Pompa Next is the clean functional successor to the
+useful legacy product. Legacy is product evidence for capabilities, workflows, domain discoveries,
+real-device findings and presentation lessons. Recover or improve useful behavior where it serves
+the product; no legacy feature or mock is automatically correct or required as-is.
 
-Knowledge may be extracted when explicitly needed. Architecture and code do not move automatically.
+Pompa Next is a new implementation, not a refactor or continuation of the old source tree. Legacy
+code, APIs, schemas, service structure, fallback chains, calculations and state machinery are not
+implementation authority and must not be copied blindly.
 
 No source, API, schema, database, or data compatibility is required. There is no migration or backfill of legacy historical data.
 
@@ -70,7 +75,10 @@ Historical source selection uses the highest-priority source that is valid, `see
 
 `STALE_AFTER_SECONDS=600` is the accepted Stage 1 global freshness policy, decided from a real-runtime measurement on CT109 (22.768 h uninterrupted, owner-accepted short of the originally planned ≥24 h target; see `docs/ARCHITECTURE.md` §4).
 
-Canonical history is stored in a wide `sample_1m` table. Long-term history later uses a narrow `rollup_1h` table.
+The 21 canonical metrics retain their proven semantics. Canonical history uses a wide `sample_1m`
+table and long-term history uses a narrow `rollup_1h` table. Stage 4 expands readable HeishaMon
+capability around this foundation before frontend work; full live coverage does not imply full
+history persistence.
 
 Energy is derived from minute-average power:
 
@@ -87,6 +95,11 @@ Timestamps are stored in UTC. Calendar presentation uses local time. Daily bucke
 The backend is the domain source of truth. The frontend renders backend facts and models and performs no energy, COP, state, alignment, or coverage math.
 
 Control is a later, isolated MQTT write path. Recorder and history behavior must never depend on control.
+
+Product direction: broad capability with lightweight implementation. The backend owns one
+definition of each domain fact, reuses its existing history algebra, and exposes domain resources
+rather than page-specific calculations. Unknown and transition are valid operating facts; ordinary
+heat-pump changes do not require infrastructure-style recovery machinery.
 
 ## Working process
 
@@ -136,4 +149,10 @@ When architecture or domain semantics matter, read the relevant sections of `doc
 
 When MQTT or HeishaMon topic facts matter, read only the needed files in `docs/reference/heishamon/`.
 
-Do not read the legacy repository unless the task explicitly requires comparison or reference evidence. Never use legacy history documents as Pompa Next requirements.
+For Stage 4 or 5 work on a product area already present in legacy, inspect the corresponding
+legacy product behavior and tests before finalizing scope or design. This includes 4A/4E
+capability/control research, 4B logging selection, 4C activity/cycles/defrost, 4D reports, and
+Stage 5 current, history charts/minute table/presets, statistics and cycles views. Mocks are
+product clues, not proof of working backend behavior. Ask
+what to preserve or improve, not what code to copy. Other legacy inspection still requires a
+specific comparison or evidence need; legacy history documents are not Pompa Next requirements.
