@@ -31,25 +31,30 @@ runtime-validated on CT109 alongside legacy, in a separate Docker Compose projec
 MariaDB, MQTT client id and port. The frontend-facing `/api/v1` contract is frozen; see
 `docs/API.md`.
 
-## Goal
+## Stage 4A implementation
 
-Add a reference-backed effective HeishaMon capability catalog and full readable in-memory live
-surface without changing the 21 canonical metrics or Stage 1–3 recorder/history behavior. The
-next implementation work is **Stage 4A checkpoint A: reference-backed capability foundation**.
+The Stage 4A code is complete and locally validated. CT109 deployment and runtime validation are
+pending owner execution, so Stage 4A is not yet marked DONE.
 
-## In scope
+## Implemented
 
 - Parse the tracked TOP/OPT/SET reference and observed XTOP identities into a deterministic
   baseline; combine it with existing canonical `Metric`/`Source` semantics and small verified
   overrides. Unknown metadata remains unknown.
 - Add typed normalization and lightweight in-memory live readings for additional readable topics.
 - Expose additive capability/readings forms while preserving default `/metrics` and `/live` shapes.
-- Prove reference coverage, unchanged core behavior and packaged-reference availability; validate
-  the resulting live surface on CT109.
+- Prove reference coverage, unchanged core behavior and packaged-reference availability locally.
 
 Stage 4A uses one feature branch and one DRAFT PR with checkpoint commits: A reference-backed
-foundation; B additional typed normalization; C full in-memory readings; D additive API; E
-tests, docs and CT109 validation. These are commits within the stage, not separate roadmap stages.
+foundation; B additional typed normalization; C full in-memory readings; D additive API; E final
+local review/tests/docs and owner-run CT109 validation. These are commits within the stage, not
+separate roadmap stages.
+
+The catalog contains 203 reference-backed identities and 157 readable TOP/OPT/XTOP slots. Generic
+physical values use number/text typing, and opt-in `/metrics?include=capabilities` and
+`/live?include=readings` expose them. Default Stage 1–3 API and canonical history behavior remain
+unchanged. XTOP1 and XTOP4 still have unknown topic paths; only actual runtime evidence can resolve
+them. No CT109 result is claimed here.
 
 ## Out of scope
 
@@ -60,6 +65,6 @@ tests, docs and CT109 validation. These are commits within the stage, not separa
 
 ## Next
 
-**Stage 4B — configurable optional history**, followed by 4C activity/cycles/defrost and durable
-events, 4D reports, 4E control and final API/runtime validation, Stage 5 frontend, then Stage 6
-cutover. See `docs/ROADMAP.md`.
+After owner CT109 validation and PR #6 review/merge: **Stage 4B — configurable optional history**,
+followed by 4C activity/cycles/defrost and durable events, 4D reports, 4E control and final
+API/runtime validation, Stage 5 frontend, then Stage 6 cutover. See `docs/ROADMAP.md`.
