@@ -157,7 +157,6 @@ def parse_observed(text: str, documented: tuple[ReferenceIdentity, ...]) -> tupl
         raise ReferenceError("Malformed observed header")
     documented_top = {e.identity: e for e in documented if e.family == "TOP"}
     seen: set[str] = set()
-    discrepancies: set[str] = set()
     xtops: list[ReferenceIdentity] = []
     for line in lines[1:]:
         cells = line.split("\t")
@@ -177,14 +176,9 @@ def parse_observed(text: str, documented: tuple[ReferenceIdentity, ...]) -> tupl
             if reference.name != name:
                 if _OBSERVED_NAME_DISCREPANCIES.get(raw_id) != (reference.name, name):
                     raise ReferenceError(f"Observed TOP name conflicts with reference: {raw_id}")
-                discrepancies.add(raw_id)
         else:
             xtops.append(ReferenceIdentity(raw_id, "XTOP", int(match.group(2)), name, None,
                                            cells[3] or None, "observed"))
-    if seen.intersection(documented_top) != set(documented_top):
-        raise ReferenceError("Observed TOP coverage differs from documented TOP coverage")
-    if discrepancies != set(_OBSERVED_NAME_DISCREPANCIES):
-        raise ReferenceError("Verified observed TOP discrepancies changed")
     result = tuple(sorted(xtops, key=lambda e: e.index))
     _unique(result)
     _contiguous(result, "XTOP", 0)

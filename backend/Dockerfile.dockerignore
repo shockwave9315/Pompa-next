@@ -1,0 +1,16 @@
+# Allow only the files copied by backend/Dockerfile from the repository context.
+**
+!backend/
+backend/**
+!backend/requirements.txt
+!backend/pompa/
+backend/pompa/**
+!backend/pompa/*.py
+!docs/
+docs/**
+!docs/reference/
+docs/reference/**
+!docs/reference/heishamon/
+docs/reference/heishamon/**
+!docs/reference/heishamon/MQTT-Topics.md
+!docs/reference/heishamon/realne_dane.md

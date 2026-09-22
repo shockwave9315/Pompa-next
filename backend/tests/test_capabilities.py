@@ -88,6 +88,7 @@ def test_malformed_duplicate_or_conflicting_observation_fails():
         OBSERVED.replace("XTOP0\tHeat_Power_Consumption_Extra\t", "XTOPx\tHeat_Power_Consumption_Extra\t"),
         OBSERVED.replace("XTOP0\tHeat_Power_Consumption_Extra\t", "\tHeat_Power_Consumption_Extra\t"),
         OBSERVED.replace("TOP6\tMain_Outlet_Temp\t", "TOP6\tWrong_Name\t"),
+        OBSERVED.replace("TOP6\tMain_Outlet_Temp\t", "TOP999\tMain_Outlet_Temp\t"),
         OBSERVED + "\nXTOP0\tHeat_Power_Consumption_Extra\t18\tWatt",
         OBSERVED.replace("XTOP2\tDHW_Power_Consumption_Extra\t0\tWatt\n", ""),
     ):
@@ -98,8 +99,38 @@ def test_malformed_duplicate_or_conflicting_observation_fails():
 def test_only_verified_snapshot_name_discrepancies_are_accepted():
     documented = parse_documented(DOCUMENTED)
     assert parse_observed(OBSERVED, documented)
+    expected = {
+        "TOP111": ("Z2_Sensor_Settings", "Z1_Sensor_Settings"),
+        "TOP112": ("Z1_Sensor_Settings", "Z2_Sensor_Settings"),
+        "TOP123": ("Z1_Pump_State", "Z2_Pump_State"),
+        "TOP124": ("Z2_Pump_State", "Z1_Pump_State"),
+    }
+    documented_names = {entry.identity: entry.name for entry in documented}
+    observed_names = {row.split("\t", 2)[0]: row.split("\t", 2)[1]
+                      for row in OBSERVED.splitlines()[1:]}
+    for identity, (documented_name, observed_name) in expected.items():
+        assert documented_names[identity] == documented_name
+        assert observed_names[identity] == observed_name
     with pytest.raises(ReferenceError, match="TOP111"):
         parse_observed(OBSERVED.replace("TOP111\tZ1_Sensor_Settings", "TOP111\tOther_Sensor"), documented)
+
+
+def test_documented_top_does_not_require_observed_top_row():
+    lines = DOCUMENTED.splitlines()
+    after_last_top = next(i for i, line in enumerate(lines) if line.startswith("TOP143 |")) + 1
+    lines.insert(after_last_top, "TOP144 | main/Future_Topic | A newly documented topic")
+    documented = parse_documented("\n".join(lines))
+    incomplete_snapshot = "\n".join(
+        line for line in OBSERVED.splitlines()
+        if not line.startswith(("TOP6\t", "TOP111\t"))
+    )
+    observed = parse_observed(incomplete_snapshot, documented)
+    assert tuple(entry.identity for entry in observed) == tuple(f"XTOP{i}" for i in range(6))
+    effective = {entry.reference.identity: entry for entry in build_capabilities(documented, observed)}
+    assert len(effective) == 204
+    assert effective["TOP6"].reference.topic == "main/Main_Outlet_Temp"
+    assert effective["TOP144"].reference.topic == "main/Future_Topic"
+    assert effective["TOP144"].source is None
 
 
 def test_core_association_and_priority_are_unchanged():
@@ -144,3 +175,13 @@ def test_runtime_packaging_points_to_authoritative_docs():
     assert "COPY docs/reference/heishamon/MQTT-Topics.md docs/reference/heishamon/realne_dane.md ./docs/reference/heishamon/" in dockerfile
     assert "dockerfile: backend/Dockerfile" in compose
     assert "context: ." in compose
+    ignore = (REPO_ROOT / "backend/Dockerfile.dockerignore").read_text()
+    assert [line for line in ignore.splitlines() if line and not line.startswith("#")] == [
+        "**", "!backend/", "backend/**", "!backend/requirements.txt", "!backend/pompa/",
+        "backend/pompa/**", "!backend/pompa/*.py", "!docs/", "docs/**",
+        "!docs/reference/", "docs/reference/**", "!docs/reference/heishamon/",
+        "docs/reference/heishamon/**", "!docs/reference/heishamon/MQTT-Topics.md",
+        "!docs/reference/heishamon/realne_dane.md",
+    ]
+    assert (ROOT / "MQTT-Topics.md").is_file()
+    assert (ROOT / "realne_dane.md").is_file()
