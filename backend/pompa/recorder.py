@@ -53,7 +53,7 @@ from collections.abc import Callable, Iterable
 from enum import Enum
 
 from .aggregation import RECORDED, SERIES, fold_minutes
-from .ingest import Ingest
+from .ingest import Ingest, PhysicalReading
 from .minute import MinuteAccumulator, MinuteRow, iso_utc
 from .storage import Session, Storage, StorageUnavailable
 from .timegrid import HOUR, floor_hour, purge_cutoff
@@ -427,6 +427,11 @@ class Recorder:
                     for key, v in ing.live_snapshot(now).items()
                 },
             }
+
+    def physical_readings(self) -> tuple[PhysicalReading, ...]:
+        """Copy immutable physical readings under the MQTT/tick snapshot lock."""
+        with self._lock:
+            return self.ingest.physical_snapshot()
 
     def snapshot(self, clock: Callable[[], float]) -> tuple[float, dict]:
         """Factual in-memory state for ``/api/v1/status``, with its observation instant.

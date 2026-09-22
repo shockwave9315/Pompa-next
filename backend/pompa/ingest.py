@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from .capabilities import TypedPayload, effective_capabilities, normalize_payload
 from .catalog import METRICS, SOURCE_BY_TOPIC, Metric, Outcome, Source, parse_value
 
 log = logging.getLogger(__name__)
@@ -42,6 +43,15 @@ class LiveValue:
 
 
 NO_LIVE = LiveValue(None, "none", None, None, None)
+
+
+@dataclass(frozen=True, slots=True)
+class PhysicalReading:
+    identity: str
+    topic: str | None
+    payload: TypedPayload | None = None
+    received_at: float | None = None
+    retained: bool | None = None
 
 
 @dataclass
@@ -77,6 +87,20 @@ class SourceState:
 class Ingest:
     def __init__(self, stale_after: int):
         self.stale_after = stale_after
+        self.physical_readings: dict[str, PhysicalReading] = {}
+        self._physical_by_topic: dict[str, str] = {}
+        for capability in effective_capabilities():
+            reference = capability.reference
+            if reference.family == "SET":
+                continue
+            # XTOP paths are absent from the reference. Only core Source paths
+            # already verified by Stage 1 can make those slots addressable.
+            topic = reference.topic or (capability.source.topic if capability.source else None)
+            self.physical_readings[reference.identity] = PhysicalReading(reference.identity, topic)
+            if topic is not None:
+                if topic in self._physical_by_topic:
+                    raise ValueError(f"Readable capability topic mapped twice: {topic}")
+                self._physical_by_topic[topic] = reference.identity
         self.sources: dict[str, SourceState] = {
             topic: SourceState(metric, source) for topic, (metric, source) in SOURCE_BY_TOPIC.items()
         }
@@ -115,6 +139,7 @@ class Ingest:
             s.value = None
             s.last_live_at = None
             s.gap_baseline_at = None
+        self._clear_physical_readings()
         self.last_live_at = None
         self.alive_since = None
 
@@ -137,6 +162,11 @@ class Ingest:
 
     def message(self, topic: str, payload: str, retained: bool, t: float) -> None:
         """``topic`` is relative to the configured prefix, e.g. ``main/Pump_Flow``."""
+        identity = self._physical_by_topic.get(topic)
+        if identity is not None:
+            self.physical_readings[identity] = PhysicalReading(
+                identity, topic, normalize_payload(payload), t, retained
+            )
         s = self.sources.get(topic)
         if s is None:
             if len(self.uncatalogued_topics) < MAX_UNCATALOGUED_TOPICS:
@@ -233,6 +263,10 @@ class Ingest:
         """Every catalog metric exactly once, in catalog order."""
         return {m.key: self.live(m.key, t) for m in METRICS}
 
+    def physical_snapshot(self) -> tuple[PhysicalReading, ...]:
+        """All readable slots in reference order, including absent/unresolved ones."""
+        return tuple(self.physical_readings.values())
+
     def next_expiry_after(self, t: float) -> float | None:
         """Earliest moment after ``t`` at which a historical value stops being fresh."""
         expiries = [
@@ -264,11 +298,16 @@ class Ingest:
 
     def _invalidate(self) -> None:
         """Disconnect/Offline/clock step: values and source life need new non-retained evidence."""
+        self._clear_physical_readings()
         for s in self.sources.values():
             s.value = None
             s.gap_baseline_at = None
         self.last_live_at = None
         self.alive_since = None
+
+    def _clear_physical_readings(self) -> None:
+        for identity, reading in self.physical_readings.items():
+            self.physical_readings[identity] = PhysicalReading(identity, reading.topic)
 
     def _expire(self, t: float) -> None:
         """Lazily end an alive interval that went stale before ``t``."""
