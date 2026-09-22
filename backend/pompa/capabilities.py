@@ -6,6 +6,7 @@ observed snapshot; their paths are known only when a core Source supplies one.
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from functools import lru_cache
@@ -40,6 +41,36 @@ class Capability:
     metric: Metric | None = None
     source: Source | None = None
     source_priority: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TypedPayload:
+    raw: str
+    value: int | float | str
+    kind: Literal["number", "text"]
+
+
+_DECIMAL_NUMBER = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
+
+
+def normalize_payload(raw: str) -> TypedPayload:
+    """Type one physical payload; trim only its outer whitespace.
+
+    Numeric syntax must be an ordinary signed decimal, optionally with an
+    exponent, and floating-point results must be finite. Other payloads, including
+    empty text, remain text. The original decoded payload is retained as raw.
+    """
+    text = raw.strip()
+    if _DECIMAL_NUMBER.fullmatch(text):
+        try:
+            number = (float(text) if "." in text or "e" in text.lower()
+                      else int(text))
+        except ValueError:
+            pass
+        else:
+            if not isinstance(number, float) or math.isfinite(number):
+                return TypedPayload(raw, number, "number")
+    return TypedPayload(raw, text, "text")
 
 
 _SECTIONS: tuple[tuple[str, Family, int], ...] = (
