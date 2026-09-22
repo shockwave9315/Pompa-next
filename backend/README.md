@@ -10,6 +10,7 @@ Domain rules are in [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 |---|---|
 | `pompa/config.py` | Environment settings; invalid configuration stops startup. |
 | `pompa/catalog.py` | The 21 recorded metrics: topics, priority, unit, kind, sentinels, ranges. |
+| `pompa/capabilities.py` | Reference-backed TOP/OPT/SET/XTOP capabilities and generic physical payload typing. |
 | `pompa/ingest.py` | Connection epochs, LWT, retained vs live, `seen_live`, freshness, source selection. |
 | `pompa/minute.py` | `MinuteAccumulator` → `MinuteRow` (full-minute source life, time-weighted means). |
 | `pompa/aggregation.py` | `Stats` algebra, derived series, energy, paired COP, coverage. |
@@ -40,8 +41,8 @@ Domain rules are in [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 
 ## API
 
-The current Stage 3 default API contract is [`docs/API.md`](../docs/API.md); this section is the
-operator's summary. Stage 4A's expanded capability/readings forms are planned, not yet deployed.
+The Stage 3 default API shapes and the CT109-validated Stage 4A opt-in forms are specified in
+[`docs/API.md`](../docs/API.md); this section is the operator's summary.
 
 - `GET /health` — process liveness only: `{"status": "ok"}`.
 - `GET /api/v1/status` — facts: MQTT connection/epoch/LWT/alive/last live message/parse rejects,
@@ -55,8 +56,13 @@ operator's summary. Stage 4A's expanded capability/readings forms are planned, n
 - `GET /api/v1/live` — current in-memory state of the 21 canonical metrics: value, `mode`
   (`live` | `retained` | `none`), physical source and receipt time. In-memory only, so it stays
   available during a database outage. A retained value is labelled and never enters history.
+- `GET /api/v1/live?include=readings` — the unchanged default live body plus 157 physical
+  TOP/OPT/XTOP readings. Generic physical values are number/text facts and do not enter canonical
+  history.
 - `GET /api/v1/metrics` — catalog-derived metric and COP metadata, presentation timezone, history
   buckets and the 3000-bucket limit. No database or MQTT dependency.
+- `GET /api/v1/metrics?include=capabilities` — the unchanged default metric catalog plus all 203
+  reference-backed TOP/OPT/SET/XTOP capabilities.
 - `GET /api/v1/history?from=…&to=…[&bucket=…][&series=a,b]` — exact `[from, to)`, never rounded.
 
 `from` and `to` are ISO 8601 instants with an explicit offset (`Z`, `+02:00`) or `YYYY-MM-DD`

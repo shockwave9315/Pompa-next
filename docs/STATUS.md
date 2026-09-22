@@ -2,8 +2,8 @@
 
 ## Current stage
 
-**Stage 4A — Unified HeishaMon capability foundation and full readable live surface.** Frontend
-work is postponed until Stage 4 — Complete Product Backend is finished.
+**Stage 4A — DONE.** Unified HeishaMon capability foundation and full readable live surface.
+PR #6 remains draft for owner review before merge. Frontend work starts after Stage 4.
 
 ### Stage 0
 
@@ -31,25 +31,40 @@ runtime-validated on CT109 alongside legacy, in a separate Docker Compose projec
 MariaDB, MQTT client id and port. The frontend-facing `/api/v1` contract is frozen; see
 `docs/API.md`.
 
-## Goal
+## Stage 4A
 
-Add a reference-backed effective HeishaMon capability catalog and full readable in-memory live
-surface without changing the 21 canonical metrics or Stage 1–3 recorder/history behavior. The
-next implementation work is **Stage 4A checkpoint A: reference-backed capability foundation**.
+DONE. The owner validated two deployed heads on CT109. The original implementation head
+`eae56fe46f4940aa4940ab2f08f87436cb54a117`: health 200, MQTT connected/alive with zero parse
+rejects, unchanged default API, and 203 capabilities with 157 readable physical slots, with all six
+XTOP readings, including real zeros on XTOP1 and XTOP4, present through the opt-in live API. The
+adversarial-review correction head `5b3776c4d23a1aa98a0a567c9798486f211c78ee`, which removed the
+capability `key` field and added the explicit physical `available` contract, was separately
+runtime-validated: 203 capabilities with no `key` field; 157 readable slots (150 with a receipt
+timestamp, matching 144 TOP + 6 XTOP; the 7 absent OPT slots read `mode=none`/`available=false`);
+representative fresh TOP/XTOP readings, including the TOP15 sentinel `-200` and text payloads,
+read `available=true`; unchanged default `/live` (21 metrics) and `/metrics` (21 metrics, 3 COP
+entries) shapes; an identical immutable history query result and MariaDB schema before and after;
+and the expected unrecorded restart gap, with no backfill. The final head
+`0008226f3fa10c2aaece093f21a02f269fa24ae0` adds only parser-side rejection of malformed reference
+input; it does not change valid parse output or runtime/API/history semantics, so it required no
+further CT109 deployment.
 
-## In scope
+## Implemented
 
 - Parse the tracked TOP/OPT/SET reference and observed XTOP identities into a deterministic
   baseline; combine it with existing canonical `Metric`/`Source` semantics and small verified
   overrides. Unknown metadata remains unknown.
 - Add typed normalization and lightweight in-memory live readings for additional readable topics.
 - Expose additive capability/readings forms while preserving default `/metrics` and `/live` shapes.
-- Prove reference coverage, unchanged core behavior and packaged-reference availability; validate
-  the resulting live surface on CT109.
+- Prove reference coverage, unchanged core behavior and packaged-reference availability locally.
 
-Stage 4A uses one feature branch and one DRAFT PR with checkpoint commits: A reference-backed
-foundation; B additional typed normalization; C full in-memory readings; D additive API; E
-tests, docs and CT109 validation. These are commits within the stage, not separate roadmap stages.
+The catalog contains 203 reference-backed identities and 157 readable TOP/OPT/XTOP slots. Generic
+physical values use number/text typing, and opt-in `/metrics?include=capabilities` and
+`/live?include=readings` expose them. Default Stage 1–3 API and canonical history behavior remain
+unchanged. All 157 topics are mapped; XTOP1 and XTOP4 paths were verified by actual CT109 messages.
+The owner's immutable historical-range response matched byte for byte before and after deployment,
+MariaDB schemas were identical, canonical minutes continued advancing, and the restart left its
+expected unrecorded partial minute. No optional capability was persisted.
 
 ## Out of scope
 
@@ -60,6 +75,5 @@ tests, docs and CT109 validation. These are commits within the stage, not separa
 
 ## Next
 
-**Stage 4B — configurable optional history**, followed by 4C activity/cycles/defrost and durable
-events, 4D reports, 4E control and final API/runtime validation, Stage 5 frontend, then Stage 6
-cutover. See `docs/ROADMAP.md`.
+After PR #6 review/merge: **Stage 4B — configurable optional history**. See `docs/ROADMAP.md` for
+later stages.

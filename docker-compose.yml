@@ -16,7 +16,9 @@ services:
       - db-data:/var/lib/mysql
 
   backend:
-    build: ./backend
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
     image: pompa-next-backend
     restart: unless-stopped
     depends_on:

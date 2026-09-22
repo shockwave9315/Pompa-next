@@ -520,12 +520,30 @@ verified overrides add product labels, types, enums, sentinels or SET/readback r
 needed. The effective catalog must check identity/topic conflicts and cover every tracked entry.
 Unknown metadata stays unknown. There is no manually maintained 203-entry catalog.
 
+All six XTOP paths now have evidence: XTOP0/2/3/5 from canonical Stage 1 sources, and XTOP1/4
+from exact received topics in owner-supplied pre-deployment CT109 `mqtt.uncatalogued_topics`.
+Those last two are physical readings only; they add no canonical source or history series. Final
+CT109 validation of deployed head `eae56fe46f4940aa4940ab2f08f87436cb54a117` confirmed all six
+XTOP readings, unchanged default API and database schema, identical saved historical results, and
+the expected unrecorded partial minute across restart.
+
 The parser consumes a deliberately stable subset of the checked-in Markdown format. Tests must
 reject missing, duplicated or malformed identity rows and protect the grammar against formatting
 drift that would silently change behavior. The runtime image must package the tracked reference
 from its authoritative source; Stage 4A checkpoint A decides the build wiring. Parsing may be
 cached after startup. The current core catalog and its parsing, source priority, XTOP/TOP
 fallback, sentinels, valid ranges, `mean`/`last` kinds and recording flags do not change.
+
+`docs/reference/heishamon/MQTT-Topics.md` and `docs/reference/heishamon/realne_dane.md` remain
+factual device evidence, but since Stage 4A they are also packaged runtime inputs: the backend
+image ships them and parses them at startup to build the effective capability catalog. They are
+not harmless documentation — an edit changes runtime behavior — and strict capability tests guard
+their grammar and their content relationship (identity coverage, topic/name conflicts).
+
+The public identity of an effective capability is `identity` (e.g. `XTOP0`, `TOP16`); there is no
+second capability key. Its relationship to the canonical core, when any, is `canonical_metric` and
+`source_priority` alone — a physical capability identity and a canonical logical series key are two
+distinct namespaces and must not be conflated into one field.
 
 All meaningful readable TOP/OPT/XTOP identities may exist in an in-memory live store. Minimum
 facts are identity, value, receipt time, provenance/mode and availability. Absent optional-PCB
@@ -535,11 +553,11 @@ diagnostic machinery for every physical topic. Keep detailed diagnostics for cur
 sources and add others only for a concrete requirement. Stage 4A makes no database, history,
 event, report, SET-publish or frontend change.
 
-**Additive API direction, not yet an implemented contract:** Default `/api/v1/metrics` keeps the
-21 canonical history-safe metrics and COP metadata. Default `/api/v1/live` keeps the 21 canonical
-metrics and their existing fields. Opt-in `?include=capabilities` on `/metrics` may expose the
-effective catalog; opt-in `?include=readings` on `/live` may expose physical readable facts. Their
-exact payload shapes freeze in Stage 4A checkpoint D. No page-specific response is introduced.
+**Checkpoint D additive API contract:** Default `/api/v1/metrics` and `/api/v1/live` retain their
+Stage 3 shapes. `?include=capabilities` adds the 203-entry effective catalog to `/metrics`, and
+`?include=readings` adds 157 physical reading slots to `/live` in one locked observation. Exact
+fields and absent-reading semantics are specified in `docs/API.md`. No page-specific response is
+introduced.
 
 Stage 4A uses one feature branch and one DRAFT PR with checkpoint commits: A reference-backed
 foundation; B additional typed normalization; C full in-memory readable state; D additive API;
@@ -553,6 +571,16 @@ additional history-suitable metrics without a SQL migration per selection. Optio
 minute-based. `Selected but unknown` and `not selected` must remain distinguishable through raw
 and long-term aggregation, including after purge; retain both selected and known minute counts.
 Text or static identity topics do not become historical merely because they are live.
+
+**Accepted Stage 4A→4B safety notes:** Selection must key off physical `identity` plus expected
+topic evidence, never a capability field derived from canonical source priority — Stage 4A exposes
+no such field. If a selected identity's expected topic later changes, historical storage must not
+silently continue under the changed meaning. Generic physical `kind` (`number`/`text`) is payload
+syntax, not a historical semantic type; a generic physical value carries no canonical sentinel
+semantics automatically — e.g. a physical `TOP15 = -200` is a valid observed numeric payload but
+must not automatically become a valid optional-history power value. Stage 4B must define history
+eligibility, semantic type, sentinels and aggregation policy explicitly, per selection. Stage 4A's
+`available` is a live-surface fact only; it does not by itself define minute-history validity.
 
 **Candidate:** core-wide minutes plus separate dynamic optional history. **Deferred to 4B:**
 history-suitable types and aggregation rules, physical optional table/schema, policy persistence,

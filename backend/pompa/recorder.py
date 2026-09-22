@@ -53,7 +53,7 @@ from collections.abc import Callable, Iterable
 from enum import Enum
 
 from .aggregation import RECORDED, SERIES, fold_minutes
-from .ingest import Ingest
+from .ingest import LWT_OFFLINE, Ingest, PhysicalReading
 from .minute import MinuteAccumulator, MinuteRow, iso_utc
 from .storage import Session, Storage, StorageUnavailable
 from .timegrid import HOUR, floor_hour, purge_cutoff
@@ -177,6 +177,35 @@ def purge_step(storage: Storage, now: float, retention_days: int, pending_from: 
                 raise PurgeRefused(f"rollup of hour {iso_utc(hour_ts)} accounts for {rolled or 0}"
                                    f" of {stored} stored minutes")
         return cutoff, s.delete_minutes_before(end), end < cutoff
+
+
+def physical_reading_dict(reading: PhysicalReading, *, now: float, connected: bool,
+                           lwt_offline: bool, stale_after: int) -> dict:
+    """Serialize a physical receipt: ``mode`` is provenance, ``available`` is a current fact.
+
+    ``available`` is true only for a fresh non-retained receipt in a currently
+    connected, non-``Offline`` epoch, using the same ``stale_after`` boundary as
+    canonical freshness. It is a live-surface fact only; it does not imply
+    Stage 4B history eligibility for this physical identity.
+    """
+    payload = reading.payload
+    mode = "none" if payload is None else ("retained" if reading.retained else "live")
+    available = (
+        mode == "live"
+        and connected
+        and not lwt_offline
+        and reading.received_at is not None
+        and now - reading.received_at <= stale_after
+    )
+    return {
+        "topic": reading.topic,
+        "value": payload.value if payload else None,
+        "kind": payload.kind if payload else None,
+        "raw": payload.raw if payload else None,
+        "mode": mode,
+        "available": available,
+        "received_at": iso_utc(reading.received_at),
+    }
 
 
 class Recorder:
@@ -388,7 +417,7 @@ class Recorder:
 
     # ------------------------------------------------------------- facts
 
-    def live(self, clock: Callable[[], float]) -> dict:
+    def live(self, clock: Callable[[], float], include_readings: bool = False) -> dict:
         """Canonical live metric state for ``/api/v1/live``.
 
         ``clock`` is read *inside* the lock, so the observation instant belongs
@@ -413,7 +442,7 @@ class Recorder:
         with self._lock:
             now = clock()
             ing = self.ingest
-            return {
+            body = {
                 "now": iso_utc(now),
                 "mqtt": {"connected": ing.connected, "alive": ing.alive_at(now), "epoch": ing.epoch},
                 "metrics": {
@@ -427,6 +456,20 @@ class Recorder:
                     for key, v in ing.live_snapshot(now).items()
                 },
             }
+            if include_readings:
+                body["readings"] = {
+                    reading.identity: physical_reading_dict(
+                        reading, now=now, connected=ing.connected,
+                        lwt_offline=ing.lwt == LWT_OFFLINE, stale_after=ing.stale_after,
+                    )
+                    for reading in ing.physical_snapshot()
+                }
+            return body
+
+    def physical_readings(self) -> tuple[PhysicalReading, ...]:
+        """Copy immutable physical readings under the MQTT/tick snapshot lock."""
+        with self._lock:
+            return self.ingest.physical_snapshot()
 
     def snapshot(self, clock: Callable[[], float]) -> tuple[float, dict]:
         """Factual in-memory state for ``/api/v1/status``, with its observation instant.

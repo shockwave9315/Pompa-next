@@ -1,0 +1,16 @@
+# Root hygiene only: prevents obvious local/secrets/VCS content from ever entering any Docker
+# build context in this repository. The backend image build is unaffected — Docker resolves
+# backend/Dockerfile.dockerignore (a stricter, Dockerfile-specific allowlist) for that build and
+# does not merge it with this file; see docs/ARCHITECTURE.md §25.1 and backend/Dockerfile.dockerignore.
+.git
+.venv
+venv
+.env
+.env.*
+!.env.example
+__pycache__
+*.py[cod]
+.pytest_cache
+.ruff_cache
+.mypy_cache
+node_modules

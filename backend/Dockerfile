@@ -4,10 +4,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 WORKDIR /app
-COPY requirements.txt .
+COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY pompa ./pompa
+COPY backend/pompa ./pompa
+COPY docs/reference/heishamon/MQTT-Topics.md docs/reference/heishamon/realne_dane.md ./docs/reference/heishamon/
 RUN useradd --system --uid 10001 pompa
 USER pompa
 

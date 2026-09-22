@@ -11,13 +11,12 @@ HeishaMon MQTT
   → React frontend
 ```
 
-Stage 1, 2 and 3 are complete. Stage 3 — Complete Backend API is merged to `main` and has been
-deployed and runtime-validated on CT109. The backend records canonical minutes from MQTT into
-MariaDB, rolls them up hourly, and serves live state, a metric/COP catalog, factual status and
-1m/5m/1h/1d/total history with energy, COP and coverage facts over a frozen `/api/v1`; see
-[backend/README.md](backend/README.md). Current work is **Stage 4A — Unified HeishaMon capability
-foundation and full readable live surface**, the first part of Stage 4 — Complete Product Backend.
-Frontend work follows in Stage 5; see [the roadmap](docs/ROADMAP.md).
+Stages 1–3 are complete. Stage 4A — Unified HeishaMon capability foundation and full readable live
+surface — is complete and runtime-validated on CT109; PR #6 is pending owner review and merge. The
+backend records canonical minutes from MQTT into MariaDB, rolls them up hourly, and serves live
+state, capability and metric catalogs, factual status, and 1m/5m/1h/1d/total history; see
+[backend/README.md](backend/README.md). **Stage 4B — configurable optional history** is next after
+merge. Frontend work remains Stage 5; see [the roadmap](docs/ROADMAP.md).
 
 Planned stack: Python 3.12, FastAPI, paho-mqtt, PyMySQL, MariaDB 11.4, React, Vite, and Docker Compose.
 
