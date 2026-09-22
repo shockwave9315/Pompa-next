@@ -43,6 +43,23 @@ class Capability:
     source_priority: int | None = None
 
 
+def capability_dict(capability: Capability) -> dict:
+    """The factual public projection of one effective capability."""
+    reference = capability.reference
+    return {
+        "identity": reference.identity,
+        "key": capability.key,
+        "family": reference.family,
+        "name": reference.name,
+        "topic": reference.topic or (capability.source.topic if capability.source else None),
+        "description": reference.description,
+        "provenance": reference.provenance,
+        "readable": reference.family != "SET",
+        "canonical_metric": capability.metric.key if capability.metric else None,
+        "source_priority": capability.source_priority,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class TypedPayload:
     raw: str

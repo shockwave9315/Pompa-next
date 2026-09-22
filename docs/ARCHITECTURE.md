@@ -535,11 +535,11 @@ diagnostic machinery for every physical topic. Keep detailed diagnostics for cur
 sources and add others only for a concrete requirement. Stage 4A makes no database, history,
 event, report, SET-publish or frontend change.
 
-**Additive API direction, not yet an implemented contract:** Default `/api/v1/metrics` keeps the
-21 canonical history-safe metrics and COP metadata. Default `/api/v1/live` keeps the 21 canonical
-metrics and their existing fields. Opt-in `?include=capabilities` on `/metrics` may expose the
-effective catalog; opt-in `?include=readings` on `/live` may expose physical readable facts. Their
-exact payload shapes freeze in Stage 4A checkpoint D. No page-specific response is introduced.
+**Checkpoint D additive API contract:** Default `/api/v1/metrics` and `/api/v1/live` retain their
+Stage 3 shapes. `?include=capabilities` adds the 203-entry effective catalog to `/metrics`, and
+`?include=readings` adds 157 physical reading slots to `/live` in one locked observation. Exact
+fields and absent-reading semantics are specified in `docs/API.md`. No page-specific response is
+introduced.
 
 Stage 4A uses one feature branch and one DRAFT PR with checkpoint commits: A reference-backed
 foundation; B additional typed normalization; C full in-memory readable state; D additive API;

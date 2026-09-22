@@ -6,6 +6,7 @@ import re
 import time
 from collections.abc import Callable
 from datetime import date, datetime
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
@@ -13,6 +14,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from . import history as history_engine
+from .capabilities import capability_dict, effective_capabilities
 from .minute import MINUTE, iso_utc
 from .recorder import Recorder
 from .storage import Storage, StorageUnavailable
@@ -77,14 +79,21 @@ def create_app(recorder: Recorder, storage: Storage, clock: Callable[[], float] 
         return {"status": "ok"}
 
     @app.get("/api/v1/live")
-    def live() -> dict:
+    def live(request: Request, include: Literal["readings"] | None = Query(None)) -> dict:
         """In-memory only: unaffected by database availability."""
-        return recorder.live(clock)
+        if len(request.query_params.getlist("include")) > 1:
+            raise _bad("'include' may appear only once")
+        return recorder.live(clock, include_readings=include == "readings")
 
     @app.get("/api/v1/metrics")
-    def metrics() -> dict:
+    def metrics(request: Request, include: Literal["capabilities"] | None = Query(None)) -> dict:
         """Catalog-derived: unaffected by database and MQTT availability."""
-        return history_engine.catalog()
+        if len(request.query_params.getlist("include")) > 1:
+            raise _bad("'include' may appear only once")
+        body = history_engine.catalog()
+        if include == "capabilities":
+            body["capabilities"] = [capability_dict(c) for c in effective_capabilities()]
+        return body
 
     @app.get("/api/v1/status")
     def status() -> dict:

@@ -1,8 +1,7 @@
 # API contract
 
-The current, working default contract of Pompa Next, frozen at Stage 3. Stage 4 adds product-backend
-capability while preserving these default response semantics. Later additive forms are described
-separately below and are not yet implemented.
+The default contract of Pompa Next was frozen at Stage 3. Stage 4A adds the opt-in capability and
+physical-reading forms described below while preserving those default response semantics.
 
 Domain rules behind it are in [`ARCHITECTURE.md`](ARCHITECTURE.md). This file describes only what
 the HTTP surface promises.
@@ -51,7 +50,8 @@ It is not a readiness probe: it says nothing about MQTT or MariaDB. Those are re
 
 ## `GET /api/v1/live`
 
-Current in-memory metric state. No parameters. No database I/O: it stays `200` during a MariaDB
+Current in-memory metric state. With no `include` parameter, the Stage 3 response is unchanged.
+No database I/O: it stays `200` during a MariaDB
 outage. The snapshot *and its `now`* are taken under the recorder lock in one observation, so a
 response never mixes state from before and after an MQTT message, and `received_at` never follows
 the `now` of the response carrying it.
@@ -110,7 +110,8 @@ Live COP is not part of the contract. COP is defined on canonical minutes and is
 
 ## `GET /api/v1/metrics`
 
-The frontend-safe catalog. No parameters, no database I/O, `200` during MariaDB and MQTT outages.
+The frontend-safe catalog. With no `include` parameter, the Stage 3 response is unchanged.
+No database I/O, `200` during MariaDB and MQTT outages.
 It is derived from the one metric catalog, so it cannot drift from `/live` and `/history`.
 
 ```json
@@ -151,8 +152,8 @@ It is derived from the one metric catalog, so it cannot drift from `/live` and `
 - `timezone` is the presentation timezone for calendar days; `history.buckets` and
   `history.max_buckets` are the values `/api/v1/history` actually accepts and enforces.
 
-MQTT topics, source identity and control capabilities are deliberately absent. Topic diagnostics
-live in `/api/v1/status`; there is no control/SET surface in this API.
+MQTT topics, source identity and control capabilities are absent from the default form. Topic
+diagnostics live in `/api/v1/status`; there is no control/SET surface in this API.
 
 ## `GET /api/v1/status`
 
@@ -291,7 +292,7 @@ bucket.
 
 | Status | When |
 |---|---|
-| `400` | Malformed parameters: missing `from`/`to`, unparseable or naive timestamps, non-minute alignment, `from >= to`, unknown bucket, unknown or duplicate series. |
+| `400` | Malformed parameters: missing `from`/`to`, unparseable or naive timestamps, non-minute alignment, `from >= to`, unknown bucket, unknown or duplicate series, invalid or repeated `include`. |
 | `422` | Well-formed but unrepresentable: more than 3000 buckets, a range or partial edge hour whose raw minutes were provably purged, instants outside 1970–2100. |
 | `503` | `/api/v1/history` only: the database is unavailable. |
 
@@ -312,13 +313,68 @@ truncated range — the request is refused instead.
 
 One subsystem's failure is never turned into process failure or into a global verdict.
 
-## Planned Stage 4 additive evolution — not yet implemented
+## Stage 4A opt-in capability and physical-reading forms
 
-Stage 4A plans opt-in capability metadata through
-`GET /api/v1/metrics?include=capabilities` and opt-in physical readable TOP/OPT/XTOP facts through
-`GET /api/v1/live?include=readings`. The default routes above retain their 21 canonical metrics,
-COP metadata and existing live fields. The exact additional payload shapes freeze during Stage 4A
-checkpoint D; these query forms are **not** part of the current API contract.
+`GET /api/v1/metrics?include=capabilities` returns the default `/metrics` body plus exactly one
+top-level `capabilities` array. It contains all 203 effective identities in order: TOP0–TOP143,
+OPT0–OPT6, SET1–SET46, XTOP0–XTOP5. Each entry has exactly:
+
+```json
+{
+  "identity": "TOP9",
+  "key": "top_9",
+  "family": "TOP",
+  "name": "DHW_Target_Temp",
+  "topic": "main/DHW_Target_Temp",
+  "description": "DHW target temperature (°C)",
+  "provenance": "documented",
+  "readable": true,
+  "canonical_metric": null,
+  "source_priority": null
+}
+```
+
+`readable` is `true` for TOP/OPT/XTOP and `false` for SET. A canonical physical source has its
+metric key and zero-based priority; other entries have `null` for both. TOP/OPT/SET topics come
+from the documented reference. XTOP0/2/3/5 topics come from verified canonical sources; XTOP1/4
+have `topic: null`. No type, history, safety or control policy is implied by these fields.
+
+`GET /api/v1/live?include=readings` returns the default `/live` body plus exactly one top-level
+`readings` object. It contains all 157 readable identities in order: TOP0–TOP143, OPT0–OPT6,
+XTOP0–XTOP5. SET identities are absent. Each identity maps to exactly:
+
+```json
+{
+  "topic": "main/DHW_Target_Temp",
+  "value": 48,
+  "kind": "number",
+  "raw": "48",
+  "mode": "live",
+  "received_at": "2027-01-15T08:00:01Z"
+}
+```
+
+`raw` preserves the decoded MQTT payload. `value` is a finite decimal number or outer-trimmed
+text, and `kind` is `number` or `text`. Physical values retain sentinels such as `-200` as numeric
+facts; canonical metrics continue to apply their own sentinel and range rules independently.
+The entire opt-in live response, including `now`, MQTT facts, canonical metrics and physical
+readings, is one recorder-locked observation. Neither opt-in form reads MariaDB; both work before
+MQTT connects.
+
+For an identity without a current reading, the entry is still present: `topic` is its known path
+or `null`, and `value`, `kind`, `raw` and `received_at` are `null`, with `mode: "none"`. Thus an
+unpublished OPT entry is absent data, and XTOP1/4 currently have `topic: null` and `mode: "none"`.
+For a payload, `mode` is `retained` if the MQTT delivery was retained and `live` otherwise.
+Physical `mode="live"` means the latest non-retained receipt in the current valid connection
+lifecycle. It does **not** claim freshness under the canonical 600-second source rule; generic
+physical readings have no per-capability freshness policy. A disconnect, LWT `Offline`, new
+connection, or detected backward clock step clears these physical readings until new deliveries
+arrive. This differs from the canonical `/live.metrics` retained fallback described above.
+
+Each endpoint accepts only its one documented `include` value or no `include`; unknown,
+comma-separated, empty, and repeated `include` values return `400`. The five endpoint paths remain
+unchanged. `/status` keeps its Stage 3 shape and `uncatalogued_topics` name, which can still list
+known non-core capability topics. `/history` still accepts only canonical series keys.
 
 Optional history, activity/events, reports and commands belong to later Stage 4 checkpoints.
 This document lists no endpoint or response for them until implemented and contract-tested. The

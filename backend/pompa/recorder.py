@@ -179,6 +179,19 @@ def purge_step(storage: Storage, now: float, retention_days: int, pending_from: 
         return cutoff, s.delete_minutes_before(end), end < cutoff
 
 
+def physical_reading_dict(reading: PhysicalReading) -> dict:
+    """Serialize a physical receipt without inferring freshness or availability."""
+    payload = reading.payload
+    return {
+        "topic": reading.topic,
+        "value": payload.value if payload else None,
+        "kind": payload.kind if payload else None,
+        "raw": payload.raw if payload else None,
+        "mode": "none" if payload is None else ("retained" if reading.retained else "live"),
+        "received_at": iso_utc(reading.received_at),
+    }
+
+
 class Recorder:
     def __init__(self, ingest: Ingest, accumulator: MinuteAccumulator, storage: Storage, buffer_rows: int,
                  retention_days: int = 365):
@@ -388,7 +401,7 @@ class Recorder:
 
     # ------------------------------------------------------------- facts
 
-    def live(self, clock: Callable[[], float]) -> dict:
+    def live(self, clock: Callable[[], float], include_readings: bool = False) -> dict:
         """Canonical live metric state for ``/api/v1/live``.
 
         ``clock`` is read *inside* the lock, so the observation instant belongs
@@ -413,7 +426,7 @@ class Recorder:
         with self._lock:
             now = clock()
             ing = self.ingest
-            return {
+            body = {
                 "now": iso_utc(now),
                 "mqtt": {"connected": ing.connected, "alive": ing.alive_at(now), "epoch": ing.epoch},
                 "metrics": {
@@ -427,6 +440,12 @@ class Recorder:
                     for key, v in ing.live_snapshot(now).items()
                 },
             }
+            if include_readings:
+                body["readings"] = {
+                    reading.identity: physical_reading_dict(reading)
+                    for reading in ing.physical_snapshot()
+                }
+            return body
 
     def physical_readings(self) -> tuple[PhysicalReading, ...]:
         """Copy immutable physical readings under the MQTT/tick snapshot lock."""
