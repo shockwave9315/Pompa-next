@@ -2,7 +2,12 @@
 
 ## Current stage
 
-**Stage 4 — Frontend**.
+**Stage 4A — Unified HeishaMon capability foundation and full readable live surface.** Frontend
+work is postponed until Stage 4 — Complete Product Backend is finished.
+
+### Stage 0
+
+DONE. Clean bootstrap and tracked project/HeishaMon references.
 
 ### Stage 1
 
@@ -28,25 +33,33 @@ MariaDB, MQTT client id and port. The frontend-facing `/api/v1` contract is froz
 
 ## Goal
 
-Build the Stage 4 frontend: Teraz, Historia, Statystyki and Status views that consume the frozen
-Stage 3 `/api/v1` contract. The frontend is a thin renderer of backend facts and performs no domain
-calculations.
+Add a reference-backed effective HeishaMon capability catalog and full readable in-memory live
+surface without changing the 21 canonical metrics or Stage 1–3 recorder/history behavior. The
+next implementation work is **Stage 4A checkpoint A: reference-backed capability foundation**.
 
 ## In scope
 
-- Teraz, Historia, Statystyki and Status views.
-- Consuming `docs/API.md` as-is.
+- Parse the tracked TOP/OPT/SET reference and observed XTOP identities into a deterministic
+  baseline; combine it with existing canonical `Metric`/`Source` semantics and small verified
+  overrides. Unknown metadata remains unknown.
+- Add typed normalization and lightweight in-memory live readings for additional readable topics.
+- Expose additive capability/readings forms while preserving default `/metrics` and `/live` shapes.
+- Prove reference coverage, unchanged core behavior and packaged-reference availability; validate
+  the resulting live surface on CT109.
+
+Stage 4A uses one feature branch and one DRAFT PR with checkpoint commits: A reference-backed
+foundation; B additional typed normalization; C full in-memory readings; D additive API; E
+tests, docs and CT109 validation. These are commits within the stage, not separate roadmap stages.
 
 ## Out of scope
 
-- Any backend semantic redesign.
-- Control/SET.
-- Timeline/activity.
-- Cycles or compressor-start statistics.
-- The 193-capability explorer.
-- Legacy frontend compatibility.
-- Frontend domain math: energy, COP, state, alignment and coverage stay backend-owned.
+- Database schema, optional history, logging policy, event engine, reports and SET publishing.
+- Frontend and legacy compatibility or historical migration.
+- Changing the 21 canonical metric semantics, Stage 1–3 history invariants, or the 365-day default
+  raw retention.
 
 ## Next
 
-**Stage 5 — Cutover**
+**Stage 4B — configurable optional history**, followed by 4C activity/cycles/defrost and durable
+events, 4D reports, 4E control and final API/runtime validation, Stage 5 frontend, then Stage 6
+cutover. See `docs/ROADMAP.md`.

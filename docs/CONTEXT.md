@@ -70,7 +70,10 @@ Historical source selection uses the highest-priority source that is valid, `see
 
 `STALE_AFTER_SECONDS=600` is the accepted Stage 1 global freshness policy, decided from a real-runtime measurement on CT109 (22.768 h uninterrupted, owner-accepted short of the originally planned ≥24 h target; see `docs/ARCHITECTURE.md` §4).
 
-Canonical history is stored in a wide `sample_1m` table. Long-term history later uses a narrow `rollup_1h` table.
+The 21 canonical metrics retain their proven semantics. Canonical history uses a wide `sample_1m`
+table and long-term history uses a narrow `rollup_1h` table. Stage 4 expands readable HeishaMon
+capability around this foundation before frontend work; full live coverage does not imply full
+history persistence.
 
 Energy is derived from minute-average power:
 
@@ -87,6 +90,11 @@ Timestamps are stored in UTC. Calendar presentation uses local time. Daily bucke
 The backend is the domain source of truth. The frontend renders backend facts and models and performs no energy, COP, state, alignment, or coverage math.
 
 Control is a later, isolated MQTT write path. Recorder and history behavior must never depend on control.
+
+Product direction: broad capability with lightweight implementation. The backend owns one
+definition of each domain fact, reuses its existing history algebra, and exposes domain resources
+rather than page-specific calculations. Unknown and transition are valid operating facts; ordinary
+heat-pump changes do not require infrastructure-style recovery machinery.
 
 ## Working process
 

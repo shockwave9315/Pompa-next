@@ -17,7 +17,9 @@ HeishaMon → MQTT broker → ingest → canonical minute recorder
 ```
 
 MQTT is the only primary ingest path. There is no HTTP bootstrap, HTTP fallback, legacy database import, or historical backfill.
-The first deployment uses one Python 3.12 backend process. It serves FastAPI, owns one paho-mqtt client, records minutes through PyMySQL into MariaDB 11.4, and later serves a React/Vite frontend through Docker Compose deployment.
+The deployed Stage 1–3 backend uses one Python 3.12 process: FastAPI, one paho-mqtt client, and
+PyMySQL with MariaDB 11.4. Stage 4 completes the product backend before React/Vite frontend work.
+This is an additive expansion of the proven recorder/history path, not a replacement for it.
 Pompa Next has no source, API, schema, or data compatibility requirement with legacy. Historical data begins when Pompa Next starts recording.
 
 ## 2. Module boundaries
@@ -27,7 +29,7 @@ The intended backend boundaries are conceptual, not a mandate for speculative ab
 | Boundary | Responsibility |
 |---|---|
 | Configuration | Parse environment settings and reject invalid startup configuration. |
-| Metric catalog | Define metric identity, sources, units, kind, sentinels, valid range, and recording flag. |
+| Core metric catalog | Define the 21 canonical metric keys, sources, units, kind, sentinels, valid range, and recording flag. |
 | MQTT adapter | Connect, subscribe, reconnect, and forward message facts to ingest. |
 | Ingest | Parse values, track per-source epochs/freshness, select sources, and maintain live state. |
 | Minute accumulator | Turn timestamped source and metric changes into canonical `MinuteRow` values. |
@@ -36,12 +38,13 @@ The intended backend boundaries are conceptual, not a mandate for speculative ab
 | Aggregation | Own `Stats`, buckets, derived series, energy, COP, coverage, and read-path composition. |
 | API | Validate requests and serialize domain results; contain no independent mathematics. |
 
-Dependencies flow inward toward the catalog and domain functions. Circular dependencies are not allowed. Live and history share parsing and catalog definitions, not a generic storage abstraction.
+Dependencies flow inward toward the catalog and domain functions. Circular dependencies are not allowed. Live and history share the proven canonical metric definitions, not a generic storage abstraction. Stage 4A adds a reference-backed capability layer around them (§25).
 Backend code owns all domain semantics. Frontend code selects views and renders returned facts. It must not calculate energy, COP, state, alignment, buckets, or coverage.
 
 ## 3. Metric catalog
 
-There is exactly one catalog entry per canonical metric. An entry contains:
+The current core has exactly one catalog entry per canonical metric. Its 21 entries remain the
+authority for Stage 1–3 behavior during Stage 4A. An entry contains:
 
 - Stable `key`, Polish presentation label, unit, and group.
 - `kind`: `mean` or `last`.
@@ -61,7 +64,10 @@ Power source priority is XTOP first with TOP fallback:
 - DHW production: XTOP5, then TOP40.
 
 Sentinels are catalog data, never global guesses. Known examples include `-78` and `-128` for temperatures and `-200` for TOP power. A payload of `0` is always a real zero when it passes the catalog's validity rules.
-Adding a recorded metric may add a nullable `sample_1m` column. This explicit schema change is preferable to duplicate catalogs or an EAV history model.
+The current `sample_1m` schema is the fixed canonical core. Stage 4A does not change it. A future
+core metric change may still need an explicit nullable column, but user-selectable additional
+history must not require one schema migration per selected capability. Stage 4B decides its
+physical storage and participation representation (§25); no optional-history DDL is frozen here.
 
 ## 4. MQTT ingest and source freshness
 
@@ -70,7 +76,7 @@ The client subscribes to `{MQTT_TOPIC_PREFIX}/#` and uses a client ID distinct f
 For each message, ingest:
 
 1. Records connection and LWT facts.
-2. Ignores topics absent from the catalog.
+2. Ignores topics absent from the current core catalog for canonical metric/minute processing.
 3. Parses numeric payloads.
 4. Maps sentinels, non-numeric payloads, and out-of-range values to unknown and increments `parse_rejects` where applicable.
 5. Updates per-physical-source state.
@@ -288,8 +294,12 @@ delete sample_1m where ts < cutoff
 
 If no contiguous rollup exists, `rolled_until` is absent and purge deletes nothing. Purge cannot delete a minute from an unrolled hour, from the two-hour margin below `rolled_until`, or from an hour a pending write can still enter and force a rebuild of.
 Each bounded step additionally proves per hour that the rollup accounts for exactly as many minutes as the hour still stores; any mismatch, missing rollup row or error deletes nothing. That proof is what makes a surviving rollup row conclusive evidence of deletion (§8), which is how reads learn what purge removed; the `cutoff` itself is prospective policy and is never used to answer that question.
-Activity/event timelines and minute-order cycle reconstruction are guaranteed only while raw `sample_1m` exists. Hourly flags preserve duration but not order.
-Compressor-start reconstruction from positive `operations_counter` steps across resets is likewise guaranteed only in the raw 1-minute retention window. A future feature requiring indefinite starts must explicitly add a persisted derived series; the core does not anticipate it.
+**Current Stage 1–3 limitation:** activity/event timelines and minute-order cycle reconstruction
+are guaranteed only while raw `sample_1m` exists. Hourly flags preserve duration but not order.
+The current reset-aware interpretation of `operations_counter` likewise has only the raw-minute
+window; the counter must not be assumed to equal observed compressor starts. Stage 4C will add
+durable factual activity/events before any retention reduction, after comparing storage designs
+(§25). The default raw retention remains 365 days during early Stage 4.
 
 ## 14. Query resolution and read paths
 
@@ -338,14 +348,18 @@ Pompa Next starts a fresh namespace at `/api/v1`; this is not inherited legacy v
 | `GET /api/v1/status` | Factual MQTT, recorder, and storage status. |
 | `GET /health` | Process liveness for deployment. |
 
-Stage 1 implements the 1-minute subset of history plus status and health. Stage 2 extends the same history contract with `auto|1m|5m|1h|1d|total`, derived energy and COP series; live and metrics follow before the frontend contract is frozen.
+Stages 1–3 implemented and froze the current default contract: history with
+`auto|1m|5m|1h|1d|total`, derived energy and COP series, live, metrics, status and health. Stage 4A
+may add opt-in capability/readings forms while preserving default response semantics (§25).
 Responses are limited to 3000 buckets and name both the requested and the resolved bucket. History series are the recorded metrics plus `cop_co`, `cop_dhw` and `cop_total`.
 
 History accepts `from`, `to`, `bucket`, and a series list. Response buckets contain start, end, expected minutes, recorded minutes, and coverage percent. Series arrays align exactly with bucket arrays and use `null` for absent values.
 
 Mean metrics expose average, minimum, maximum, and minutes. Last metrics expose last, minimum, maximum, and minutes. Power metrics additionally expose kWh. COP exposes the ratio, paired minutes, input kWh, and output kWh.
 
-Period summary is `bucket=total`; daily reporting is `bucket=1d`. Separate daily, period, or report calculation endpoints are forbidden because they would duplicate aggregation semantics.
+The current period summary is `bucket=total`; current daily history is `bucket=1d`. Stage 4D may
+add one report projection resource for activity/event facts that numeric history cannot express.
+It must reuse the existing energy, COP and coverage algebra, not add separate report mathematics.
 
 Bad parameters return 400. Unrepresentable retained-history resolution or old partial-hour edges return 422. Database unavailability returns 503 for history while live may remain available.
 
@@ -376,11 +390,16 @@ A protected batch retried through a long outage can be older than any fixed repr
 
 ## 20. Control boundary
 
-Control/SET is later, independent work. A future control module may publish only allowlisted command topics, validate ranges, and write a separate audit record.
+All known SET identities enter the reference-backed capability model in Stage 4A as knowledge
+only. Actual MQTT SET publishing begins in Stage 4E through an isolated allowlisted path with
+validated values. Persistent command history is a Stage 4E decision, not a required table.
 
 Recorder, storage, history, and aggregation have no dependency on control. Command results return through ordinary observed TOP topics. The recorder itself never publishes MQTT commands.
 
-The 193-capability explorer is reference knowledge for that later stage, not a core recorder dependency.
+Preferred command results are factual: `requested`, then `publish_failed` or
+`published_unconfirmed`, followed by `confirmed` or `confirmation_timeout` only where reliable
+readback exists. A timeout does not stop unrelated reads, history or controls. There is no
+automatic rollback, global failure state, speculative rejection or complex recovery workflow.
 
 ## 21. Testing strategy
 
@@ -396,7 +415,12 @@ A slice test covers fake MQTT messages through minute closure, storage, and `GET
 
 ## 22. Complexity budget
 
-The target core has one metric catalog, two stored history tables, one aggregation implementation, and one history endpoint. There is no stored 5-minute tier, watermark table, user-configurable recording policy, data-dependent resolver, domain math in API/frontend code, or status-threshold system.
+The completed Stage 1–3 core has 21 metric definitions, two history tables, one aggregation
+implementation and one history endpoint. It has no stored 5-minute tier, watermark table,
+user-configurable recording policy, data-dependent resolver, frontend domain math or status
+threshold system. Stage 4 adds only mechanisms justified by product needs, in their owning
+checkpoints (§25). The effective capability catalog derives identities from references rather
+than maintaining a second manual list of ~203 full entries.
 
 New layers require a concrete present need. Avoid generic repositories, provider hierarchies, speculative interfaces, duplicated view models, and compatibility adapters. Prefer explicit functions and data structures until multiple real implementations justify abstraction.
 
@@ -416,7 +440,9 @@ Substantive stages deliver a complete vertical outcome and use a feature branch 
 10. Coverage is expressed only as counts and percentages, without arbitrary completeness verdicts.
 11. All query intervals are exact `[from,to)`; 422 without rounding means a needed hour's raw evidence was provably purged, never merely that the range is old or never recorded.
 12. UTC is storage truth; Europe/Warsaw calendar days include correct 23/25-hour DST behavior.
-13. Activity/timeline and reset-aware compressor starts are guaranteed only while raw 1-minute data remains.
+13. In the current Stage 1–3 implementation, activity/timeline and reset-aware counter analysis
+    are guaranteed only while raw 1-minute data remains. Stage 4C must make useful event facts
+    durable before raw purge can remove their evidence.
 14. Backend owns domain truth; frontend only renders backend facts.
 15. Recorder/history remain independent of the later isolated control path.
 16. Legacy history is not migrated or backfilled, and legacy compatibility is not a requirement.
@@ -467,3 +493,98 @@ requires. The recorder has no freeze detector and needs none, but the gap is not
 pause or freeze is indistinguishable from a silent source, so the last confirmed value still counts
 as known for up to `STALE_AFTER_SECONDS` into the paused interval, and the visible gap begins after
 that window, not at the first paused second.
+
+## 25. Stage 4 product-backend expansion
+
+**Current/frozen now:** Stages 1–3 are complete and deployed on CT109. Sections 3–24 specify the
+existing canonical 21-metric ingest, minute recorder, storage, aggregation and default API. Stage
+4 adds product capability around them; Stage 5 is frontend and Stage 6 is cutover. Broad capability
+must use a lightweight implementation: one definition of each domain fact, catalog metadata
+instead of repeated code, pure derivations where practical, and domain resources rather than
+frontend-page endpoints. Ordinary heat-pump changes may be `unknown` or `transition`; they are
+data, not infrastructure incidents.
+
+### 25.1 Stage 4A — reference-backed capabilities and full readable live state
+
+**Frozen direction:** Parse the tracked `docs/reference/heishamon/MQTT-Topics.md` for TOP0–TOP143
+(144), OPT0–OPT6 (7), and SET1–SET46 (46). Include the observed XTOP0–XTOP5 (6) from
+`docs/reference/heishamon/realne_dane.md`. The documented reference establishes identities,
+topics and descriptions; observed XTOP names are evidence, and topic paths not already verified by
+the canonical core require validation. A strict deterministic parser produces baseline entries;
+the existing `Metric`/`Source` definitions supply the 21 canonical metric semantics; small curated
+verified overrides add product labels, types, enums, sentinels or SET/readback relations where
+needed. The effective catalog must check identity/topic conflicts and cover every tracked entry.
+Unknown metadata stays unknown. There is no manually maintained 203-entry catalog.
+
+The parser consumes a deliberately stable subset of the checked-in Markdown format. Tests must
+reject missing, duplicated or malformed identity rows and protect the grammar against formatting
+drift that would silently change behavior. The runtime image must package the tracked reference
+from its authoritative source; Stage 4A checkpoint A decides the build wiring. Parsing may be
+cached after startup. The current core catalog and its parsing, source priority, XTOP/TOP
+fallback, sentinels, valid ranges, `mean`/`last` kinds and recording flags do not change.
+
+All meaningful readable TOP/OPT/XTOP identities may exist in an in-memory live store. Minimum
+facts are identity, value, receipt time, provenance/mode and availability. Absent optional-PCB
+topics are simply absent readings; the reference states they may not appear with a real optional
+PCB installed. Full live coverage does **not** add full process-lifetime gap statistics or other
+diagnostic machinery for every physical topic. Keep detailed diagnostics for current canonical
+sources and add others only for a concrete requirement. Stage 4A makes no database, history,
+event, report, SET-publish or frontend change.
+
+**Additive API direction, not yet an implemented contract:** Default `/api/v1/metrics` keeps the
+21 canonical history-safe metrics and COP metadata. Default `/api/v1/live` keeps the 21 canonical
+metrics and their existing fields. Opt-in `?include=capabilities` on `/metrics` may expose the
+effective catalog; opt-in `?include=readings` on `/live` may expose physical readable facts. Their
+exact payload shapes freeze in Stage 4A checkpoint D. No page-specific response is introduced.
+
+Stage 4A uses one feature branch and one DRAFT PR with checkpoint commits: A reference-backed
+foundation; B additional typed normalization; C full in-memory readable state; D additive API;
+E tests, docs and CT109 runtime validation. They are implementation checkpoints within one stage.
+
+### 25.2 Stage 4B — optional history
+
+**Frozen direction:** Full live availability does not imply persistence. Preserve the 21-column
+canonical `sample_1m` path and existing `rollup_1h` algebra. Users must later be able to select
+additional history-suitable metrics without a SQL migration per selection. Optional writes remain
+minute-based. `Selected but unknown` and `not selected` must remain distinguishable through raw
+and long-term aggregation, including after purge; retain both selected and known minute counts.
+Text or static identity topics do not become historical merely because they are live.
+
+**Candidate:** core-wide minutes plus separate dynamic optional history. **Deferred to 4B:**
+history-suitable types and aggregation rules, physical optional table/schema, policy persistence,
+participation representation, minute-boundary policy changes, and exact rollup/purge integration.
+Compare a participation pseudo-series, an eligible count in a rollup row, compact metadata, or a
+simpler factual source. Prove atomic retries and late-hour correction with the existing recorder
+invariants. Keep `RETENTION_1M_DAYS=365` during early Stage 4. Choose any later default only after
+CT109 table/index/bytes-per-day and backup measurements plus Stage 4C durability proof.
+
+### 25.3 Stage 4C — one activity interpretation and durable events
+
+**Frozen direction:** One backend interpretation serves friendly operational state, CO/CWU
+activity, compressor runtime and observed starts, cycles, short-cycling facts, individual defrosts,
+timeline and later reports. Start/end, duration, intervals, min/max/average duration and duration
+distribution are factual outputs, not good/bad/fault verdicts. Missing rows remain gaps; unknown
+remains unknown. Do not smooth across gaps or add per-second machinery without real evidence.
+Keep the device operations counter distinct from observed compressor starts until verified.
+
+Useful event facts must survive raw purge. **Deferred to 4C:** compare direct durable events,
+hourly segments and any demonstrably simpler correct representation against late writes, database
+outages, cross-hour/midnight spans, restart, idempotency and purge. Raw-only recomputation cannot
+meet durability. No event table, segment stitching scheme or materialization marker is frozen now.
+
+### 25.4 Stage 4D — report projections
+
+**Frozen direction:** Day, week, month and custom-period reports compose the existing energy,
+paired COP and coverage algebra with Stage 4C activity truth. A report may expose a reusable
+domain resource for facts numeric history alone cannot express. It adds no independent formula or
+backend service per frontend panel.
+
+### 25.5 Stage 4E — isolated control and final backend API
+
+**Frozen direction:** The full known SET identity surface is catalog knowledge before execution;
+MQTT writes start only in 4E. Validate explicit requests against allowlisted commands. Keep
+publishing and its factual result independent of live reads, recorder, history and analytics.
+Reliable readback may confirm a request; its absence or timeout is factual. **Deferred to 4E:**
+which commands can be validated for the installed device, final command API shape, and whether
+in-memory state plus logs suffice or persistent command history has a real product need. Freeze
+the complete product API and validate it on CT109 before Stage 5 frontend work.

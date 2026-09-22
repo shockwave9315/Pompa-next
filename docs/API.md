@@ -1,7 +1,8 @@
 # API contract
 
-The frontend-facing contract of Pompa Next. It is frozen at Stage 3: Stage 4 builds against this
-document and does not need to read backend code.
+The current, working default contract of Pompa Next, frozen at Stage 3. Stage 4 adds product-backend
+capability while preserving these default response semantics. Later additive forms are described
+separately below and are not yet implemented.
 
 Domain rules behind it are in [`ARCHITECTURE.md`](ARCHITECTURE.md). This file describes only what
 the HTTP surface promises.
@@ -310,3 +311,15 @@ truncated range — the request is refused instead.
 | MQTT disconnected | 200 | 200, no confirmed metrics, retained only where factual | 200 | 200, `mqtt.connected=false`, `mqtt.alive=false` | 200 from persisted data |
 
 One subsystem's failure is never turned into process failure or into a global verdict.
+
+## Planned Stage 4 additive evolution — not yet implemented
+
+Stage 4A plans opt-in capability metadata through
+`GET /api/v1/metrics?include=capabilities` and opt-in physical readable TOP/OPT/XTOP facts through
+`GET /api/v1/live?include=readings`. The default routes above retain their 21 canonical metrics,
+COP metadata and existing live fields. The exact additional payload shapes freeze during Stage 4A
+checkpoint D; these query forms are **not** part of the current API contract.
+
+Optional history, activity/events, reports and commands belong to later Stage 4 checkpoints.
+This document lists no endpoint or response for them until implemented and contract-tested. The
+frontend starts only after the complete product-backend contract is documented.
