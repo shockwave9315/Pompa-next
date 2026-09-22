@@ -104,10 +104,20 @@ recorder implementation. Branch `stage-4b-optional-history`, draft PR, not merge
 
 ### Deferred beyond checkpoint A
 
-See `docs/ARCHITECTURE.md` §25.2.7: the complete eligible physical-profile list, energy for
-optional power, an operational maximum selected-series count, `OptionalAccumulator`
-implementation, optional ingest runtime state, the production selection API, production Stage 4B
-tables, optional raw recording/rollup/purge/query, and any CT109 optional-history deployment.
+Sequenced into checkpoints B–E (see `docs/ARCHITECTURE.md` §25.2.7 for the still-open eligible
+profile list, optional-power energy and max-selection-count questions):
+
+- **Checkpoint B:** `HistoryProfile` implementation and factual semantic profiles; production
+  policy tables; the persistent immutable policy timeline; the selection GET/PUT API;
+  `effective_from_minute` concurrency semantics; per-member drift/blocking; default-empty
+  selection.
+- **Checkpoint C:** continuous optional source state; `OptionalAccumulator`; pairing with canonical
+  minutes; `optional_sample_1m` JSON persistence; one protected/waiting write path; atomic
+  canonical + optional raw persistence.
+- **Checkpoint D:** `optional_rollup_1h`; late-hour rebuild; purge proof/integration; optional
+  history query through the existing history algebra/API.
+- **Checkpoint E:** full tests/docs; owner CT109 runtime validation; publication-gap evidence;
+  storage/table/index/backup measurements.
 
 ## Out of scope
 
@@ -119,5 +129,5 @@ tables, optional raw recording/rollup/purge/query, and any CT109 optional-histor
 
 ## Next
 
-Checkpoint B of Stage 4B: the optional recorder implementation building on the checkpoint A
-architecture freeze. See `docs/ROADMAP.md` for later stages.
+Checkpoint B of Stage 4B: `HistoryProfile` and the persistent policy timeline/selection API,
+building on the checkpoint A architecture freeze. See `docs/ROADMAP.md` for later stages.

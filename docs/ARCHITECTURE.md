@@ -610,7 +610,7 @@ min_value           max_value          energy
 `kind` for a `HistoryProfile` is the aggregation semantic, exactly `mean` or `last` as for a
 canonical `Metric`, but a `HistoryProfile` is never modeled as a fake `Metric`. Canonical logical
 metric keys and physical capability identities (§25.1) remain two distinct namespaces; a
-`HistoryProfile` adds a third, its own historical-series identity (§25.2.7), and none of the three
+`HistoryProfile` adds a third, its own historical-series identity (§25.2.5), and none of the three
 may be conflated. A future checkpoint may extract a small pure primitive shared by canonical
 `catalog.parse_value` and `HistoryProfile` parsing — finite-number validation, sentinel matching,
 min/max range checking, and the `Outcome` result — once `HistoryProfile` parsing has a concrete
@@ -669,7 +669,8 @@ optional_policy_head WHERE id = 1 FOR UPDATE`. This repository's transactions al
 that snapshot is *not* sufficient here; it stays bound to the transaction's own consistent snapshot
 even after the row lock is acquired. Only a locking read forces a current read of the latest
 committed row, regardless of when the transaction's own snapshot was established. Checkpoint A
-proved exactly this against real MariaDB (§25.2.8): a plain read taken after unblocking still
+proved exactly this against real MariaDB
+(`backend/tests/test_stage4b_policy_concurrency.py`): a plain read taken after unblocking still
 returned the pre-commit value, while the locking read taken in the same transaction, at the same
 point, returned the value the other transaction had just committed.
 
@@ -778,7 +779,7 @@ PRIMARY KEY (hour_ts, series_id)
 `v_sum`, `v_min`, `v_max` and `v_last` are `NULL`. `selected_minutes` comes from canonical recorded
 minutes intersected with policy-timeline participation, never from optional raw-row count.
 `known_minutes` and the value statistics come only from stored optional known values. Different
-series meanings (§25.2.6) are never automatically combined.
+series meanings (§25.2.5) are never automatically combined.
 
 One canonical `rolled_until` frontier is kept (§8); every canonical hour rebuild later rebuilds the
 optional rollup for the same hour. One raw retention frontier is kept; `RETENTION_1M_DAYS` remains

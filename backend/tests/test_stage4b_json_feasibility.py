@@ -86,6 +86,10 @@ def test_numeric_round_trip_each_value_isolated(table):
         assert got is not None, name
         assert list(got.keys()) == ["1"], name
         assert got["1"] == value, (name, value, got["1"])
+        if name == "negative_zero":
+            # `-0.0 == 0.0` in Python, so the equality check above alone would pass even if the
+            # sign were lost in transit. Prove the sign survived too.
+            assert math.copysign(1.0, got["1"]) == -1.0, (name, got["1"])
 
 
 def test_numeric_round_trip_combined_document(table):
