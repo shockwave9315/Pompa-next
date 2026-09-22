@@ -11,7 +11,9 @@ Legacy is evidence only, not a codebase to refactor or preserve.
 4. Open `docs/reference/heishamon/*` only when MQTT topics or HeishaMon behavior matter.
 
 This should provide enough context without a repository-wide scan.
-Do not inspect `shockwave9315/pompa` unless the task explicitly asks for comparison or reference evidence.
+For Stage 4/5 work in an area present in legacy, inspect only the corresponding legacy product
+behavior as evidence before finalizing scope or design; see `docs/CONTEXT.md`. Other legacy reads
+require a specific comparison or evidence need.
 Never infer reusable architecture, code, API compatibility, schema compatibility, or migration requirements from legacy.
 
 ## Authority

@@ -29,5 +29,6 @@ Start with:
 - [Roadmap](docs/ROADMAP.md)
 
 The former project remains available as [legacy reference material](https://github.com/shockwave9315/pompa).
+Pompa Next aims to recover and improve its useful product capabilities through a clean implementation.
 
 Pompa Next does **not** preserve legacy source, API, database, or historical-data compatibility.

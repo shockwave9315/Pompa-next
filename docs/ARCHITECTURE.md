@@ -504,6 +504,10 @@ instead of repeated code, pure derivations where practical, and domain resources
 frontend-page endpoints. Ordinary heat-pump changes may be `unknown` or `transition`; they are
 data, not infrastructure incidents.
 
+The intended product is a functional successor to useful legacy capabilities. Targeted legacy
+inspection supplies product evidence under `docs/CONTEXT.md`, never implementation authority or a
+compatibility requirement.
+
 ### 25.1 Stage 4A — reference-backed capabilities and full readable live state
 
 **Frozen direction:** Parse the tracked `docs/reference/heishamon/MQTT-Topics.md` for TOP0–TOP143

@@ -36,7 +36,9 @@ Real-runtime freshness measurement and decision are complete. The originally pla
 
 Expand the completed Stage 1–3 foundation additively. Broad HeishaMon/product capability must
 remain lightweight internally: one definition of each fact, reusable domain resources, and no
-frontend-page calculation services. Frontend work starts after this stage.
+frontend-page calculation services. For areas present in legacy, inspect the corresponding product
+behavior before finalizing scope; recover useful capability without its implementation debt (see
+`docs/CONTEXT.md`). Frontend work starts after this stage.
 
 ### 4A — Unified HeishaMon capability foundation and full readable live surface
 
@@ -74,8 +76,9 @@ validate the backend on CT109 before frontend work.
 ## Stage 5 — Frontend
 
 Build Teraz, Historia, Statystyki, Cykle/activity, Status, capabilities/settings and Sterowanie
-from the completed backend API. Reuse useful legacy presentation ideas without legacy API or
-schema compatibility. The frontend renders backend domain facts.
+from the completed backend API. Inspect corresponding legacy views, workflows and mocks for useful
+product behavior; mocks do not prove backend completeness. Preserve no legacy API, schema or
+frontend compatibility. The frontend renders backend domain facts.
 
 ## Stage 6 — Cutover
 

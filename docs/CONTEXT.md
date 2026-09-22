@@ -26,9 +26,14 @@ Current repository: `shockwave9315/Pompa-next`
 
 Legacy/reference repository: `shockwave9315/pompa`
 
-Legacy is frozen reference material only. Pompa Next is a new implementation, not a refactor or continuation of the old source tree.
+**Product continuity, implementation reset:** Pompa Next is the clean functional successor to the
+useful legacy product. Legacy is product evidence for capabilities, workflows, domain discoveries,
+real-device findings and presentation lessons. Recover or improve useful behavior where it serves
+the product; no legacy feature or mock is automatically correct or required as-is.
 
-Knowledge may be extracted when explicitly needed. Architecture and code do not move automatically.
+Pompa Next is a new implementation, not a refactor or continuation of the old source tree. Legacy
+code, APIs, schemas, service structure, fallback chains, calculations and state machinery are not
+implementation authority and must not be copied blindly.
 
 No source, API, schema, database, or data compatibility is required. There is no migration or backfill of legacy historical data.
 
@@ -144,4 +149,10 @@ When architecture or domain semantics matter, read the relevant sections of `doc
 
 When MQTT or HeishaMon topic facts matter, read only the needed files in `docs/reference/heishamon/`.
 
-Do not read the legacy repository unless the task explicitly requires comparison or reference evidence. Never use legacy history documents as Pompa Next requirements.
+For Stage 4 or 5 work on a product area already present in legacy, inspect the corresponding
+legacy product behavior and tests before finalizing scope or design. This includes 4A/4E
+capability/control research, 4B logging selection, 4C activity/cycles/defrost, 4D reports, and
+Stage 5 current, history charts/minute table/presets, statistics and cycles views. Mocks are
+product clues, not proof of working backend behavior. Ask
+what to preserve or improve, not what code to copy. Other legacy inspection still requires a
+specific comparison or evidence need; legacy history documents are not Pompa Next requirements.
