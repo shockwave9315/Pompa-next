@@ -2,8 +2,8 @@
 
 ## Current stage
 
-**Stage 4A — Unified HeishaMon capability foundation and full readable live surface.** Frontend
-work is postponed until Stage 4 — Complete Product Backend is finished.
+**Stage 4A — DONE.** Unified HeishaMon capability foundation and full readable live surface.
+PR #6 remains draft for owner review before merge. Frontend work starts after Stage 4.
 
 ### Stage 0
 
@@ -31,10 +31,12 @@ runtime-validated on CT109 alongside legacy, in a separate Docker Compose projec
 MariaDB, MQTT client id and port. The frontend-facing `/api/v1` contract is frozen; see
 `docs/API.md`.
 
-## Stage 4A implementation
+## Stage 4A
 
-The Stage 4A code is complete and locally validated. CT109 deployment and runtime validation are
-pending owner execution, so Stage 4A is not yet marked DONE.
+DONE. The owner validated deployed head `eae56fe46f4940aa4940ab2f08f87436cb54a117` on CT109:
+health 200, MQTT connected/alive with zero parse rejects, unchanged default API, and 203 capabilities
+with 157 readable physical slots. All six XTOP readings, including real zeros on XTOP1 and XTOP4,
+were present through the opt-in live API.
 
 ## Implemented
 
@@ -45,17 +47,13 @@ pending owner execution, so Stage 4A is not yet marked DONE.
 - Expose additive capability/readings forms while preserving default `/metrics` and `/live` shapes.
 - Prove reference coverage, unchanged core behavior and packaged-reference availability locally.
 
-Stage 4A uses one feature branch and one DRAFT PR with checkpoint commits: A reference-backed
-foundation; B additional typed normalization; C full in-memory readings; D additive API; E final
-local review/tests/docs and owner-run CT109 validation. These are commits within the stage, not
-separate roadmap stages.
-
 The catalog contains 203 reference-backed identities and 157 readable TOP/OPT/XTOP slots. Generic
 physical values use number/text typing, and opt-in `/metrics?include=capabilities` and
 `/live?include=readings` expose them. Default Stage 1–3 API and canonical history behavior remain
-unchanged. Owner-supplied pre-deployment CT109 `mqtt.uncatalogued_topics` evidence verifies the
-exact physical paths for XTOP1 and XTOP4, so all six XTOP topics are now mapped. Deployment of this
-head and the remaining CT109 regression checks are still pending owner execution.
+unchanged. All 157 topics are mapped; XTOP1 and XTOP4 paths were verified by actual CT109 messages.
+The owner's immutable historical-range response matched byte for byte before and after deployment,
+MariaDB schemas were identical, canonical minutes continued advancing, and the restart left its
+expected unrecorded partial minute. No optional capability was persisted.
 
 ## Out of scope
 
@@ -66,6 +64,5 @@ head and the remaining CT109 regression checks are still pending owner execution
 
 ## Next
 
-After owner CT109 validation and PR #6 review/merge: **Stage 4B — configurable optional history**,
-followed by 4C activity/cycles/defrost and durable events, 4D reports, 4E control and final
-API/runtime validation, Stage 5 frontend, then Stage 6 cutover. See `docs/ROADMAP.md`.
+After PR #6 review/merge: **Stage 4B — configurable optional history**. See `docs/ROADMAP.md` for
+later stages.

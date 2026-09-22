@@ -523,7 +523,9 @@ Unknown metadata stays unknown. There is no manually maintained 203-entry catalo
 All six XTOP paths now have evidence: XTOP0/2/3/5 from canonical Stage 1 sources, and XTOP1/4
 from exact received topics in owner-supplied pre-deployment CT109 `mqtt.uncatalogued_topics`.
 Those last two are physical readings only; they add no canonical source or history series. Final
-deployment and regression validation of this head remain pending owner execution.
+CT109 validation of deployed head `eae56fe46f4940aa4940ab2f08f87436cb54a117` confirmed all six
+XTOP readings, unchanged default API and database schema, identical saved historical results, and
+the expected unrecorded partial minute across restart.
 
 The parser consumes a deliberately stable subset of the checked-in Markdown format. Tests must
 reject missing, duplicated or malformed identity rows and protect the grammar against formatting

@@ -40,7 +40,7 @@ frontend-page calculation services. For areas present in legacy, inspect the cor
 behavior before finalizing scope; recover useful capability without its implementation debt (see
 `docs/CONTEXT.md`). Frontend work starts after this stage.
 
-### 4A — Unified HeishaMon capability foundation and full readable live surface
+### 4A — Unified HeishaMon capability foundation and full readable live surface (DONE)
 
 Use a strict parser over tracked TOP/OPT/SET references and observed XTOP identities, the existing
 21 canonical metric semantics, and small verified overrides. Expose additional readable topics in
