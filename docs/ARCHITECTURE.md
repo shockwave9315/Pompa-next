@@ -534,6 +534,17 @@ from its authoritative source; Stage 4A checkpoint A decides the build wiring. P
 cached after startup. The current core catalog and its parsing, source priority, XTOP/TOP
 fallback, sentinels, valid ranges, `mean`/`last` kinds and recording flags do not change.
 
+`docs/reference/heishamon/MQTT-Topics.md` and `docs/reference/heishamon/realne_dane.md` remain
+factual device evidence, but since Stage 4A they are also packaged runtime inputs: the backend
+image ships them and parses them at startup to build the effective capability catalog. They are
+not harmless documentation — an edit changes runtime behavior — and strict capability tests guard
+their grammar and their content relationship (identity coverage, topic/name conflicts).
+
+The public identity of an effective capability is `identity` (e.g. `XTOP0`, `TOP16`); there is no
+second capability key. Its relationship to the canonical core, when any, is `canonical_metric` and
+`source_priority` alone — a physical capability identity and a canonical logical series key are two
+distinct namespaces and must not be conflated into one field.
+
 All meaningful readable TOP/OPT/XTOP identities may exist in an in-memory live store. Minimum
 facts are identity, value, receipt time, provenance/mode and availability. Absent optional-PCB
 topics are simply absent readings; the reference states they may not appear with a real optional
@@ -560,6 +571,16 @@ additional history-suitable metrics without a SQL migration per selection. Optio
 minute-based. `Selected but unknown` and `not selected` must remain distinguishable through raw
 and long-term aggregation, including after purge; retain both selected and known minute counts.
 Text or static identity topics do not become historical merely because they are live.
+
+**Accepted Stage 4A→4B safety notes:** Selection must key off physical `identity` plus expected
+topic evidence, never a capability field derived from canonical source priority — Stage 4A exposes
+no such field. If a selected identity's expected topic later changes, historical storage must not
+silently continue under the changed meaning. Generic physical `kind` (`number`/`text`) is payload
+syntax, not a historical semantic type; a generic physical value carries no canonical sentinel
+semantics automatically — e.g. a physical `TOP15 = -200` is a valid observed numeric payload but
+must not automatically become a valid optional-history power value. Stage 4B must define history
+eligibility, semantic type, sentinels and aggregation policy explicitly, per selection. Stage 4A's
+`available` is a live-surface fact only; it does not by itself define minute-history validity.
 
 **Candidate:** core-wide minutes plus separate dynamic optional history. **Deferred to 4B:**
 history-suitable types and aggregation rules, physical optional table/schema, policy persistence,

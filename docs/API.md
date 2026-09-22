@@ -322,7 +322,6 @@ OPT0–OPT6, SET1–SET46, XTOP0–XTOP5. Each entry has exactly:
 ```json
 {
   "identity": "TOP9",
-  "key": "top_9",
   "family": "TOP",
   "name": "DHW_Target_Temp",
   "topic": "main/DHW_Target_Temp",
@@ -334,8 +333,13 @@ OPT0–OPT6, SET1–SET46, XTOP0–XTOP5. Each entry has exactly:
 }
 ```
 
-`readable` is `true` for TOP/OPT/XTOP and `false` for SET. A canonical physical source has its
-metric key and zero-based priority; other entries have `null` for both. TOP/OPT/SET topics come
+`identity` (e.g. `TOP9`, `XTOP0`) is the one stable physical-capability handle; there is no separate
+capability `key`. A capability's relationship to the canonical core, when any, is expressed only by
+`canonical_metric` (the canonical metric's own key) and zero-based `source_priority`; other entries
+have `null` for both. A physical capability identity and a canonical logical series key are distinct
+namespaces and are never conflated into one field.
+
+`readable` is `true` for TOP/OPT/XTOP and `false` for SET. TOP/OPT/SET topics come
 from the documented reference. XTOP0/2/3/5 topics come from verified canonical sources; the exact
 received paths `extra/Cool_Power_Consumption_Extra` (XTOP1) and
 `extra/Cool_Power_Production_Extra` (XTOP4) were supplied from CT109 `mqtt.uncatalogued_topics`.
@@ -352,6 +356,7 @@ XTOP0–XTOP5. SET identities are absent. Each identity maps to exactly:
   "kind": "number",
   "raw": "48",
   "mode": "live",
+  "available": true,
   "received_at": "2027-01-15T08:00:01Z"
 }
 ```
@@ -360,19 +365,29 @@ XTOP0–XTOP5. SET identities are absent. Each identity maps to exactly:
 text, and `kind` is `number` or `text`. Physical values retain sentinels such as `-200` as numeric
 facts; canonical metrics continue to apply their own sentinel and range rules independently.
 The entire opt-in live response, including `now`, MQTT facts, canonical metrics and physical
-readings, is one recorder-locked observation. Neither opt-in form reads MariaDB; both work before
-MQTT connects.
+readings, is one recorder-locked observation: `available` is derived from the same `now` already
+sampled for the response, never a second clock read or a second recorder lock. Neither opt-in form
+reads MariaDB; both work before MQTT connects.
 
 For an identity without a current reading, the entry is still present: `topic` is its known path
-or `null`, and `value`, `kind`, `raw` and `received_at` are `null`, with `mode: "none"`. All 157
-readable identities currently have known topics; an unpublished OPT or XTOP reading still has
-`mode: "none"` rather than a synthesized value.
-For a payload, `mode` is `retained` if the MQTT delivery was retained and `live` otherwise.
-Physical `mode="live"` means the latest non-retained receipt in the current valid connection
-lifecycle. It does **not** claim freshness under the canonical 600-second source rule; generic
-physical readings have no per-capability freshness policy. A disconnect, LWT `Offline`, new
-connection, or detected backward clock step clears these physical readings until new deliveries
-arrive. This differs from the canonical `/live.metrics` retained fallback described above.
+or `null`, and `value`, `kind`, `raw` and `received_at` are `null`, with `mode: "none"` and
+`available: false`. All 157 readable identities currently have known topics; an unpublished OPT or
+XTOP reading still has `mode: "none"` rather than a synthesized value.
+
+`mode` is MQTT provenance, never a health verdict: `retained` if the last MQTT delivery was
+retained, `live` if the latest non-retained receipt in the current valid connection lifecycle, or
+`none` if there is no current reading. A disconnect, LWT `Offline`, new connection, or detected
+backward clock step clears these physical readings until new deliveries arrive. This differs from
+the canonical `/live.metrics` retained fallback described above.
+
+`available` is the current physical-display fact: whether this reading may be shown as live right
+now. It is `true` only when all of the following hold, using the same accepted `stale_after`
+boundary (`STALE_AFTER_SECONDS`, default 600) as canonical freshness: a payload exists; the last
+delivery was non-retained (`mode == "live"`); MQTT is currently connected; the current LWT is not
+`Offline`; `received_at` exists; and `now - received_at <= stale_after`. Otherwise `available` is
+`false` — including for `mode: "retained"` and `mode: "none"`. `available=true` is a live-surface
+fact only. It does **not** imply Stage 4B optional-history eligibility, selection or persistence for
+that identity.
 
 Each endpoint accepts only its one documented `include` value or no `include`; unknown,
 comma-separated, empty, and repeated `include` values return `400`. The five endpoint paths remain

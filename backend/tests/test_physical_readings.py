@@ -7,6 +7,7 @@ from conftest import Api, RUNNING, T0
 from pompa.capabilities import TypedPayload, effective_capabilities
 from pompa.catalog import RECORDED_KEYS, Outcome
 from pompa.ingest import Ingest, PhysicalReading
+from pompa.recorder import physical_reading_dict
 
 
 def test_all_and_only_readable_reference_identities_have_small_slots():
@@ -211,6 +212,49 @@ def test_noncore_reading_does_not_change_canonical_source_priority_or_minute_row
     assert row["co_power_consumption"] == 900.0  # preferred XTOP0, not TOP16
     assert row["main_outlet_temp"] == 35.0
     assert api.recorder.physical_readings()[9].payload == TypedPayload("48", 48, "number")
+
+
+def test_physical_reading_dict_availability_boundary_and_guards():
+    """``mode`` is provenance; ``available`` is the same accepted stale_after=600 boundary."""
+    live = PhysicalReading("TOP9", "main/DHW_Target_Temp", TypedPayload("48", 48, "number"), 1000.0, False)
+    assert physical_reading_dict(
+        live, now=1000.0 + 599.999, connected=True, lwt_offline=False, stale_after=600
+    )["available"] is True
+    assert physical_reading_dict(
+        live, now=1000.0 + 600, connected=True, lwt_offline=False, stale_after=600
+    )["available"] is True
+    assert physical_reading_dict(
+        live, now=1000.0 + 600.001, connected=True, lwt_offline=False, stale_after=600
+    )["available"] is False
+    # Disconnected or LWT Offline forces unavailable even for an otherwise-fresh live reading.
+    assert physical_reading_dict(
+        live, now=1001.0, connected=False, lwt_offline=False, stale_after=600
+    )["available"] is False
+    assert physical_reading_dict(
+        live, now=1001.0, connected=True, lwt_offline=True, stale_after=600
+    )["available"] is False
+
+    retained = PhysicalReading("TOP44", "main/Error", TypedPayload("x", "x", "text"), 1000.0, True)
+    assert physical_reading_dict(
+        retained, now=1001.0, connected=True, lwt_offline=False, stale_after=600
+    ) == {
+        "topic": "main/Error", "value": "x", "kind": "text", "raw": "x",
+        "mode": "retained", "available": False, "received_at": "1970-01-01T00:16:40Z",
+    }
+
+    absent = PhysicalReading("TOP0", "main/Heatpump_State")
+    assert physical_reading_dict(
+        absent, now=1001.0, connected=True, lwt_offline=False, stale_after=600
+    ) == {
+        "topic": "main/Heatpump_State", "value": None, "kind": None, "raw": None,
+        "mode": "none", "available": False, "received_at": None,
+    }
+
+    # A live payload without a receipt timestamp cannot compute an age; guarded, not a crash.
+    no_receipt = PhysicalReading("TOP1", "main/Pump_Flow", TypedPayload("1", 1, "number"), None, False)
+    assert physical_reading_dict(
+        no_receipt, now=1001.0, connected=True, lwt_offline=False, stale_after=600
+    )["available"] is False
 
 
 def test_physical_snapshot_is_atomic_under_recorder_lock():

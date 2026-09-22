@@ -53,7 +53,7 @@ from collections.abc import Callable, Iterable
 from enum import Enum
 
 from .aggregation import RECORDED, SERIES, fold_minutes
-from .ingest import Ingest, PhysicalReading
+from .ingest import LWT_OFFLINE, Ingest, PhysicalReading
 from .minute import MinuteAccumulator, MinuteRow, iso_utc
 from .storage import Session, Storage, StorageUnavailable
 from .timegrid import HOUR, floor_hour, purge_cutoff
@@ -179,15 +179,31 @@ def purge_step(storage: Storage, now: float, retention_days: int, pending_from: 
         return cutoff, s.delete_minutes_before(end), end < cutoff
 
 
-def physical_reading_dict(reading: PhysicalReading) -> dict:
-    """Serialize a physical receipt without inferring freshness or availability."""
+def physical_reading_dict(reading: PhysicalReading, *, now: float, connected: bool,
+                           lwt_offline: bool, stale_after: int) -> dict:
+    """Serialize a physical receipt: ``mode`` is provenance, ``available`` is a current fact.
+
+    ``available`` is true only for a fresh non-retained receipt in a currently
+    connected, non-``Offline`` epoch, using the same ``stale_after`` boundary as
+    canonical freshness. It is a live-surface fact only; it does not imply
+    Stage 4B history eligibility for this physical identity.
+    """
     payload = reading.payload
+    mode = "none" if payload is None else ("retained" if reading.retained else "live")
+    available = (
+        mode == "live"
+        and connected
+        and not lwt_offline
+        and reading.received_at is not None
+        and now - reading.received_at <= stale_after
+    )
     return {
         "topic": reading.topic,
         "value": payload.value if payload else None,
         "kind": payload.kind if payload else None,
         "raw": payload.raw if payload else None,
-        "mode": "none" if payload is None else ("retained" if reading.retained else "live"),
+        "mode": mode,
+        "available": available,
         "received_at": iso_utc(reading.received_at),
     }
 
@@ -442,7 +458,10 @@ class Recorder:
             }
             if include_readings:
                 body["readings"] = {
-                    reading.identity: physical_reading_dict(reading)
+                    reading.identity: physical_reading_dict(
+                        reading, now=now, connected=ing.connected,
+                        lwt_offline=ing.lwt == LWT_OFFLINE, stale_after=ing.stale_after,
+                    )
                     for reading in ing.physical_snapshot()
                 }
             return body

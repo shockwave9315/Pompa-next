@@ -5,10 +5,10 @@ from pompa.catalog import METRICS
 
 
 CAPABILITY_FIELDS = {
-    "identity", "key", "family", "name", "topic", "description", "provenance",
+    "identity", "family", "name", "topic", "description", "provenance",
     "readable", "canonical_metric", "source_priority",
 }
-READING_FIELDS = {"topic", "value", "kind", "raw", "mode", "received_at"}
+READING_FIELDS = {"topic", "value", "kind", "raw", "mode", "available", "received_at"}
 PATHS = {"/health", "/api/v1/status", "/api/v1/live", "/api/v1/metrics", "/api/v1/history"}
 RANGE = {"from": "2027-01-15T08:00:00Z", "to": "2027-01-15T08:01:00Z"}
 
@@ -45,7 +45,7 @@ def test_capabilities_have_exact_count_order_shape_and_factual_topics():
     assert all(set(entry) == CAPABILITY_FIELDS for entry in entries)
     by_id = {entry["identity"]: entry for entry in entries}
     assert by_id["TOP9"] == {
-        "identity": "TOP9", "key": "top_9", "family": "TOP", "name": "DHW_Target_Temp",
+        "identity": "TOP9", "family": "TOP", "name": "DHW_Target_Temp",
         "topic": "main/DHW_Target_Temp", "description": "DHW target temperature (°C)",
         "provenance": "documented", "readable": True,
         "canonical_metric": None, "source_priority": None,
@@ -96,11 +96,11 @@ def test_unseen_readings_include_every_slot_with_exact_none_shape():
     assert all(set(entry) == READING_FIELDS for entry in readings.values())
     assert readings["TOP9"] == {
         "topic": "main/DHW_Target_Temp", "value": None, "kind": None,
-        "raw": None, "mode": "none", "received_at": None,
+        "raw": None, "mode": "none", "available": False, "received_at": None,
     }
     assert readings["OPT3"] == {
         "topic": "optional/Z2_Mixing_Valve", "value": None, "kind": None,
-        "raw": None, "mode": "none", "received_at": None,
+        "raw": None, "mode": "none", "available": False, "received_at": None,
     }
     for identity, topic in (
         ("XTOP1", "extra/Cool_Power_Consumption_Extra"),
@@ -108,7 +108,7 @@ def test_unseen_readings_include_every_slot_with_exact_none_shape():
     ):
         assert readings[identity] == {
             "topic": topic, "value": None, "kind": None,
-            "raw": None, "mode": "none", "received_at": None,
+            "raw": None, "mode": "none", "available": False, "received_at": None,
         }
     assert all(entry["topic"] is not None for entry in readings.values())
     assert not any(identity.startswith("SET") for identity in readings)
@@ -126,17 +126,17 @@ def test_numeric_text_retained_live_and_physical_sentinel_values():
     readings = api.body("/api/v1/live", T0 + 5, include="readings")["readings"]
     assert readings["TOP9"] == {
         "topic": "main/DHW_Target_Temp", "value": 48, "kind": "number", "raw": "48",
-        "mode": "live", "received_at": "2027-01-15T08:00:01Z",
+        "mode": "live", "available": True, "received_at": "2027-01-15T08:00:01Z",
     }
     assert readings["TOP44"] == {
         "topic": "main/Error", "value": "No error", "kind": "text", "raw": "No error",
-        "mode": "retained", "received_at": "2027-01-15T08:00:02Z",
+        "mode": "retained", "available": False, "received_at": "2027-01-15T08:00:02Z",
     }
     assert readings["TOP92"]["value"] == model
     assert readings["TOP92"]["kind"] == "text"
     assert readings["TOP15"] == {
         "topic": "main/Heat_Power_Production", "value": -200, "kind": "number",
-        "raw": "-200", "mode": "live", "received_at": "2027-01-15T08:00:04Z",
+        "raw": "-200", "mode": "live", "available": True, "received_at": "2027-01-15T08:00:04Z",
     }
     canonical = api.body("/api/v1/live", T0 + 5)["metrics"]["co_power_production"]
     assert canonical["value"] is None and canonical["mode"] == "none"
@@ -150,12 +150,12 @@ def test_verified_cooling_xtop_paths_appear_in_opt_in_readings_only():
     body = api.body("/api/v1/live", T0 + 3, include="readings")
     assert body["readings"]["XTOP1"] == {
         "topic": "extra/Cool_Power_Consumption_Extra", "value": 12.5,
-        "kind": "number", "raw": "12.5", "mode": "live",
+        "kind": "number", "raw": "12.5", "mode": "live", "available": True,
         "received_at": "2027-01-15T08:00:01Z",
     }
     assert body["readings"]["XTOP4"] == {
         "topic": "extra/Cool_Power_Production_Extra", "value": 0,
-        "kind": "number", "raw": "0", "mode": "retained",
+        "kind": "number", "raw": "0", "mode": "retained", "available": False,
         "received_at": "2027-01-15T08:00:02Z",
     }
     assert "readings" not in api.body("/api/v1/live", T0 + 3)
@@ -242,3 +242,67 @@ def test_opt_in_live_uses_one_lock_and_reads_physical_state_under_it():
     response = api.get("/api/v1/live", T0 + 1, include="readings")
     assert response.status_code == 200
     assert lock.entries == 1
+
+
+def test_physical_availability_uses_the_one_locked_clock_reading_not_a_second_read():
+    """``available`` must derive from the same ``now`` already sampled for the response."""
+    from fastapi.testclient import TestClient
+
+    from pompa.api import create_app
+
+    api = Api()
+    api.connect(T0)
+    api.msg(T0 + 1, "main/DHW_Target_Temp", "48")
+
+    calls = []
+
+    def counting_clock():
+        calls.append(1)
+        return T0 + 2.0
+
+    client = TestClient(create_app(api.recorder, api.storage, clock=counting_clock))
+    response = client.get("/api/v1/live", params={"include": "readings"})
+    assert response.status_code == 200
+    assert len(calls) == 1  # one observation instant for now, mqtt, metrics and readings alike
+    body = response.json()
+    assert body["now"] == "2027-01-15T08:00:02Z"
+    assert body["readings"]["TOP9"]["received_at"] == "2027-01-15T08:00:01Z"
+    assert body["readings"]["TOP9"]["available"] is True
+
+
+def test_physical_availability_lifecycle_matches_connection_and_offline_clearing():
+    api = Api(stale=600)
+    api.connect(T0)
+    api.msg(T0 + 1, "main/DHW_Target_Temp", "48")
+    assert api.body(
+        "/api/v1/live", T0 + 1 + 600, include="readings"
+    )["readings"]["TOP9"]["available"] is True
+    assert api.body(
+        "/api/v1/live", T0 + 1 + 600.001, include="readings"
+    )["readings"]["TOP9"]["available"] is False
+
+    api.disconnect(T0 + 3)
+    disconnected = api.body("/api/v1/live", T0 + 4, include="readings")["readings"]["TOP9"]
+    assert disconnected == {"mode": "none", "available": False, "topic": "main/DHW_Target_Temp",
+                             "value": None, "kind": None, "raw": None, "received_at": None}
+
+    api.connect(T0 + 5)
+    api.msg(T0 + 6, "main/DHW_Target_Temp", "49")
+    assert api.body(
+        "/api/v1/live", T0 + 7, include="readings"
+    )["readings"]["TOP9"]["available"] is True
+    api.lwt(T0 + 8, "Offline")
+    offline = api.body("/api/v1/live", T0 + 9, include="readings")["readings"]["TOP9"]
+    assert offline["mode"] == "none" and offline["available"] is False
+
+
+def test_noncore_physical_reading_available_without_touching_canonical_source_state():
+    """A non-core physical topic (XTOP1) can be available with no canonical SourceState/history."""
+    api = Api(stale=600)
+    api.connect(T0)
+    api.msg(T0 + 1, "extra/Cool_Power_Consumption_Extra", "12.5")
+    readings = api.body("/api/v1/live", T0 + 2, include="readings")["readings"]
+    assert readings["XTOP1"]["mode"] == "live"
+    assert readings["XTOP1"]["available"] is True
+    assert not any(topic.startswith("extra/Cool_") for topic in api.ingest.sources)
+    assert api.body("/api/v1/live", T0 + 2)["metrics"]["co_power_consumption"]["mode"] == "none"

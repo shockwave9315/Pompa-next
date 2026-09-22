@@ -1,11 +1,13 @@
-from dataclasses import replace
+from dataclasses import fields, replace
 
 import pytest
 
 from conftest import REPO_ROOT
 from pompa.capabilities import (
+    Capability,
     ReferenceError,
     build_capabilities,
+    capability_dict,
     effective_capabilities,
     parse_documented,
     parse_observed,
@@ -45,16 +47,22 @@ def test_exact_reference_coverage_and_order():
         e.identity for e in documented + observed
     )
     assert len({e.reference.identity for e in catalog}) == len(catalog) == 203
-    assert len({e.key for e in catalog}) == 203
     assert catalog == build_capabilities(documented, observed)
 
 
-def test_reference_facts_and_generic_keys():
+def test_capability_contract_has_no_key_field():
+    """``identity`` is the one stable physical-capability handle; there is no ``key``."""
+    assert {f.name for f in fields(Capability)} == {"reference", "metric", "source", "source_priority"}
+    entries = capability_dict(effective_capabilities()[0])
+    assert "key" not in entries
+    assert set(entries) == {
+        "identity", "family", "name", "topic", "description",
+        "provenance", "readable", "canonical_metric", "source_priority",
+    }
+
+
+def test_reference_facts():
     entries = {e.reference.identity: e for e in effective_capabilities()}
-    assert entries["TOP44"].key == "top_44"
-    assert entries["OPT3"].key == "opt_3"
-    assert entries["SET16"].key == "set_16"
-    assert entries["XTOP1"].key == "xtop_1"
     assert entries["TOP44"].reference.topic == "main/Error"
     assert entries["OPT3"].reference.topic == "optional/Z2_Mixing_Valve"
     assert entries["SET16"].reference.topic == "commands/SetCurves"
@@ -80,6 +88,14 @@ def test_reference_facts_and_generic_keys():
     DOCUMENTED.replace("TOP6 | main/Main_Outlet_Temp | Main outlet water temperature (°C)\n", ""),
     DOCUMENTED.replace("ID | Topic | Response/Description", "ID | Path | Response/Description", 1),
     DOCUMENTED.replace("## Command Topics:", "## Commands:"),
+    # A table-like row after the table body must fail even when it does not
+    # match the case-sensitive TOP/OPT/SET detector (lowercase here).
+    DOCUMENTED.replace(
+        "## Option PCB Topics:", "top6 | main/Something | description\n\n## Option PCB Topics:", 1
+    ),
+    # Any other unexpected table-like content (a "|") past the table end must
+    # fail fast too, not just a stray identity-shaped row.
+    DOCUMENTED + "\nnote | trailing content with a pipe",
 ])
 def test_malformed_or_duplicate_documented_rows_fail(bad):
     with pytest.raises(ReferenceError):
@@ -149,10 +165,6 @@ def test_core_association_and_priority_are_unchanged():
             assert capability.metric is metric
             assert capability.source is source
             assert capability.source_priority == priority
-            if priority == 0:
-                assert capability.key == metric.key
-            else:
-                assert capability.key == f"top_{int(source.id.removeprefix('TOP'))}"
             if source.id.startswith("TOP"):
                 assert capability.reference.topic == source.topic
     assert tuple(s.id for s in METRICS[11].sources) == ("XTOP0", "TOP16")

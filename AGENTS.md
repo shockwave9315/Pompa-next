@@ -20,7 +20,9 @@ Do not mine legacy code for reusable architecture, APIs, schemas, or implementat
 `docs/ARCHITECTURE.md` is the architectural source of truth.
 `docs/STATUS.md` describes current work only; it is not a chronology.
 `docs/ROADMAP.md` defines stage direction.
-The HeishaMon files are evidence, not application architecture.
+The HeishaMon files are evidence, not application architecture — but since Stage 4A they are also
+packaged runtime inputs parsed into the effective capability catalog at backend startup, guarded by
+strict capability tests. They are not harmless documentation; see `docs/ARCHITECTURE.md` §25.1.
 
 Backend code owns domain semantics, aggregation, alignment, energy, COP, and state derivation.
 Frontend code renders backend facts and models; it must not calculate domain truth.

@@ -44,7 +44,6 @@ class ReferenceIdentity:
 @dataclass(frozen=True, slots=True)
 class Capability:
     reference: ReferenceIdentity
-    key: str
     metric: Metric | None = None
     source: Source | None = None
     source_priority: int | None = None
@@ -56,11 +55,15 @@ class Capability:
 
 
 def capability_dict(capability: Capability) -> dict:
-    """The factual public projection of one effective capability."""
+    """The factual public projection of one effective capability.
+
+    ``identity`` is the one stable physical-capability handle. ``canonical_metric``
+    and ``source_priority`` express its relationship to the canonical core; there
+    is no second public key that could be confused with a canonical series key.
+    """
     reference = capability.reference
     return {
         "identity": reference.identity,
-        "key": capability.key,
         "family": reference.family,
         "name": reference.name,
         "topic": capability.topic,
@@ -199,9 +202,10 @@ def parse_documented(text: str) -> tuple[ReferenceIdentity, ...]:
                 name, topic = raw_topic.split("/", 1)[1], raw_topic
                 description = cells[2]
             entries.append(ReferenceIdentity(raw_id, family, index, name, topic, description, "documented"))
-        # A table row after a blank would otherwise disappear silently.
-        if any(re.match(r"^(?:TOP|OPT|SET)[^ ]*\s*\|", line.strip()) or
-               line.lstrip().startswith("|") for line in section[row_end:]):
+        # Any non-blank table-like line (containing "|") after the table body
+        # would otherwise disappear silently, including one that does not match
+        # the case-sensitive TOP/OPT/SET detector. Fail fast instead of guessing.
+        if any(line.strip() and "|" in line for line in section[row_end:]):
             raise ReferenceError(f"Row outside {family} table")
     result = tuple(sorted(entries, key=lambda e: (dict(TOP=0, OPT=1, SET=2)[e.family], e.index)))
     _unique(result)
@@ -257,7 +261,6 @@ def build_capabilities(
     _unique(baseline)
     by_id = {entry.identity: entry for entry in baseline}
     associations: dict[str, tuple[Metric, Source, int]] = {}
-    primary_ids: set[str] = set()
     for metric in metrics:
         for priority, source in enumerate(metric.sources):
             reference = by_id.get(source.id)
@@ -272,23 +275,17 @@ def build_capabilities(
             elif reference.topic != source.topic:
                 raise ReferenceError(f"Core topic conflicts with reference: {source.id}")
             associations[source.id] = (metric, source, priority)
-            if priority == 0:
-                primary_ids.add(source.id)
     for identity, topic in _VERIFIED_XTOP_TOPICS.items():
         reference = by_id.get(identity)
         if reference is None or reference.family != "XTOP" or topic != f"extra/{reference.name}":
             raise ReferenceError(f"Verified XTOP topic conflicts with observation: {identity}")
         if identity in associations and associations[identity][1].topic != topic:
             raise ReferenceError(f"Verified XTOP topic conflicts with core: {identity}")
-    result = []
-    for reference in baseline:
-        association = associations.get(reference.identity)
-        key = (association[0].key if reference.identity in primary_ids else
-               f"{reference.family.lower()}_{reference.index}")
-        result.append(Capability(reference, key, *association) if association else Capability(reference, key))
-    if len({entry.key for entry in result}) != len(result):
-        raise ReferenceError("Duplicate effective capability key")
-    return tuple(result)
+    return tuple(
+        Capability(reference, *associations[reference.identity]) if reference.identity in associations
+        else Capability(reference)
+        for reference in baseline
+    )
 
 
 def reference_dir() -> Path:

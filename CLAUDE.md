@@ -21,7 +21,10 @@ Never infer reusable architecture, code, API compatibility, schema compatibility
 - `docs/ARCHITECTURE.md`: implementation and domain source of truth.
 - `docs/STATUS.md`: current stage and exclusions only.
 - `docs/ROADMAP.md`: high-level future sequence.
-- HeishaMon reference files: factual device/topic evidence only.
+- HeishaMon reference files: factual device/topic evidence, and, since Stage 4A, also packaged
+  runtime inputs parsed into the effective capability catalog at backend startup — not harmless
+  documentation. Strict capability tests guard their grammar/content relationship; see
+  `docs/ARCHITECTURE.md` §25.1.
 
 Backend owns domain truth: parsing, freshness, minute semantics, alignment, aggregation, energy, COP, and derived state.
 Frontend displays backend facts and must not independently calculate those concepts.
