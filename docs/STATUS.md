@@ -104,8 +104,15 @@ PR #7, not merged.
   including negative power. `label` is now explicitly non-semantic (never requires a version bump),
   `optional_series.identity`/`expected_topic` use explicit binary collation, and a golden semantic-
   fingerprint test guards every existing profile against an unversioned semantic change.
-- Full backend suite (689 tests) verified against real MariaDB; every MariaDB-gated test skips
-  cleanly without `POMPA_TEST_DB_HOST`.
+- A follow-up review found that the first correction's conflict check was still scoped to the full
+  `(identity, expected_topic, profile_version)` tuple, so a code change to `expected_topic` alone,
+  without a `profile_version` bump, could still create a second, independent series for the same
+  identity/version instead of colliding. Closed: one `identity`/`profile_version` now names exactly
+  one `expected_topic`, checked by a locking read *before* any series is created or reused
+  (`Session.lock_series_by_identity_version`), never by the narrower per-tuple `UNIQUE` constraint
+  alone. The golden fingerprint map is now keyed by `(identity, profile_version)` and append-only.
+- Full backend suite verified against real MariaDB; every MariaDB-gated test skips cleanly without
+  `POMPA_TEST_DB_HOST`.
 
 ### Deferred
 

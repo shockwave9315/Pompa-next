@@ -389,16 +389,28 @@ class Session:
         (series_id,) = self._cur.fetchone()
         return int(series_id)
 
-    def lock_series(self, series_id: int) -> SeriesRow | None:
-        """The locking/current read of one series row: the semantic-conflict verification step
-        (§25.2.8) always follows this, never a plain read, so a concurrently committed row is
-        never missed and ``get_or_create_series``'s recovered id is never trusted blind."""
+    def lock_series_by_identity_version(self, identity: str, profile_version: int) -> SeriesRow | None:
+        """Current/locking read of any existing series for ``(identity, profile_version)``,
+        regardless of ``expected_topic`` (§25.2.8): one identity/version pair is exactly one
+        semantic lineage, so this is always checked *before* a series is created or reused --
+        never a plain read, and never scoped to one already-guessed ``expected_topic`` -- so a
+        topic change under an unbumped ``profile_version`` is caught here, not missed because it
+        looks like a brand-new, non-conflicting ``(identity, expected_topic, profile_version)``
+        tuple. More than one matching row is corrupted state, never silently resolved.
+        """
         self._cur.execute(
             f"SELECT id, identity, expected_topic, profile_version, label, unit, kind,"
             f" semantic_type, sentinels_json, min_value, max_value, energy"
-            f" FROM {OPTIONAL_SERIES} WHERE id = %s FOR UPDATE", (series_id,))
-        row = self._cur.fetchone()
-        return None if row is None else self._decode_series_row(row)
+            f" FROM {OPTIONAL_SERIES} WHERE identity = %s AND profile_version = %s FOR UPDATE",
+            (identity, profile_version))
+        rows = self._cur.fetchall()
+        if not rows:
+            return None
+        if len(rows) > 1:
+            raise RuntimeError(
+                f"corrupted optional_series state: {len(rows)} rows for identity={identity!r}"
+                f" profile_version={profile_version}")
+        return self._decode_series_row(rows[0])
 
     def insert_revision(self, base_revision_id: int | None, effective_from_minute: int,
                         created_at: int) -> int:

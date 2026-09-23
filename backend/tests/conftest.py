@@ -167,8 +167,16 @@ class FakeSession:
         self.optional_series_by_key[key] = series_id
         return series_id
 
-    def lock_series(self, series_id):
-        return self.optional_series.get(series_id)
+    def lock_series_by_identity_version(self, identity, profile_version):
+        matches = [row for row in self.optional_series.values()
+                  if row.identity == identity and row.profile_version == profile_version]
+        if not matches:
+            return None
+        if len(matches) > 1:
+            raise RuntimeError(
+                f"corrupted optional_series state: {len(matches)} rows for identity={identity!r}"
+                f" profile_version={profile_version}")
+        return matches[0]
 
     def insert_revision(self, base_revision_id, effective_from_minute, created_at):
         if effective_from_minute % 60:

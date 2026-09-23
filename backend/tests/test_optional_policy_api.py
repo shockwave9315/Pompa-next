@@ -241,3 +241,22 @@ def test_ambiguous_replay_fails_closed_when_stored_definition_was_altered(mariad
 
     r2 = api.put("/api/v1/optional-history/selection", {"base_revision": 1, "identities": ["TOP21"]})
     assert r2.status_code == 409, r2.text
+
+
+def test_ambiguous_replay_fails_closed_when_stored_topic_was_altered_without_a_version_bump(mariadb):
+    """The identity+version guard cannot be bypassed by the idempotent-replay path either: a
+    persisted topic change under the same (identity, profile_version) must never replay as a
+    false 200, whichever specific conflict/stale-base mechanism reports it."""
+    api = RealApi(mariadb, start=T0)
+    r1 = api.put("/api/v1/optional-history/selection", {"base_revision": 1, "identities": ["TOP21"]}, t=T0)
+    assert r1.status_code == 200, r1.text
+
+    # Simulate a code change that altered TOP21's expected_topic without bumping profile_version,
+    # by altering the already-persisted row's topic directly.
+    with api.storage._connection() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE optional_series SET expected_topic = 'main/New_Outside_Pipe_Temp'"
+                    " WHERE identity = 'TOP21'")
+        conn.commit()
+
+    r2 = api.put("/api/v1/optional-history/selection", {"base_revision": 1, "identities": ["TOP21"]})
+    assert r2.status_code == 409, r2.text  # never a false idempotent 200

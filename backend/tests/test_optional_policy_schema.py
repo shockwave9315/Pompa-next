@@ -184,18 +184,67 @@ def test_resolve_series_id_fails_closed_on_semantic_conflict(mariadb, overrides)
 
 
 def test_binary_identity_topic_collation_is_exact(mariadb):
-    """Protocol identity/topic text compares exactly, independent of the database's default
-    collation: a case difference is a different tuple, never an alias."""
+    """Protocol identity/topic text compares exactly at the storage level, independent of the
+    database's default collation: a case difference is a different ``(identity, expected_topic,
+    profile_version)`` row, never an alias. Exercised directly through ``get_or_create_series``
+    (the raw storage primitive), not ``resolve_series_id``: the domain layer's own
+    identity+version invariant (below) correctly refuses to treat two different topics under the
+    same ``(identity, profile_version)`` as separate selectable series -- that is a conflict, not
+    a collation question."""
     mariadb.ensure_schema()
+    sentinels = json.dumps([-128.0, -78.0], separators=(",", ":"))
     with mariadb.session() as s:
-        lower_id = op.resolve_series_id(s, _profile(expected_topic="main/Ipm_Temp"), 1000)
-        upper_id = op.resolve_series_id(s, _profile(expected_topic="main/IPM_TEMP"), 1000)
+        lower_id = s.get_or_create_series("TOP21", "main/Ipm_Temp", 1, "x", "°C", "mean",
+                                          "measurement", sentinels, None, None, False, 1000)
+        upper_id = s.get_or_create_series("TOP21", "main/IPM_TEMP", 1, "x", "°C", "mean",
+                                          "measurement", sentinels, None, None, False, 1000)
     assert lower_id != upper_id
 
     with mariadb.session() as s:
-        a_id = op.resolve_series_id(s, _profile(identity="TOP21"), 1000)
-        b_id = op.resolve_series_id(s, _profile(identity="top21"), 1000)
+        a_id = s.get_or_create_series("TOP21", "main/Outside_Pipe_Temp", 1, "x", "°C", "mean",
+                                      "measurement", sentinels, None, None, False, 1000)
+        b_id = s.get_or_create_series("top21", "main/Outside_Pipe_Temp", 1, "x", "°C", "mean",
+                                      "measurement", sentinels, None, None, False, 1000)
     assert a_id != b_id
+
+
+def test_resolve_series_id_conflicts_on_topic_change_without_version_bump(mariadb):
+    """One (identity, profile_version) is exactly one semantic lineage (§25.2.8): a topic change
+    under an unbumped profile_version must fail closed, never silently create a second,
+    independent series for the same identity+version."""
+    mariadb.ensure_schema()
+    with mariadb.session() as s:
+        original_id = op.resolve_series_id(s, _profile(expected_topic="main/Outside_Pipe_Temp"), 1000)
+
+    with pytest.raises(op.SeriesDefinitionConflict):
+        with mariadb.session() as s:
+            op.resolve_series_id(s, _profile(expected_topic="main/New_Outside_Pipe_Temp"), 2000)
+
+    # No second row was created, and the original row is untouched.
+    with mariadb._connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT id, expected_topic FROM optional_series WHERE identity = 'TOP21'"
+                    " AND profile_version = 1")
+        assert cur.fetchall() == ((original_id, "main/Outside_Pipe_Temp"),)
+
+
+def test_resolve_series_id_allows_a_new_topic_under_a_bumped_version(mariadb):
+    """The versioning rule is structurally satisfiable: a genuinely new profile_version for the
+    same identity may carry a different expected_topic. (This v2 fixture is a test-only proof of
+    the storage/domain layer's rule, never added to the real HISTORY_PROFILES catalog.)"""
+    mariadb.ensure_schema()
+    with mariadb.session() as s:
+        v1_id = op.resolve_series_id(s, _profile(expected_topic="main/Outside_Pipe_Temp",
+                                                 profile_version=1), 1000)
+        v2_id = op.resolve_series_id(s, _profile(expected_topic="main/New_Outside_Pipe_Temp",
+                                                 profile_version=2), 2000)
+    assert v1_id != v2_id
+    with mariadb._connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT identity, expected_topic, profile_version FROM optional_series"
+                    " WHERE identity = 'TOP21' ORDER BY profile_version")
+        assert cur.fetchall() == (
+            ("TOP21", "main/Outside_Pipe_Temp", 1),
+            ("TOP21", "main/New_Outside_Pipe_Temp", 2),
+        )
 
 
 def test_lock_latest_minute_ts_reads_the_current_read_of_sample_1m(mariadb):

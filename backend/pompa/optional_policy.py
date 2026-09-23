@@ -61,28 +61,36 @@ def series_semantics(row: SeriesRow) -> ProfileSemantics:
 def resolve_series_id(session, profile: HistoryProfile, created_at: int) -> int:
     """Get-or-create the series row for ``profile``, failing closed on any semantic conflict.
 
-    ``Session.get_or_create_series`` recovers an existing row's id under the
-    unique ``(identity, expected_topic, profile_version)`` constraint without
-    ever mutating that row (§25.2.8: an existing row's ``label`` in
-    particular is never touched). The recovered id alone proves nothing about
-    that row's *other* columns, so this always follows up with a locking/
-    current read (``lock_series``) and verifies the complete stored semantic
-    definition equals the current code's, before the id is trusted for a new
-    revision. A prior code change to an existing ``(identity, topic,
-    version)``'s semantics without a version bump raises
-    ``SeriesDefinitionConflict`` instead of silently reusing the stale row.
+    One ``(identity, profile_version)`` is exactly one semantic lineage
+    (§25.2.8): before ever creating or reusing a series, this always takes a
+    locking/current read for *any* existing row sharing ``profile``'s
+    ``(identity, profile_version)``, regardless of its stored
+    ``expected_topic`` -- never a plain read, and never scoped to one
+    already-assumed topic, so a topic change under an unbumped
+    ``profile_version`` cannot slip through as an apparently-new, non-
+    conflicting ``(identity, expected_topic, profile_version)`` tuple.
+
+    - No existing row: create one fresh (the ``UNIQUE`` constraint can only
+      ever be hit by a row this same lookup would already have found, since
+      nothing else can be concurrently mutating ``optional_series`` while
+      this transaction holds the policy-head lock).
+    - An existing row whose complete ``ProfileSemantics`` -- ``expected_topic``
+      included -- equals the current code's: reuse its id.
+    - An existing row that disagrees on ``expected_topic`` and/or any other
+      semantic field: ``SeriesDefinitionConflict``. The old row is never
+      mutated and no new row is ever created for this identity/version.
     """
+    existing = session.lock_series_by_identity_version(profile.identity, profile.profile_version)
+    if existing is not None:
+        if series_semantics(existing) != profile_semantics(profile):
+            raise SeriesDefinitionConflict(profile.identity, profile.expected_topic,
+                                           profile.profile_version)
+        return existing.id
     sentinels_json = _sentinels_json(profile.sentinels)
-    series_id = session.get_or_create_series(
+    return session.get_or_create_series(
         profile.identity, profile.expected_topic, profile.profile_version, profile.label,
         profile.unit, profile.kind, profile.semantic_type, sentinels_json, profile.min_value,
         profile.max_value, profile.energy, created_at)
-    stored = session.lock_series(series_id)
-    assert stored is not None, "get_or_create_series returned an id with no row"
-    if series_semantics(stored) != profile_semantics(profile):
-        raise SeriesDefinitionConflict(profile.identity, profile.expected_topic,
-                                       profile.profile_version)
-    return series_id
 
 
 def resolve_effective_from_minute(recorder_safe_from: int, clock_after_lock: float,

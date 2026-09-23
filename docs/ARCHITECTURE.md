@@ -847,17 +847,19 @@ existing `(identity, profile_version)`'s semantics, the fingerprint test fails l
 correct fix is a new `profile_version`, never updating the expected fingerprint. This is
 code/domain knowledge only; nothing here is persisted until a profile is selected.
 
-**One profile version is one immutable semantic definition; `label` is not semantic.** The
-semantic fields are `identity`, `expected_topic`, `profile_version`, `unit`, `kind`,
-`semantic_type`, `sentinels`, `min_value`, `max_value` and `energy`
+**One `(identity, profile_version)` is one immutable semantic definition; `label` is not
+semantic.** The semantic fields are `identity`, `expected_topic`, `profile_version`, `unit`,
+`kind`, `semantic_type`, `sentinels`, `min_value`, `max_value` and `energy`
 (`history_profile.ProfileSemantics`/`profile_semantics`). `label` is presentation metadata — a
 first-seen historical presentation snapshot — and changing it, alone, never requires a new
 `profile_version` and never creates a new series; an already-persisted series keeps its own stored
-label forever regardless of later code changes. Any intentional change to a semantic field
-requires a new `profile_version`, even though `expected_topic` is already part of the uniqueness
-tuple: reusing an existing `(identity, expected_topic, profile_version)` with different semantics
-is a code-definition error, not a new historical meaning, and is caught rather than silently
-applied (below).
+label forever regardless of later code changes. Any intentional change to a semantic field,
+`expected_topic` included, requires a new `profile_version`: `expected_topic` remains part of the
+persisted series identity `(identity, expected_topic, profile_version)` — a historical
+self-description, kept precisely so an old row never needs code to interpret it — but it is *not*
+an independent axis a given `profile_version` may vary along. One `identity`/`profile_version`
+pair names exactly one topic and one semantic definition; runtime enforces this *before* a series
+is ever created or reused (below), not merely by convention.
 
 **The numeric-parsing primitive is extracted** (`pompa.catalog.parse_numeric`): float conversion,
 the finite-number check, the sentinel check and the min/max check, in that order. Canonical
@@ -871,9 +873,11 @@ checkpoint C), so it is proved correct in isolation, ready to be trusted immedia
 unit, kind, semantic_type, a deterministic JSON sentinel set, min/max and `energy` — not just the
 bare `(identity, expected_topic, profile_version)` tuple. This is deliberate: future code must
 never be required to retain every historical `HistoryProfile` version forever just to interpret an
-old selected series; the persisted row is already self-describing. The identity invariant is
-unchanged — one historical meaning is still exactly `(identity, expected_topic, profile_version)`,
-enforced by a `UNIQUE` constraint — the other columns are that meaning's frozen description.
+old selected series; the persisted row is already self-describing. The persisted historical
+identity is `(identity, expected_topic, profile_version)`, enforced as `UNIQUE` — but, as detailed
+below, the database schema alone does not enforce the *stronger* rule that one `identity`/
+`profile_version` pair may only ever name one `expected_topic`; that is a runtime guard, not a
+schema constraint.
 `optional_policy_revision.base_revision_id` is additionally `UNIQUE`, giving the linear chain a
 real database-level guarantee (one child per base) beyond the application-level head lock.
 `optional_series.identity`/`expected_topic` use an explicit binary collation
@@ -884,16 +888,26 @@ genesis revision (id 1, no base, `effective_from_minute = 0`, empty selection) a
 pointing at it are seeded idempotently by `Storage.ensure_schema()`; no `optional_sample_1m` or
 `optional_rollup_1h` table exists yet.
 
-**An existing series is verified before reuse, never trusted blind, and never mutated on
-conflict.** `Session.get_or_create_series` recovers an existing row's id under the `UNIQUE`
-constraint (`INSERT ... ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`) without changing any
-column of that row — but the recovered id alone proves nothing about the row's *other* columns.
-`optional_policy.resolve_series_id` always follows with a locking/current read (`lock_series`) and
-compares the complete stored `ProfileSemantics` against the current code's; a match reuses the id,
-a mismatch raises `SeriesDefinitionConflict` and fails the whole PUT transaction closed — no new
-revision, no head movement, and the old row is never touched. This is the practical enforcement of
-the "one version, one meaning" rule above: a code change to an existing profile's semantics without
-a version bump is caught here, at write time, not discovered later as silently wrong history.
+**An existing series is looked up by `(identity, profile_version)`, verified before reuse, never
+trusted blind, and never mutated on conflict.** `optional_policy.resolve_series_id` always takes a
+locking/current read for *any* row already sharing the current profile's `(identity,
+profile_version)` — `Session.lock_series_by_identity_version` — regardless of that row's own
+stored `expected_topic`. Checking only the full `(identity, expected_topic, profile_version)`
+tuple, as `Session.get_or_create_series`'s own `UNIQUE` constraint does, is not sufficient by
+itself: a code change to `expected_topic` without a `profile_version` bump would otherwise look
+like a brand-new, non-conflicting tuple and silently create a second, independent series for the
+same identity and version — precisely the failure the "one version, one meaning" rule above exists
+to prevent. So the identity+version lookup runs first: no existing row means it is safe to create
+one (nothing else can be concurrently mutating `optional_series` while this transaction holds the
+policy-head lock); an existing row is reused only if its complete stored `ProfileSemantics` —
+`expected_topic` included — equals the current code's; any disagreement, on `expected_topic` or
+any other semantic field, raises `SeriesDefinitionConflict` and fails the whole PUT transaction
+closed — no new revision, no head movement, no row ever mutated or duplicated. More than one row
+already sharing an `(identity, profile_version)` is corrupted state and is never silently resolved
+by picking one. The idempotent-replay path (§25.2.1 Part 13) is equally unable to turn a persisted
+topic/semantic disagreement into a false success: its own coarse key comparison already includes
+`expected_topic`, so a topic change without a version bump is refused as a stale base before any
+semantic comparison is even reached.
 
 **The policy-head lock generalizes to every read of what it protects.** Checkpoint A proved that a
 locking read of the head row observes committed truth even inside this repository's
@@ -952,12 +966,16 @@ that does not exist today.
 
 **Membership resolved at persist time, not at minute-open time.** The future `OptionalAccumulator`
 observes and computes values for every history-eligible profile continuously, regardless of current
-selection (§25.2.1) — but which of those already-computed per-minute facts are actually *known*
-for a given minute must be decided when that minute is persisted, by re-resolving the timeline
-policy applicable to it under the same policy-head locking/current-read transaction, never by
-capturing selection membership once when the minute opens. A policy PUT may commit while a minute
-is already open; only a persist-time resolution can be correct for that minute without retroactively
-reclassifying anything already committed (§25.2.1's required race property).
+selection (§25.2.1). Policy resolution decides only which of those already-computed per-minute
+facts are *selected for persistence* — never whether they are known. Knowledge/value validity is
+entirely the optional accumulator's and its source evidence's concern (freshness, sentinels, full-
+minute life — the same kind of facts §6 already establishes for canonical sources), computed
+independently of selection. Which minutes get *persisted* for a given series must be decided when
+that minute is persisted, by re-resolving the timeline policy applicable to it under the same
+policy-head locking/current-read transaction, never by capturing selection membership once when the
+minute opens. A policy PUT may commit while a minute is already open; only a persist-time
+resolution can be correct for that minute without retroactively reclassifying anything already
+committed (§25.2.1's required race property).
 
 ### 25.3 Stage 4C — one activity interpretation and durable events
 

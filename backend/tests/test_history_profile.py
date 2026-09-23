@@ -220,37 +220,48 @@ def test_any_semantic_field_change_changes_the_fingerprint(field, value):
 
 # ------------------------------------------------------------------ golden semantic-version guard
 #
-# Pins the current semantic definition of every existing HistoryProfile. If a future code change
-# makes any of these digests differ, the correct fix is a new profile_version on the changed
-# meaning -- never updating the expected digest below, which would silently accept a stored-series
-# definition conflict (docs/ARCHITECTURE.md §25.2.8).
+# Append-only historical contract, keyed by (identity, profile_version), not by identity alone:
+# one identity/version pair is exactly one semantic lineage (docs/ARCHITECTURE.md §25.2.8), so an
+# intentional semantic change adds a NEW (identity, new_version) entry -- it never edits or removes
+# an existing tuple's expected digest, even after current code moves on to a later version. Editing
+# an old tuple's digest here would silently accept a stored-series definition conflict; removing it
+# would stop guarding a meaning that may still be selected in a persisted, historical revision.
 
 EXPECTED_SEMANTIC_FINGERPRINTS = {
-    "TOP21": "ea78e7869dfcd83221367ffe9d329d63834a1f610e9d151b20be951a3f3565b2",
-    "TOP50": "483fe55d83472be4a5d591abe84ccb0e362e3d1667c25a79f99579391039b865",
-    "TOP51": "595deb19ab0740a78a9ab8f2a3b03bd474f248099a0a63a66caabfb68f4c83f9",
-    "TOP52": "6d2ddc08c35d6fca568ff291b122983d12515ec0dc2d4b96251b17751a5bbdec",
-    "TOP53": "40bf665860310b6cef1ccd6c830c43ad1ad89b882167830b11afb53b4829bae3",
-    "TOP55": "81b6b9ff1e288507971d14af73711b4ee8ba8dd47b05af901616e5d672801baa",
-    "TOP63": "aeb13b791e0fca73b618f5b03827ca791575e1a47891cc86ed09df8c13db080b",
-    "TOP64": "05d720e2d2c4df981424ca4b89f5322263668b3b9b1cb303bd6f925db4fd4427",
-    "TOP66": "222fd89f26a4e4045f1584e70173afd934b528098a44058dd0bad515cf8646ee",
-    "TOP90": "6a8c566952d8949995496c6acb8fd28c61c13e7728848ee816ad6f58449e8f91",
-    "TOP91": "43c5f179af1b4aa55b9e6bcae0fbe4a426ee41ae7d3f425b67913985626b35ad",
-    "TOP93": "ba559291359c4766c12baf5280cd7aee389590497a9cd4281a4b5e9213fe31f7",
-    "TOP142": "d40c29f4a7e98cd25748ad0ec560f7bf5247dfbb6be924fdee71efa088f71eae",
-    "XTOP1": "a7825362a4a11bc619c3f9359a8e5cca2427469fd98ab5b00091b27a0e006978",
-    "XTOP4": "c06040a5a52b99f62427cc756bd03143c9252b4672d6c5e7970b17399e99402c",
+    ("TOP21", 1): "ea78e7869dfcd83221367ffe9d329d63834a1f610e9d151b20be951a3f3565b2",
+    ("TOP50", 1): "483fe55d83472be4a5d591abe84ccb0e362e3d1667c25a79f99579391039b865",
+    ("TOP51", 1): "595deb19ab0740a78a9ab8f2a3b03bd474f248099a0a63a66caabfb68f4c83f9",
+    ("TOP52", 1): "6d2ddc08c35d6fca568ff291b122983d12515ec0dc2d4b96251b17751a5bbdec",
+    ("TOP53", 1): "40bf665860310b6cef1ccd6c830c43ad1ad89b882167830b11afb53b4829bae3",
+    ("TOP55", 1): "81b6b9ff1e288507971d14af73711b4ee8ba8dd47b05af901616e5d672801baa",
+    ("TOP63", 1): "aeb13b791e0fca73b618f5b03827ca791575e1a47891cc86ed09df8c13db080b",
+    ("TOP64", 1): "05d720e2d2c4df981424ca4b89f5322263668b3b9b1cb303bd6f925db4fd4427",
+    ("TOP66", 1): "222fd89f26a4e4045f1584e70173afd934b528098a44058dd0bad515cf8646ee",
+    ("TOP90", 1): "6a8c566952d8949995496c6acb8fd28c61c13e7728848ee816ad6f58449e8f91",
+    ("TOP91", 1): "43c5f179af1b4aa55b9e6bcae0fbe4a426ee41ae7d3f425b67913985626b35ad",
+    ("TOP93", 1): "ba559291359c4766c12baf5280cd7aee389590497a9cd4281a4b5e9213fe31f7",
+    ("TOP142", 1): "d40c29f4a7e98cd25748ad0ec560f7bf5247dfbb6be924fdee71efa088f71eae",
+    ("XTOP1", 1): "a7825362a4a11bc619c3f9359a8e5cca2427469fd98ab5b00091b27a0e006978",
+    ("XTOP4", 1): "c06040a5a52b99f62427cc756bd03143c9252b4672d6c5e7970b17399e99402c",
 }
 
 
 def test_golden_semantic_fingerprints_are_pinned():
-    assert set(EXPECTED_SEMANTIC_FINGERPRINTS) == EXPECTED_IDENTITIES
-    for identity, expected in EXPECTED_SEMANTIC_FINGERPRINTS.items():
-        got = semantic_fingerprint(HISTORY_PROFILES_BY_IDENTITY[identity])
-        assert got == expected, (
-            f"{identity} semantic definition changed. If this is intentional, increment its"
-            f" profile_version -- do not update this expected digest ({got!r})."
+    """Every CURRENT profile must have a matching pinned entry; older, no-longer-current
+    (identity, profile_version) entries may remain in the map (append-only) without a
+    corresponding current HistoryProfile."""
+    current_keys = {(p.identity, p.profile_version) for p in HISTORY_PROFILES}
+    assert current_keys <= set(EXPECTED_SEMANTIC_FINGERPRINTS), (
+        "a current HistoryProfile has no pinned golden fingerprint entry for its"
+        " (identity, profile_version) -- add one, do not reuse an existing tuple's key"
+    )
+    for profile in HISTORY_PROFILES:
+        key = (profile.identity, profile.profile_version)
+        got = semantic_fingerprint(profile)
+        assert got == EXPECTED_SEMANTIC_FINGERPRINTS[key], (
+            f"{key} semantic definition changed. If this is intentional, this must be a NEW"
+            f" profile_version with its own new map entry -- never edit this tuple's expected"
+            f" digest ({got!r})."
         )
 
 
