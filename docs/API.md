@@ -1,7 +1,9 @@
 # API contract
 
 The default contract of Pompa Next was frozen at Stage 3. Stage 4A adds the opt-in capability and
-physical-reading forms described below while preserving those default response semantics.
+physical-reading forms described below while preserving those default response semantics. Stage 4B
+checkpoint B adds one opt-in metrics form and one new DB-backed endpoint pair for the
+optional-history policy; it adds no optional value recording, history query or CT109 change.
 
 Domain rules behind it are in [`ARCHITECTURE.md`](ARCHITECTURE.md). This file describes only what
 the HTTP surface promises.
@@ -15,8 +17,10 @@ the HTTP surface promises.
 | `GET /api/v1/live` | Current in-memory metric state | no | no |
 | `GET /api/v1/metrics` | Metric and COP catalog | no | no |
 | `GET /api/v1/history` | All historical charts and summaries | no | yes |
+| `GET /api/v1/optional-history/selection` | Active-vs-pending optional-history selection | no | yes |
+| `PUT /api/v1/optional-history/selection` | Replace the desired optional-history selection | no | yes |
 
-The application contract exposes the five product API endpoints above; FastAPI may additionally
+The application contract exposes the seven product API endpoints above; FastAPI may additionally
 expose its standard documentation/OpenAPI routes (`/docs`, `/redoc`, `/openapi.json`). `/api/v1` is
 a fresh namespace, not inherited legacy versioning.
 
@@ -294,7 +298,7 @@ bucket.
 |---|---|
 | `400` | Malformed parameters: missing `from`/`to`, unparseable or naive timestamps, non-minute alignment, `from >= to`, unknown bucket, unknown or duplicate series, invalid or repeated `include`. |
 | `422` | Well-formed but unrepresentable: more than 3000 buckets, a range or partial edge hour whose raw minutes were provably purged, instants outside 1970–2100. |
-| `503` | `/api/v1/history` only: the database is unavailable. |
+| `503` | `/api/v1/history` only: the database is unavailable. `/api/v1/optional-history/selection` shares this meaning; see its own section below. |
 
 The body is `{"detail": "…"}`. `422` for purged raw means the backend knows the minutes existed and
 were physically deleted — it is never a consequence of a range simply being old. A range that was
@@ -306,10 +310,10 @@ truncated range — the request is refused instead.
 
 ## Subsystem independence
 
-| Condition | `/health` | `/api/v1/live` | `/api/v1/metrics` | `/api/v1/status` | `/api/v1/history` |
-|---|---|---|---|---|---|
-| MariaDB unavailable | 200 | 200 | 200 | 200, `database.available=false` | 503 |
-| MQTT disconnected | 200 | 200, no confirmed metrics, retained only where factual | 200 | 200, `mqtt.connected=false`, `mqtt.alive=false` | 200 from persisted data |
+| Condition | `/health` | `/api/v1/live` | `/api/v1/metrics` | `/api/v1/status` | `/api/v1/history` | `/api/v1/optional-history/selection` |
+|---|---|---|---|---|---|---|
+| MariaDB unavailable | 200 | 200 | 200 | 200, `database.available=false` | 503 | 503 |
+| MQTT disconnected | 200 | 200, no confirmed metrics, retained only where factual | 200 | 200, `mqtt.connected=false`, `mqtt.alive=false` | 200 from persisted data | 200 (selection needs no MQTT) |
 
 One subsystem's failure is never turned into process failure or into a global verdict.
 
@@ -390,10 +394,103 @@ fact only. It does **not** imply Stage 4B optional-history eligibility, selectio
 that identity.
 
 Each endpoint accepts only its one documented `include` value or no `include`; unknown,
-comma-separated, empty, and repeated `include` values return `400`. The five endpoint paths remain
-unchanged. `/status` keeps its Stage 3 shape and `uncatalogued_topics` name, which can still list
-known non-core capability topics. `/history` still accepts only canonical series keys.
+comma-separated, empty, and repeated `include` values return `400`. The five Stage 1–4A endpoint
+paths remain unchanged. `/status` keeps its Stage 3 shape and `uncatalogued_topics` name, which can
+still list known non-core capability topics. `/history` still accepts only canonical series keys.
 
-Optional history, activity/events, reports and commands belong to later Stage 4 checkpoints.
-This document lists no endpoint or response for them until implemented and contract-tested. The
-frontend starts only after the complete product-backend contract is documented.
+Activity/events, reports and commands belong to later Stage 4 checkpoints. This document lists no
+endpoint or response for them until implemented and contract-tested. The frontend starts only
+after the complete product-backend contract is documented.
+
+## Stage 4B checkpoint B: optional-history policy
+
+Checkpoint A froze the architecture (`ARCHITECTURE.md` §25.2.1); checkpoint B implements the
+`HistoryProfile` domain model, the production immutable policy timeline, and this API. **No
+optional value is recorded, aggregated or queryable yet** — there is no `OptionalAccumulator`, no
+`optional_sample_1m` table and no history endpoint for optional series. These endpoints only
+declare and inspect *selection*, never persisted optional readings.
+
+### `GET /api/v1/metrics?include=history_profiles`
+
+Returns the default `/metrics` body (unchanged) plus one top-level `history_profiles` array, one
+entry per code-side `HistoryProfile` (`docs/ARCHITECTURE.md` §25.2.1):
+
+```json
+{
+  "identity": "TOP21",
+  "topic": "main/Outside_Pipe_Temp",
+  "profile_version": 1,
+  "label": "Temperatura rury zewnętrznej",
+  "unit": "°C",
+  "kind": "mean",
+  "semantic_type": "measurement",
+  "energy": false,
+  "selectable": true,
+  "blocked_reason": null
+}
+```
+
+`selectable` is `true` exactly when `blocked_reason` is `null`. A reason is one of
+`profile_missing`, `profile_version_changed`, `topic_changed` or `capability_topic_changed`
+(`ARCHITECTURE.md` §25.2.1); it reflects live Stage 4A capability drift, never a persisted
+selection state. Sentinels and min/max stay backend-internal and are not exposed here. No database
+I/O: this form has the same MQTT/MariaDB independence as the default `/metrics` response.
+`include` still accepts exactly one of `capabilities` or `history_profiles`, never both.
+
+### `GET /api/v1/optional-history/selection`
+
+DB-backed. Resolves the policy timeline for the current minute and reports active-versus-pending
+selection:
+
+```json
+{
+  "active_revision": {"id": 1, "effective_from": "1970-01-01T00:00:00Z"},
+  "head_revision": {"id": 2, "effective_from": "2027-01-15T09:01:00Z"},
+  "pending": true,
+  "active_members": [],
+  "head_members": [
+    {
+      "identity": "TOP21", "topic": "main/Outside_Pipe_Temp", "profile_version": 1,
+      "label": "Temperatura rury zewnętrznej", "unit": "°C", "kind": "mean",
+      "semantic_type": "measurement", "energy": false, "blocked_reason": null
+    }
+  ]
+}
+```
+
+`active_revision` is the revision governing the current minute; `head_revision` is the latest
+accepted revision regardless of when it takes effect. `pending` is `true` exactly when they differ.
+Each member's `blocked_reason` reflects the *persisted* series snapshot against *current* code and
+capabilities, so a member can become blocked long after its revision was created without that
+revision ever being mutated. `503` when the database is unavailable.
+
+### `PUT /api/v1/optional-history/selection`
+
+DB-backed. Body:
+
+```json
+{"base_revision": 2, "identities": ["TOP21", "XTOP1"]}
+```
+
+Replaces the *whole* desired selection; an empty `identities` list is legal. Success:
+
+```json
+{"revision": {"id": 3, "effective_from": "2027-01-15T09:05:00Z"}, "idempotent_replay": false}
+```
+
+`effective_from` is always a future, minute-aligned instant no earlier than the currently open
+minute, the latest committed canonical minute, or the current head's own `effective_from`
+(`ARCHITECTURE.md` §25.2.1, Part 8); disabling a series never deletes its history, and no revision
+is ever mutated. `idempotent_replay: true` means this exact request (same `base_revision`, same
+resolved series set) already succeeded — an ambiguous retry after a lost acknowledgement is
+answered with the revision it actually produced, not a second one and not a conflict.
+
+| Status | When |
+|---|---|
+| `200` | Applied (or an identical idempotent retry of an already-applied request). |
+| `400` | Duplicate identity, unknown identity, or a currently unselectable (blocked) profile. |
+| `409` | `base_revision` is stale: the head has moved and this is not that head's own retry. |
+| `503` | The database is unavailable. |
+
+A `409` means the caller must `GET` the current selection and decide again; the backend never
+guesses which of two concurrent, genuinely different requests should win.

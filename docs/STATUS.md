@@ -2,9 +2,10 @@
 
 ## Current stage
 
-**Stage 4B — checkpoint A DONE.** Configurable optional history. Checkpoint A is architecture/
-contract freeze plus MariaDB feasibility proof only; no optional runtime recording exists yet.
-Frontend work starts after Stage 4.
+**Stage 4B — checkpoint B DONE.** Configurable optional history. Checkpoint B adds the
+`HistoryProfile` domain model and the production immutable policy timeline/selection API; no
+optional value is recorded, aggregated or queryable yet — there is still no `OptionalAccumulator`
+and no `optional_sample_1m` table. Frontend work starts after Stage 4.
 
 Stage 4A — DONE and merged to `main` (PR #6, merge commit
 `a34aaead89fae3359769cf2737aab42fd274d145`).
@@ -72,45 +73,37 @@ expected unrecorded partial minute. No optional capability was persisted.
 
 ## Stage 4B
 
-**Checkpoint A — architecture/contract freeze and feasibility proof — DONE.** Not yet the optional
-recorder implementation. Branch `stage-4b-optional-history`, draft PR, not merged.
+**Checkpoint A (architecture/contract freeze) and checkpoint B (policy foundation) — DONE.** Not
+yet the optional recorder implementation: no `OptionalAccumulator`, no `optional_sample_1m` table,
+no optional value is ever read, written or computed. Branch `stage-4b-optional-history`, draft
+PR #7, not merged.
 
-### Implemented in checkpoint A
+### Implemented
 
-- Froze the Stage 4B architecture in `docs/ARCHITECTURE.md` §25.2: `HistoryProfile` as a distinct
-  namespace from canonical `Metric` and physical capability identity; continuous observation versus
-  selection-gated persistence; a separate future `OptionalAccumulator` leaving `MinuteAccumulator`
-  unchanged; a persisted, immutable policy timeline (`optional_series` /
-  `optional_policy_revision` / `optional_policy_member` / `optional_policy_head`) as the only
-  selection truth, with database-timeline-resolved `effective_from_minute`; the `recorded` /
-  `selected` / `known` state algebra; the `optional_sample_1m` JSON write model and its two
-  pre-DB-vs-in-transaction failure classes; the `optional_rollup_1h` candidate and shared
-  roll/purge frontiers; and default-empty selection.
-- Proved, against real MariaDB (test-only tables, no production Stage 4B schema): the
-  `optional_sample_1m` JSON candidate's semantic round trip, invalid-JSON rejection,
-  NaN/Infinity rejection before persistence, idempotent whole-document upsert, clean delete, and
-  missing-key-versus-zero distinguishability
-  (`backend/tests/test_stage4b_json_feasibility.py`); and the policy-head concurrency invariant —
-  a locking/current read on the singleton head row serializes a policy-replacement transaction
-  against a minute-persistence transaction even under this repository's
-  `START TRANSACTION WITH CONSISTENT SNAPSHOT`, in both commit orderings, with an explicit control
-  proving an ordinary snapshot read would give the wrong answer
-  (`backend/tests/test_stage4b_policy_concurrency.py`).
-- Left `catalog.parse_value` and canonical parsing untouched; no shared numeric-parsing primitive
-  was extracted, since checkpoint A has no `HistoryProfile` parser caller to prove it against yet
-  (`docs/ARCHITECTURE.md` §25.2.1).
-- Verified no Stage 1–4A behavior changed: full backend test suite, including the new feasibility
-  tests, against real MariaDB.
+- Checkpoint A froze the Stage 4B architecture (`docs/ARCHITECTURE.md` §25.2.1–§25.2.7) and proved
+  its two riskiest claims against real MariaDB: the `optional_sample_1m` JSON candidate's semantic
+  round trip and the policy-head locking-read concurrency invariant, in test-only tables
+  (`backend/tests/test_stage4b_json_feasibility.py`, `test_stage4b_policy_concurrency.py`, kept and
+  still run).
+- Checkpoint B (`docs/ARCHITECTURE.md` §25.2.8) makes the foundation concrete: the `HistoryProfile`
+  domain model with an initial, explicitly evidenced set of 15 identities; the shared numeric-
+  parsing primitive (`pompa.catalog.parse_numeric`, proved equivalent to unchanged canonical
+  `parse_value`); production policy tables with an idempotent empty genesis and a self-describing
+  immutable series snapshot; `effective_from_minute` resolution; drift/blocking; idempotent
+  ambiguous-PUT-retry handling; and `GET /api/v1/metrics?include=history_profiles` plus
+  `GET`/`PUT /api/v1/optional-history/selection` (see `docs/API.md`).
+- A real two-thread test against the production tables caught a genuine bug in the first
+  implementation — a plain, snapshot-bound read of the just-locked head revision's own row,
+  instead of a further locking read — fixed by generalizing the checkpoint A locking-read
+  principle to every read needed to interpret the same fact (`docs/ARCHITECTURE.md` §25.2.8).
+- Full backend suite (648 tests) verified against real MariaDB; every MariaDB-gated test skips
+  cleanly without `POMPA_TEST_DB_HOST`.
 
-### Deferred beyond checkpoint A
+### Deferred
 
-Sequenced into checkpoints B–E (see `docs/ARCHITECTURE.md` §25.2.7 for the still-open eligible
-profile list, optional-power energy and max-selection-count questions):
+See `docs/ARCHITECTURE.md` §25.2.8: the complete eligible profile list, optional-power energy
+beyond `XTOP1`/`XTOP4`, and a max-selection-count remain open questions. Remaining checkpoints:
 
-- **Checkpoint B:** `HistoryProfile` implementation and factual semantic profiles; production
-  policy tables; the persistent immutable policy timeline; the selection GET/PUT API;
-  `effective_from_minute` concurrency semantics; per-member drift/blocking; default-empty
-  selection.
 - **Checkpoint C:** continuous optional source state; `OptionalAccumulator`; pairing with canonical
   minutes; `optional_sample_1m` JSON persistence; one protected/waiting write path; atomic
   canonical + optional raw persistence.
@@ -129,5 +122,5 @@ profile list, optional-power energy and max-selection-count questions):
 
 ## Next
 
-Checkpoint B of Stage 4B: `HistoryProfile` and the persistent policy timeline/selection API,
-building on the checkpoint A architecture freeze. See `docs/ROADMAP.md` for later stages.
+Checkpoint C of Stage 4B: `OptionalAccumulator` and continuous optional source state, building on
+the checkpoint A/B foundation. See `docs/ROADMAP.md` for later stages.

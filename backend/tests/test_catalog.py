@@ -6,6 +6,7 @@ from pompa.catalog import (
     RECORDED_KEYS,
     SOURCE_BY_TOPIC,
     Outcome,
+    parse_numeric,
     parse_value,
 )
 from pompa.config import ConfigError, load_settings
@@ -144,3 +145,37 @@ def test_config_overrides():
 def test_config_rejects_invalid(override):
     with pytest.raises(ConfigError):
         load_settings({**BASE_ENV, **override})
+
+
+# ------------------------------------------------------------------ Stage 4B checkpoint B:
+# shared numeric-parsing primitive (docs/ARCHITECTURE.md §25.2.1). ``parse_value`` is now a thin
+# wrapper over ``parse_numeric``; these cases prove the extraction changed nothing.
+
+SENTINELS = frozenset({-78.0, -128.0})
+
+
+@pytest.mark.parametrize("payload, expected", [
+    ("0", (0.0, Outcome.VALID)),
+    ("-12.5", (-12.5, Outcome.VALID)),
+    ("-78", (None, Outcome.SENTINEL)),
+    ("-128", (None, Outcome.SENTINEL)),
+    ("-200", (None, Outcome.REJECTED)),  # below min_value, not a sentinel of this set
+    ("100", (None, Outcome.REJECTED)),  # above max_value
+    ("nan", (None, Outcome.REJECTED)),
+    ("inf", (None, Outcome.REJECTED)),
+    ("-inf", (None, Outcome.REJECTED)),
+    ("not a number", (None, Outcome.REJECTED)),
+    ("-50", (-50.0, Outcome.VALID)),  # lower boundary equality
+    ("50", (50.0, Outcome.VALID)),  # upper boundary equality
+])
+def test_parse_numeric_primitive(payload, expected):
+    assert parse_numeric(payload, SENTINELS, -50.0, 50.0) == expected
+
+
+def test_canonical_parse_value_is_exactly_parse_numeric():
+    """``parse_value`` must be byte-for-byte equivalent to calling the primitive directly."""
+    metric = METRICS_BY_KEY["outside_temp"]
+    source = next(s for s in metric.sources if s.id == "TOP14")
+    for payload in ("0", "-12.5", "-78", "-128", "nan", "inf", "not a number", "23.999999"):
+        assert parse_value(metric, source, payload) == parse_numeric(
+            payload, source.sentinels, metric.min_value, metric.max_value)

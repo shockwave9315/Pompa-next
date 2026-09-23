@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
+from typing import NamedTuple
 
 import pymysql
 
@@ -42,6 +43,92 @@ ROLLUP_DDL = (
     "  PRIMARY KEY (hour_ts, series)\n"
     ") ENGINE=InnoDB"
 )
+
+# Stage 4B checkpoint B: production policy tables (docs/ARCHITECTURE.md §25.2.1). No
+# optional_sample_1m/optional_rollup_1h yet (checkpoints C/D). Series/revisions/members are
+# immutable after insert: only OPTIONAL_POLICY_HEAD.revision_id is ever UPDATEd.
+OPTIONAL_SERIES = "optional_series"
+OPTIONAL_POLICY_REVISION = "optional_policy_revision"
+OPTIONAL_POLICY_MEMBER = "optional_policy_member"
+OPTIONAL_POLICY_HEAD = "optional_policy_head"
+
+OPTIONAL_SERIES_DDL = (
+    f"CREATE TABLE IF NOT EXISTS {OPTIONAL_SERIES} (\n"
+    "  id              INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,\n"
+    "  identity        VARCHAR(16)  NOT NULL,\n"
+    "  expected_topic  VARCHAR(255) NOT NULL,\n"
+    "  profile_version INT UNSIGNED NOT NULL,\n"
+    "  label           VARCHAR(255) NOT NULL,\n"
+    "  unit            VARCHAR(32)  NULL,\n"
+    "  kind            VARCHAR(8)   NOT NULL,\n"
+    "  semantic_type   VARCHAR(32)  NOT NULL,\n"
+    "  sentinels_json  JSON         NOT NULL CHECK (JSON_VALID(sentinels_json)),\n"
+    "  min_value       DOUBLE       NULL,\n"
+    "  max_value       DOUBLE       NULL,\n"
+    "  energy          TINYINT(1)   NOT NULL,\n"
+    "  created_at      INT UNSIGNED NOT NULL,\n"
+    "  UNIQUE KEY uq_optional_series_meaning (identity, expected_topic, profile_version)\n"
+    ") ENGINE=InnoDB"
+)
+
+# base_revision_id is UNIQUE: at most one child per base revision, enforcing the linear chain and
+# the "stale-base concurrent writers cannot both create competing accepted heads" requirement at
+# the database level, in addition to the application-level policy-head lock (§25.2.1).
+OPTIONAL_POLICY_REVISION_DDL = (
+    f"CREATE TABLE IF NOT EXISTS {OPTIONAL_POLICY_REVISION} (\n"
+    "  id                    INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,\n"
+    "  base_revision_id      INT UNSIGNED NULL,\n"
+    "  effective_from_minute INT UNSIGNED NOT NULL CHECK (effective_from_minute % 60 = 0),\n"
+    "  created_at            INT UNSIGNED NOT NULL,\n"
+    "  UNIQUE KEY uq_optional_policy_revision_one_child_per_base (base_revision_id),\n"
+    f"  CONSTRAINT fk_optional_policy_revision_base FOREIGN KEY (base_revision_id)"
+    f" REFERENCES {OPTIONAL_POLICY_REVISION} (id)\n"
+    ") ENGINE=InnoDB"
+)
+
+OPTIONAL_POLICY_MEMBER_DDL = (
+    f"CREATE TABLE IF NOT EXISTS {OPTIONAL_POLICY_MEMBER} (\n"
+    "  revision_id INT UNSIGNED NOT NULL,\n"
+    "  series_id   INT UNSIGNED NOT NULL,\n"
+    "  PRIMARY KEY (revision_id, series_id),\n"
+    f"  CONSTRAINT fk_optional_policy_member_revision FOREIGN KEY (revision_id)"
+    f" REFERENCES {OPTIONAL_POLICY_REVISION} (id),\n"
+    f"  CONSTRAINT fk_optional_policy_member_series FOREIGN KEY (series_id)"
+    f" REFERENCES {OPTIONAL_SERIES} (id)\n"
+    ") ENGINE=InnoDB"
+)
+
+# Singleton: id is always 1. This one row is the entire database serialization point required by
+# docs/ARCHITECTURE.md §25.2.1 (SELECT ... FOR UPDATE against it); it is the only mutable row in
+# the whole policy schema.
+OPTIONAL_POLICY_HEAD_DDL = (
+    f"CREATE TABLE IF NOT EXISTS {OPTIONAL_POLICY_HEAD} (\n"
+    "  id          TINYINT UNSIGNED NOT NULL PRIMARY KEY,\n"
+    "  revision_id INT UNSIGNED NOT NULL,\n"
+    f"  CONSTRAINT fk_optional_policy_head_revision FOREIGN KEY (revision_id)"
+    f" REFERENCES {OPTIONAL_POLICY_REVISION} (id)\n"
+    ") ENGINE=InnoDB"
+)
+
+GENESIS_REVISION_ID = 1
+POLICY_HEAD_ID = 1
+
+
+class SeriesRow(NamedTuple):
+    """One immutable ``optional_series`` snapshot, exactly as stored (§25.2.1 "self-describing")."""
+
+    id: int
+    identity: str
+    expected_topic: str
+    profile_version: int
+    label: str
+    unit: str | None
+    kind: str
+    semantic_type: str
+    sentinels_json: str
+    min_value: float | None
+    max_value: float | None
+    energy: bool
 
 
 class StorageUnavailable(Exception):
@@ -185,6 +272,137 @@ class Session:
             (start, end, series))
         return [(int(h), int(c), None if n is None else int(n)) for h, c, n in self._cur.fetchall()]
 
+    # ------------------------------------------------------------- optional history policy
+
+    def read_policy_head(self) -> int:
+        """A plain (non-locking) read: for reporting only, never for a PUT's serialization point."""
+        self._cur.execute(f"SELECT revision_id FROM {OPTIONAL_POLICY_HEAD} WHERE id = %s",
+                          (POLICY_HEAD_ID,))
+        (revision_id,) = self._cur.fetchone()
+        return int(revision_id)
+
+    def lock_policy_head(self) -> int:
+        """The one database serialization point (§25.2.1): a locking/current read, not a plain one.
+
+        Every real-committed-truth-observing transaction — a policy PUT and a
+        minute-persistence transaction alike — must call this, never an
+        ordinary ``SELECT``, which would stay bound to this transaction's own
+        consistent snapshot even after this row's lock is granted (proved in
+        ``test_stage4b_policy_concurrency.py``).
+        """
+        self._cur.execute(f"SELECT revision_id FROM {OPTIONAL_POLICY_HEAD} WHERE id = %s FOR UPDATE",
+                          (POLICY_HEAD_ID,))
+        (revision_id,) = self._cur.fetchone()
+        return int(revision_id)
+
+    def lock_latest_minute_ts(self) -> int | None:
+        """The current/locking read of the canonical minute frontier (§25.2.1 policy PUT step).
+
+        An indexed current read of the single newest row, not ``MAX(ts)``,
+        whose locking semantics under ``FOR UPDATE`` are not the single-row
+        record lock this needs.
+        """
+        self._cur.execute(f"SELECT ts FROM {TABLE} ORDER BY ts DESC LIMIT 1 FOR UPDATE")
+        row = self._cur.fetchone()
+        return None if row is None else int(row[0])
+
+    def _revision(self, revision_id: int, *, locking: bool) -> tuple[int, int | None, int, int] | None:
+        suffix = " FOR UPDATE" if locking else ""
+        self._cur.execute(
+            f"SELECT id, base_revision_id, effective_from_minute, created_at"
+            f" FROM {OPTIONAL_POLICY_REVISION} WHERE id = %s{suffix}", (revision_id,))
+        row = self._cur.fetchone()
+        if row is None:
+            return None
+        rid, base, effective_from, created_at = row
+        return (int(rid), None if base is None else int(base), int(effective_from), int(created_at))
+
+    def read_revision(self, revision_id: int) -> tuple[int, int | None, int, int] | None:
+        """``(id, base_revision_id, effective_from_minute, created_at)`` or ``None``.
+
+        A plain read, bound to this transaction's own snapshot: correct for
+        reporting (``read_selection``), where everything is read consistently
+        as of one point in time. Never use this to read a revision whose
+        currentness was just proved by a locking read in the same
+        transaction (e.g. the head, right after ``lock_policy_head``) —
+        use ``lock_revision`` there instead, or the snapshot can still show
+        this revision as absent even though the lock already proved it
+        committed (docs/ARCHITECTURE.md §25.2.1).
+        """
+        return self._revision(revision_id, locking=False)
+
+    def lock_revision(self, revision_id: int) -> tuple[int, int | None, int, int] | None:
+        """The locking/current-read counterpart of ``read_revision``: use this to read a
+        revision immediately after a locking read (e.g. ``lock_policy_head``) proved it current."""
+        return self._revision(revision_id, locking=True)
+
+    def _revision_members(self, revision_id: int, *, locking: bool) -> list[SeriesRow]:
+        suffix = " FOR UPDATE" if locking else ""
+        self._cur.execute(
+            f"SELECT s.id, s.identity, s.expected_topic, s.profile_version, s.label, s.unit,"
+            f" s.kind, s.semantic_type, s.sentinels_json, s.min_value, s.max_value, s.energy"
+            f" FROM {OPTIONAL_POLICY_MEMBER} m JOIN {OPTIONAL_SERIES} s ON s.id = m.series_id"
+            f" WHERE m.revision_id = %s ORDER BY s.id{suffix}", (revision_id,))
+        return [
+            SeriesRow(int(sid), identity, topic, int(version), label, unit, kind, semantic,
+                     sentinels_json, None if lo is None else float(lo), None if hi is None else float(hi),
+                     bool(energy))
+            for sid, identity, topic, version, label, unit, kind, semantic, sentinels_json, lo, hi, energy
+            in self._cur.fetchall()
+        ]
+
+    def read_revision_members(self, revision_id: int) -> list[SeriesRow]:
+        """Every immutable series snapshot selected by one revision, in stable (series_id) order.
+
+        Same snapshot-vs-locking caveat as ``read_revision``/``lock_revision``.
+        """
+        return self._revision_members(revision_id, locking=False)
+
+    def lock_revision_members(self, revision_id: int) -> list[SeriesRow]:
+        """The locking/current-read counterpart of ``read_revision_members``."""
+        return self._revision_members(revision_id, locking=True)
+
+    def get_or_create_series(self, identity: str, expected_topic: str, profile_version: int,
+                             label: str, unit: str | None, kind: str, semantic_type: str,
+                             sentinels_json: str, min_value: float | None, max_value: float | None,
+                             energy: bool, created_at: int) -> int:
+        """Get-or-create by the immutable historical meaning ``(identity, expected_topic,
+        profile_version)``. Race-safe under the UNIQUE constraint: a concurrent insert of the
+        same meaning either wins this ``INSERT`` or is resolved by the
+        ``ON DUPLICATE KEY UPDATE`` clause, which never changes any column, only recovers the
+        existing row's id via ``LAST_INSERT_ID(id)``.
+        """
+        self._cur.execute(
+            f"INSERT INTO {OPTIONAL_SERIES}"
+            " (identity, expected_topic, profile_version, label, unit, kind, semantic_type,"
+            "  sentinels_json, min_value, max_value, energy, created_at)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            " ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)",
+            (identity, expected_topic, profile_version, label, unit, kind, semantic_type,
+             sentinels_json, min_value, max_value, int(energy), created_at))
+        self._cur.execute("SELECT LAST_INSERT_ID()")
+        (series_id,) = self._cur.fetchone()
+        return int(series_id)
+
+    def insert_revision(self, base_revision_id: int | None, effective_from_minute: int,
+                        created_at: int) -> int:
+        if effective_from_minute % MINUTE:
+            raise ValueError(f"unaligned effective_from_minute {effective_from_minute}")
+        self._cur.execute(
+            f"INSERT INTO {OPTIONAL_POLICY_REVISION} (base_revision_id, effective_from_minute, created_at)"
+            " VALUES (%s, %s, %s)", (base_revision_id, effective_from_minute, created_at))
+        return int(self._cur.lastrowid)
+
+    def insert_revision_members(self, revision_id: int, series_ids: Iterable[int]) -> None:
+        params = [(revision_id, sid) for sid in series_ids]
+        if params:
+            self._cur.executemany(
+                f"INSERT INTO {OPTIONAL_POLICY_MEMBER} (revision_id, series_id) VALUES (%s, %s)", params)
+
+    def update_policy_head(self, revision_id: int) -> None:
+        self._cur.execute(f"UPDATE {OPTIONAL_POLICY_HEAD} SET revision_id = %s WHERE id = %s",
+                          (revision_id, POLICY_HEAD_ID))
+
 
 class Storage:
     def __init__(self, host: str, port: int, user: str, password: str, database: str,
@@ -230,7 +448,14 @@ class Storage:
             conn.commit()
 
     def ensure_schema(self) -> None:
-        """Create the tables or add missing recorded columns. Never drops anything."""
+        """Create the tables or add missing recorded columns. Never drops anything.
+
+        Also creates the Stage 4B checkpoint B optional-history policy tables
+        (§25.2.1) and, idempotently, their one immutable genesis revision: an
+        empty selection, effective from the beginning of time, with the
+        singleton head already pointing at it. Canonical ``sample_1m``/
+        ``rollup_1h`` schema and data are never touched by this addition.
+        """
         with self._connection() as conn, conn.cursor() as cur:
             cur.execute(create_table_sql())
             cur.execute(ROLLUP_DDL)
@@ -243,6 +468,17 @@ class Storage:
             for key in RECORDED_KEYS:
                 if key not in existing:
                     cur.execute(f"ALTER TABLE {TABLE} ADD COLUMN {key} DOUBLE NULL")
+            cur.execute(OPTIONAL_SERIES_DDL)
+            cur.execute(OPTIONAL_POLICY_REVISION_DDL)
+            cur.execute(OPTIONAL_POLICY_MEMBER_DDL)
+            cur.execute(OPTIONAL_POLICY_HEAD_DDL)
+            cur.execute(
+                f"INSERT IGNORE INTO {OPTIONAL_POLICY_REVISION}"
+                " (id, base_revision_id, effective_from_minute, created_at)"
+                " VALUES (%s, NULL, 0, UNIX_TIMESTAMP())", (GENESIS_REVISION_ID,))
+            cur.execute(
+                f"INSERT IGNORE INTO {OPTIONAL_POLICY_HEAD} (id, revision_id) VALUES (%s, %s)",
+                (POLICY_HEAD_ID, GENESIS_REVISION_ID))
             conn.commit()
 
     def facts(self) -> tuple[int | None, int | None, int | None]:

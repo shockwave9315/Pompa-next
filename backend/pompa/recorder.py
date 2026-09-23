@@ -54,7 +54,7 @@ from enum import Enum
 
 from .aggregation import RECORDED, SERIES, fold_minutes
 from .ingest import LWT_OFFLINE, Ingest, PhysicalReading
-from .minute import MinuteAccumulator, MinuteRow, iso_utc
+from .minute import MINUTE, MinuteAccumulator, MinuteRow, floor_minute, iso_utc
 from .storage import Session, Storage, StorageUnavailable
 from .timegrid import HOUR, floor_hour, purge_cutoff
 
@@ -470,6 +470,24 @@ class Recorder:
         """Copy immutable physical readings under the MQTT/tick snapshot lock."""
         with self._lock:
             return self.ingest.physical_snapshot()
+
+    def safe_future_minute(self, now: float) -> int:
+        """Stage 4B checkpoint B (§25.2.1): the earliest future whole minute a policy change
+        may affect, as of ``now``.
+
+        Read-only: takes the recorder lock, performs no database I/O, closes
+        no minute and mutates no accumulator state. Only a caller resolving a
+        policy PUT needs this; it must be called and released *before* any
+        database transaction begins, never while holding a database lock.
+
+        The open minute's own cursor can be temporarily ahead of (a queued
+        backlog) or behind (a detected backward clock step, ARCHITECTURE.md
+        §24) the raw wall clock, so the safe boundary is the later of the next
+        whole minute after the raw clock and the minute after the
+        accumulator's currently open one.
+        """
+        with self._lock:
+            return max(floor_minute(now) + MINUTE, self.accumulator.minute_start + MINUTE)
 
     def snapshot(self, clock: Callable[[], float]) -> tuple[float, dict]:
         """Factual in-memory state for ``/api/v1/status``, with its observation instant.

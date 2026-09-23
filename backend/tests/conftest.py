@@ -63,9 +63,17 @@ def minutes(start, count, step=60):
 class FakeSession:
     """Mirrors ``pompa.storage.Session`` over the dictionaries of a FakeStorage transaction."""
 
-    def __init__(self, rows, rollup):
+    def __init__(self, rows, rollup, storage):
         self.rows = rows  # ts -> values
         self.rollup = rollup  # (hour_ts, series) -> (n, sum, min, max, last)
+        # Stage 4B checkpoint B optional-history policy tables (docs/ARCHITECTURE.md §25.2.1):
+        # copied from FakeStorage per session, like rows/rollup, and committed back the same way.
+        self._storage = storage
+        self.optional_series = dict(storage.optional_series)
+        self.optional_series_by_key = dict(storage.optional_series_by_key)
+        self.optional_revisions = dict(storage.optional_revisions)
+        self.optional_members = {k: set(v) for k, v in storage.optional_members.items()}
+        self.optional_head = storage.optional_head
 
     def upsert_minutes(self, rows):
         for r in rows:
@@ -121,6 +129,58 @@ class FakeSession:
         return [(h, c, self.rollup[(h, series)][0] if (h, series) in self.rollup else None)
                 for h, c in sorted(counts.items())]
 
+    # ---------------------------------------------------------- optional history policy (fake)
+
+    def read_policy_head(self):
+        return self.optional_head
+
+    def lock_policy_head(self):
+        # Single-threaded fake: a plain read already behaves like the real locking/current read.
+        return self.optional_head
+
+    def lock_latest_minute_ts(self):
+        return max(self.rows) if self.rows else None
+
+    def read_revision(self, revision_id):
+        return self.optional_revisions.get(revision_id)
+
+    # Single-threaded fake: no separate snapshot-vs-locking-read distinction to model.
+    lock_revision = read_revision
+
+    def read_revision_members(self, revision_id):
+        ids = sorted(self.optional_members.get(revision_id, set()))
+        return [self.optional_series[i] for i in ids]
+
+    lock_revision_members = read_revision_members
+
+    def get_or_create_series(self, identity, expected_topic, profile_version, label, unit, kind,
+                             semantic_type, sentinels_json, min_value, max_value, energy, created_at):
+        from pompa.storage import SeriesRow
+
+        key = (identity, expected_topic, profile_version)
+        if key in self.optional_series_by_key:
+            return self.optional_series_by_key[key]
+        series_id = self._storage._alloc_optional_series_id()
+        self.optional_series[series_id] = SeriesRow(series_id, identity, expected_topic, profile_version,
+                                                     label, unit, kind, semantic_type, sentinels_json,
+                                                     min_value, max_value, energy)
+        self.optional_series_by_key[key] = series_id
+        return series_id
+
+    def insert_revision(self, base_revision_id, effective_from_minute, created_at):
+        if effective_from_minute % 60:
+            raise ValueError(f"unaligned effective_from_minute {effective_from_minute}")
+        revision_id = self._storage._alloc_optional_revision_id()
+        self.optional_revisions[revision_id] = (revision_id, base_revision_id, effective_from_minute,
+                                                created_at)
+        return revision_id
+
+    def insert_revision_members(self, revision_id, series_ids):
+        self.optional_members.setdefault(revision_id, set()).update(series_ids)
+
+    def update_policy_head(self, revision_id):
+        self.optional_head = revision_id
+
 
 class FakeStorage:
     """In-memory stand-in for Storage: one transaction per session, switchable faults.
@@ -139,6 +199,16 @@ class FakeStorage:
         self.sessions = 0
         self.fail_commit = 0
         self.ack_lost = False
+        # Stage 4B checkpoint B optional-history policy (docs/ARCHITECTURE.md §25.2.1): a genesis
+        # revision (id 1, empty selection, effective from the beginning of time) with the head
+        # already pointing at it, exactly like Storage.ensure_schema seeds real MariaDB.
+        self.optional_series = {}  # id -> storage.SeriesRow
+        self.optional_series_by_key = {}  # (identity, expected_topic, profile_version) -> id
+        self.optional_revisions = {1: (1, None, 0, 0)}  # id -> (id, base_id, effective_from, created_at)
+        self.optional_members = {1: set()}  # revision_id -> {series_id}
+        self.optional_head = 1
+        self._next_optional_series_id = 1
+        self._next_optional_revision_id = 2
 
     def _check(self):
         from pompa.storage import StorageUnavailable
@@ -150,22 +220,38 @@ class FakeStorage:
         self.schema_calls += 1
         self._check()
 
+    def _alloc_optional_series_id(self):
+        series_id = self._next_optional_series_id
+        self._next_optional_series_id += 1
+        return series_id
+
+    def _alloc_optional_revision_id(self):
+        revision_id = self._next_optional_revision_id
+        self._next_optional_revision_id += 1
+        return revision_id
+
+    def _adopt(self, tx):
+        self.rows, self.rollup = tx.rows, tx.rollup
+        self.optional_series, self.optional_series_by_key = tx.optional_series, tx.optional_series_by_key
+        self.optional_revisions, self.optional_members = tx.optional_revisions, tx.optional_members
+        self.optional_head = tx.optional_head
+
     @contextmanager
     def session(self):
         from pompa.storage import StorageUnavailable
 
         self.sessions += 1
         self._check()
-        tx = FakeSession(dict(self.rows), dict(self.rollup))
+        tx = FakeSession(dict(self.rows), dict(self.rollup), self)
         tx.upsert_minutes = self._counting(tx.upsert_minutes)
         yield tx
         if self.fail_commit:
             self.fail_commit -= 1
             if self.ack_lost:
-                self.rows, self.rollup = tx.rows, tx.rollup
+                self._adopt(tx)
                 raise StorageUnavailable("ack lost")
             raise StorageUnavailable("commit failed")
-        self.rows, self.rollup = tx.rows, tx.rollup
+        self._adopt(tx)
 
     def _counting(self, upsert):
         def wrapped(rows):
@@ -175,7 +261,7 @@ class FakeStorage:
 
     def facts(self):
         self._check()
-        tx = FakeSession(self.rows, self.rollup)
+        tx = FakeSession(self.rows, self.rollup, self)
         return (*tx.minute_bounds(), tx.rolled_until())
 
 
@@ -259,8 +345,14 @@ def mariadb():
         database=os.environ.get("POMPA_TEST_DB_NAME", "pompa_next_test"),
     )
     with storage._connection() as conn, conn.cursor() as cur:
+        # FK-safe drop order: tables that reference another Stage 4B policy table drop first.
+        cur.execute("DROP TABLE IF EXISTS optional_policy_member")
+        cur.execute("DROP TABLE IF EXISTS optional_policy_head")
+        cur.execute("DROP TABLE IF EXISTS optional_policy_revision")
+        cur.execute("DROP TABLE IF EXISTS optional_series")
         cur.execute("DROP TABLE IF EXISTS sample_1m")
         cur.execute("DROP TABLE IF EXISTS rollup_1h")
+        conn.commit()
     return storage
 
 

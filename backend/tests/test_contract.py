@@ -10,7 +10,8 @@ import pytest
 from conftest import T0, Api
 from pompa.catalog import METRICS, RECORDED_KEYS
 
-PATHS = {"/health", "/api/v1/status", "/api/v1/live", "/api/v1/metrics", "/api/v1/history"}
+PATHS = {"/health", "/api/v1/status", "/api/v1/live", "/api/v1/metrics", "/api/v1/history",
+         "/api/v1/optional-history/selection"}
 RANGE = {"from": "2027-01-15T08:00:00Z", "to": "2027-01-15T08:05:00Z"}
 
 LIVE_KEYS = {"now", "mqtt", "metrics"}
@@ -208,10 +209,15 @@ def test_error_matrix(api, path, params, code):
     assert set(r.json()) == {"detail"}
 
 
-def test_history_database_unavailable_is_the_only_503(api):
+DB_BACKED_PATHS = {"/api/v1/history", "/api/v1/optional-history/selection"}
+
+
+def test_history_and_selection_are_the_only_503s(api):
+    """Stage 4B checkpoint B adds one more DB-backed path; every other frozen path is unaffected."""
     api.storage.available = False
     assert api.get("/api/v1/history", None, **RANGE).status_code == 503
-    for path in PATHS - {"/api/v1/history"}:
+    assert api.get("/api/v1/optional-history/selection").status_code == 503
+    for path in PATHS - DB_BACKED_PATHS:
         assert api.get(path).status_code == 200, path
 
 

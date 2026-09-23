@@ -801,15 +801,85 @@ selected by default.
 
 #### 25.2.7 Deferred beyond checkpoint A
 
-Not yet frozen: the complete eligible physical-profile list (legacy product evidence is a seed
-only — candidates likely include TOP21, TOP50–TOP53, TOP55, TOP63–TOP64, TOP66, TOP90–TOP93,
-TOP142, XTOP1 and XTOP4, but each still needs factual semantics and publication-gap evidence before
-it is eligible); energy output for optional power; and an operational maximum selected-series
-count. A physical identity already serving a canonical logical metric is never also an optional
-history selection. `OptionalAccumulator` implementation, optional ingest runtime state, the
-production selection API, production policy/optional-sample/optional-rollup tables beyond the
-checkpoint A feasibility proof, optional raw recording, optional rollup, optional purge, optional
-history query endpoints, and any CT109 optional-history deployment all belong to later checkpoints.
+Not yet frozen at checkpoint A: the complete eligible physical-profile list, energy output for
+optional power, an operational maximum selected-series count, the `HistoryProfile` model itself,
+production policy tables, the selection API and its concurrency implementation. Checkpoint B
+(§25.2.8) makes these concrete. Still deferred beyond checkpoint B: `OptionalAccumulator`,
+optional ingest runtime state, `optional_sample_1m`/`optional_rollup_1h`, optional raw
+recording/rollup/purge, optional history query endpoints, and any CT109 optional-history
+deployment (§25.2.8's own "deferred" list).
+
+#### 25.2.8 Checkpoint B — policy foundation (DONE)
+
+**`HistoryProfile` implemented** (`pompa/history_profile.py`): an initial, explicitly curated set
+of 15 identities — TOP21, TOP50–TOP53, TOP55, TOP63, TOP64, TOP66, TOP90, TOP91, TOP93, TOP142,
+XTOP1, XTOP4 — each evidenced from the tracked reference and/or an explicit (non-heuristic) legacy
+catalog fact, never a topic/description substring or a physically-plausible guess. Six identities
+(the five temperature probes plus `TOP52`) share the canonical `{-78, -128}` sentinel pair, evidenced
+by the tracked reference, the legacy explicit catalog and, for two of them, a direct observed
+reading; every other profile has an empty sentinel set and no min/max, because no such evidence
+exists — including `XTOP1`/`XTOP4`, where the legacy catalog's `POWER_SENTINELS` assumption is
+deliberately *not* imported, because Pompa Next's own canonical catalog does not assign
+`TOP_POWER_SENTINELS` to any `XTOP` source either. `XTOP1`/`XTOP4` do carry `energy=true`: their W
+semantics are evidenced, independent of the still-deferred optional-power kWh question. Asserted
+by test, from the canonical catalog itself: no chosen identity ever serves a canonical metric
+source. This is code/domain knowledge only; nothing here is persisted until a profile is selected.
+
+**The numeric-parsing primitive is extracted** (`pompa.catalog.parse_numeric`): float conversion,
+the finite-number check, the sentinel check and the min/max check, in that order. Canonical
+`parse_value` is now a thin wrapper over it; a test proves the two are exactly equivalent, so the
+extraction changed no canonical behavior. `HistoryProfile` parsing (`parse_history_profile_value`)
+reuses the same primitive; checkpoint B adds no caller for it yet (`OptionalAccumulator` is
+checkpoint C), so it is proved correct in isolation, ready to be trusted immediately once it has one.
+
+**Production policy tables exist**, exactly as the checkpoint A candidate, with one addition: an
+`optional_series` row persists the *complete immutable semantic snapshot* of its meaning — label,
+unit, kind, semantic_type, a deterministic JSON sentinel set, min/max and `energy` — not just the
+bare `(identity, expected_topic, profile_version)` tuple. This is deliberate: future code must
+never be required to retain every historical `HistoryProfile` version forever just to interpret an
+old selected series; the persisted row is already self-describing. The identity invariant is
+unchanged — one historical meaning is still exactly `(identity, expected_topic, profile_version)`,
+enforced by a `UNIQUE` constraint — the other columns are that meaning's frozen description.
+`optional_policy_revision.base_revision_id` is additionally `UNIQUE`, giving the linear chain a
+real database-level guarantee (one child per base) beyond the application-level head lock. A
+genesis revision (id 1, no base, `effective_from_minute = 0`, empty selection) and a head already
+pointing at it are seeded idempotently by `Storage.ensure_schema()`; no `optional_sample_1m` or
+`optional_rollup_1h` table exists yet.
+
+**The policy-head lock generalizes to every read of what it protects.** Checkpoint A proved that a
+locking read of the head row observes committed truth even inside this repository's
+`START TRANSACTION WITH CONSISTENT SNAPSHOT`, unlike a plain read of that same row. Checkpoint B's
+first working implementation initially violated the *next* step of that same principle: after
+`lock_policy_head()` correctly returned the current head id, it read that revision's own row and
+member list with a **plain** `SELECT` — which stayed bound to the transaction's own pre-commit
+snapshot and could report the just-locked revision as not existing at all. A real two-thread test
+against production tables caught this. The fix, and the now-general rule: once a transaction has
+taken one locking read to establish current truth, every further read needed to interpret *that
+same fact* must also be a locking read (`Session.lock_revision`/`lock_revision_members`), not only
+the singleton row that started the chain. A plain read stays correct only for read-only reporting
+that never mixes with a locking read in the same transaction (`read_selection`/`GET`).
+
+**`effective_from_minute` is computed** as the later of: a new read-only `Recorder.safe_future_minute`
+fact (lock held only in-process, no database I/O, released before any transaction begins); the next
+whole minute after a second clock read taken after the head lock is acquired; the latest committed
+canonical minute (from `Session.lock_latest_minute_ts`, a current read of the newest `sample_1m`
+row, not `MAX(ts)`) plus one minute; and the current head revision's own `effective_from_minute`.
+The database transaction never overlaps the `Recorder` lock.
+
+**Drift/blocking uses exactly four reasons** (`history_profile.drift_reason`): `profile_missing`,
+`profile_version_changed`, `topic_changed`, `capability_topic_changed`. It compares one persisted
+series meaning against *current* code and *current* Stage 4A capability topics; a blocked member is
+never mutated or deleted, and blocking one member never blocks canonical operation or any other
+member.
+
+**Ambiguous PUT retries are idempotent** (§25.2.1's required property, now implemented): a retry
+supplying the same `base_revision` whose current head's own `base_revision_id` and resolved series
+set match is answered with the already-created revision, never a second one and never a conflict; a
+genuinely different concurrent request against a since-moved head is refused (`StaleBaseRevision`).
+
+**Deferred beyond checkpoint B**: `OptionalAccumulator` and optional ingest runtime state,
+`optional_sample_1m`/`optional_rollup_1h`, optional raw recording/rollup/purge, optional history
+query endpoints, and any CT109 optional-history deployment.
 
 ### 25.3 Stage 4C — one activity interpretation and durable events
 

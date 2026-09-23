@@ -119,18 +119,32 @@ class Outcome(Enum):
     REJECTED = "rejected"  # non-numeric, non-finite, or outside the valid range
 
 
-def parse_value(metric: Metric, source: Source, payload: str) -> tuple[float | None, Outcome]:
-    """Parse one payload. Only VALID yields a number; ``0`` is a real zero."""
+def parse_numeric(payload: str, sentinels: frozenset[float], min_value: float | None,
+                  max_value: float | None) -> tuple[float | None, Outcome]:
+    """The pure numeric-validation primitive shared by canonical and ``HistoryProfile`` parsing.
+
+    Owns exactly: float conversion, the finite-number check, the sentinel check
+    and the min/max range check, in that order. Only ``VALID`` yields a
+    number; ``0`` is a real zero. Canonical ``parse_value`` and
+    ``history_profile`` parsing (Stage 4B, ``docs/ARCHITECTURE.md`` §25.2.1)
+    are both thin wrappers over this one function, so neither can drift from
+    the other's validation order or edge-case behavior.
+    """
     try:
         value = float(payload.strip())
     except ValueError:
         return None, Outcome.REJECTED
     if not math.isfinite(value):
         return None, Outcome.REJECTED
-    if value in source.sentinels:
+    if value in sentinels:
         return None, Outcome.SENTINEL
-    if metric.min_value is not None and value < metric.min_value:
+    if min_value is not None and value < min_value:
         return None, Outcome.REJECTED
-    if metric.max_value is not None and value > metric.max_value:
+    if max_value is not None and value > max_value:
         return None, Outcome.REJECTED
     return value, Outcome.VALID
+
+
+def parse_value(metric: Metric, source: Source, payload: str) -> tuple[float | None, Outcome]:
+    """Parse one payload. Only VALID yields a number; ``0`` is a real zero."""
+    return parse_numeric(payload, source.sentinels, metric.min_value, metric.max_value)

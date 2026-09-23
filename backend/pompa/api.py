@@ -12,10 +12,14 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from . import history as history_engine
+from . import optional_policy
 from .capabilities import capability_dict, effective_capabilities
+from .history_profile import HISTORY_PROFILES, capability_topics, history_profile_dict
 from .minute import MINUTE, iso_utc
+from .optional_policy import MemberInfo, RevisionInfo, SelectionView, StaleBaseRevision
 from .recorder import Recorder
 from .storage import Storage, StorageUnavailable
 from .timegrid import BUCKETS, Unrepresentable, local_midnight, purge_cutoff
@@ -66,6 +70,39 @@ def _parse_series(raw: str | None) -> list[str]:
     return keys
 
 
+def _revision_dict(revision: RevisionInfo) -> dict:
+    return {"id": revision.id, "effective_from": iso_utc(revision.effective_from_minute)}
+
+
+def _member_dict(member: MemberInfo) -> dict:
+    return {
+        "identity": member.identity,
+        "topic": member.expected_topic,
+        "profile_version": member.profile_version,
+        "label": member.label,
+        "unit": member.unit,
+        "kind": member.kind,
+        "semantic_type": member.semantic_type,
+        "energy": member.energy,
+        "blocked_reason": member.blocked_reason,
+    }
+
+
+def _selection_dict(view: SelectionView) -> dict:
+    return {
+        "active_revision": _revision_dict(view.active_revision),
+        "head_revision": _revision_dict(view.head_revision),
+        "pending": view.pending,
+        "active_members": [_member_dict(m) for m in view.active_members],
+        "head_members": [_member_dict(m) for m in view.head_members],
+    }
+
+
+class SelectionRequest(BaseModel):
+    base_revision: int
+    identities: list[str]
+
+
 def create_app(recorder: Recorder, storage: Storage, clock: Callable[[], float] = time.time,
                lifespan=None) -> FastAPI:
     app = FastAPI(title="Pompa Next", version="1", lifespan=lifespan)
@@ -86,13 +123,17 @@ def create_app(recorder: Recorder, storage: Storage, clock: Callable[[], float] 
         return recorder.live(clock, include_readings=include == "readings")
 
     @app.get("/api/v1/metrics")
-    def metrics(request: Request, include: Literal["capabilities"] | None = Query(None)) -> dict:
+    def metrics(request: Request,
+               include: Literal["capabilities", "history_profiles"] | None = Query(None)) -> dict:
         """Catalog-derived: unaffected by database and MQTT availability."""
         if len(request.query_params.getlist("include")) > 1:
             raise _bad("'include' may appear only once")
         body = history_engine.catalog()
         if include == "capabilities":
             body["capabilities"] = [capability_dict(c) for c in effective_capabilities()]
+        elif include == "history_profiles":
+            topics = capability_topics()
+            body["history_profiles"] = [history_profile_dict(p, topics) for p in HISTORY_PROFILES]
         return body
 
     @app.get("/api/v1/status")
@@ -118,6 +159,29 @@ def create_app(recorder: Recorder, storage: Storage, clock: Callable[[], float] 
             "database": database,
             "sources": facts["sources"],
         }
+
+    @app.get("/api/v1/optional-history/selection")
+    def get_optional_history_selection() -> dict:
+        """Stage 4B checkpoint B (§25.2.1): DB-backed active-vs-pending optional-history selection."""
+        try:
+            view = optional_policy.read_selection(storage, clock())
+        except StorageUnavailable as e:
+            raise HTTPException(status_code=503, detail=f"database unavailable: {e}") from None
+        return _selection_dict(view)
+
+    @app.put("/api/v1/optional-history/selection")
+    def put_optional_history_selection(body: SelectionRequest) -> dict:
+        """Whole-selection replacement; only future complete minutes are ever affected."""
+        try:
+            result = optional_policy.replace_selection(
+                recorder, storage, body.base_revision, body.identities, clock)
+        except StaleBaseRevision as e:
+            raise HTTPException(status_code=409, detail=str(e)) from None
+        except ValueError as e:
+            raise _bad(str(e)) from None
+        except StorageUnavailable as e:
+            raise HTTPException(status_code=503, detail=f"database unavailable: {e}") from None
+        return {"revision": _revision_dict(result.revision), "idempotent_replay": result.idempotent_replay}
 
     @app.get("/api/v1/history")
     def history(

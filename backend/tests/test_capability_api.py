@@ -9,7 +9,8 @@ CAPABILITY_FIELDS = {
     "readable", "canonical_metric", "source_priority",
 }
 READING_FIELDS = {"topic", "value", "kind", "raw", "mode", "available", "received_at"}
-PATHS = {"/health", "/api/v1/status", "/api/v1/live", "/api/v1/metrics", "/api/v1/history"}
+PATHS = {"/health", "/api/v1/status", "/api/v1/live", "/api/v1/metrics", "/api/v1/history",
+         "/api/v1/optional-history/selection"}
 RANGE = {"from": "2027-01-15T08:00:00Z", "to": "2027-01-15T08:01:00Z"}
 
 
@@ -190,20 +191,29 @@ def test_invalid_empty_comma_or_repeated_include_is_400():
         assert api.client.get(path, params=[("include", valid), ("include", valid)]).status_code == 400
 
 
-def test_history_and_openapi_keep_the_five_paths_and_document_only_accepted_includes():
+def test_history_and_openapi_keep_the_frozen_paths_and_document_only_accepted_includes():
     api = Api()
     assert api.get("/api/v1/history", None, **{**RANGE, "series": "top_9"}).status_code == 400
     spec = api.body("/openapi.json")
     assert set(spec["paths"]) == PATHS
-    for path, expected in (("/api/v1/live", "readings"), ("/api/v1/metrics", "capabilities")):
+
+    def include_param(path):
         params = spec["paths"][path]["get"]["parameters"]
         assert len(params) == 1
         assert (params[0]["name"], params[0]["in"], params[0]["required"]) == (
             "include", "query", False
         )
-        assert params[0]["schema"]["anyOf"] == [
-            {"const": expected, "type": "string"}, {"type": "null"},
-        ]
+        return params[0]["schema"]
+
+    assert include_param("/api/v1/live")["anyOf"] == [
+        {"const": "readings", "type": "string"}, {"type": "null"},
+    ]
+    # /api/v1/metrics accepts exactly one of two values (Stage 4A capabilities, Stage 4B
+    # checkpoint B history_profiles), never both together (§25.2, Part 10).
+    metrics_schema = include_param("/api/v1/metrics")["anyOf"]
+    assert metrics_schema[1] == {"type": "null"}
+    assert metrics_schema[0]["type"] == "string"
+    assert set(metrics_schema[0]["enum"]) == {"capabilities", "history_profiles"}
     assert not spec["paths"]["/api/v1/status"]["get"].get("parameters")
 
 
