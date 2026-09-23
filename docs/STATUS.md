@@ -96,7 +96,15 @@ PR #7, not merged.
   implementation — a plain, snapshot-bound read of the just-locked head revision's own row,
   instead of a further locking read — fixed by generalizing the checkpoint A locking-read
   principle to every read needed to interpret the same fact (`docs/ARCHITECTURE.md` §25.2.8).
-- Full backend suite (648 tests) verified against real MariaDB; every MariaDB-gated test skips
+- An adversarial review of checkpoint B found and fixed two correctness gaps, still checkpoint B:
+  a persisted `optional_series` row is now always verified (locking read, full semantic comparison)
+  before reuse, failing closed with `SeriesDefinitionConflict`/`409` — including on an ambiguous
+  PUT retry — instead of silently trusting a recovered row id; and `XTOP1`/`XTOP4` v1 now carry the
+  `{-200}` sentinel and `min_value=0.0` (owner decision) instead of accepting every finite number,
+  including negative power. `label` is now explicitly non-semantic (never requires a version bump),
+  `optional_series.identity`/`expected_topic` use explicit binary collation, and a golden semantic-
+  fingerprint test guards every existing profile against an unversioned semantic change.
+- Full backend suite (689 tests) verified against real MariaDB; every MariaDB-gated test skips
   cleanly without `POMPA_TEST_DB_HOST`.
 
 ### Deferred

@@ -55,8 +55,12 @@ OPTIONAL_POLICY_HEAD = "optional_policy_head"
 OPTIONAL_SERIES_DDL = (
     f"CREATE TABLE IF NOT EXISTS {OPTIONAL_SERIES} (\n"
     "  id              INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,\n"
-    "  identity        VARCHAR(16)  NOT NULL,\n"
-    "  expected_topic  VARCHAR(255) NOT NULL,\n"
+    # Protocol identity/topic text compares exactly, independent of the database's default
+    # collation (which may be case/accent-insensitive): explicit binary collation, not the
+    # server default. Labels stay under the default utf8mb4 collation; they are display text,
+    # never compared or looked up by value.
+    "  identity        VARCHAR(16)  CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,\n"
+    "  expected_topic  VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,\n"
     "  profile_version INT UNSIGNED NOT NULL,\n"
     "  label           VARCHAR(255) NOT NULL,\n"
     "  unit            VARCHAR(32)  NULL,\n"
@@ -336,6 +340,13 @@ class Session:
         revision immediately after a locking read (e.g. ``lock_policy_head``) proved it current."""
         return self._revision(revision_id, locking=True)
 
+    @staticmethod
+    def _decode_series_row(row: tuple) -> SeriesRow:
+        sid, identity, topic, version, label, unit, kind, semantic, sentinels_json, lo, hi, energy = row
+        return SeriesRow(int(sid), identity, topic, int(version), label, unit, kind, semantic,
+                         sentinels_json, None if lo is None else float(lo),
+                         None if hi is None else float(hi), bool(energy))
+
     def _revision_members(self, revision_id: int, *, locking: bool) -> list[SeriesRow]:
         suffix = " FOR UPDATE" if locking else ""
         self._cur.execute(
@@ -343,13 +354,7 @@ class Session:
             f" s.kind, s.semantic_type, s.sentinels_json, s.min_value, s.max_value, s.energy"
             f" FROM {OPTIONAL_POLICY_MEMBER} m JOIN {OPTIONAL_SERIES} s ON s.id = m.series_id"
             f" WHERE m.revision_id = %s ORDER BY s.id{suffix}", (revision_id,))
-        return [
-            SeriesRow(int(sid), identity, topic, int(version), label, unit, kind, semantic,
-                     sentinels_json, None if lo is None else float(lo), None if hi is None else float(hi),
-                     bool(energy))
-            for sid, identity, topic, version, label, unit, kind, semantic, sentinels_json, lo, hi, energy
-            in self._cur.fetchall()
-        ]
+        return [self._decode_series_row(row) for row in self._cur.fetchall()]
 
     def read_revision_members(self, revision_id: int) -> list[SeriesRow]:
         """Every immutable series snapshot selected by one revision, in stable (series_id) order.
@@ -383,6 +388,17 @@ class Session:
         self._cur.execute("SELECT LAST_INSERT_ID()")
         (series_id,) = self._cur.fetchone()
         return int(series_id)
+
+    def lock_series(self, series_id: int) -> SeriesRow | None:
+        """The locking/current read of one series row: the semantic-conflict verification step
+        (§25.2.8) always follows this, never a plain read, so a concurrently committed row is
+        never missed and ``get_or_create_series``'s recovered id is never trusted blind."""
+        self._cur.execute(
+            f"SELECT id, identity, expected_topic, profile_version, label, unit, kind,"
+            f" semantic_type, sentinels_json, min_value, max_value, energy"
+            f" FROM {OPTIONAL_SERIES} WHERE id = %s FOR UPDATE", (series_id,))
+        row = self._cur.fetchone()
+        return None if row is None else self._decode_series_row(row)
 
     def insert_revision(self, base_revision_id: int | None, effective_from_minute: int,
                         created_at: int) -> int:

@@ -430,12 +430,17 @@ entry per code-side `HistoryProfile` (`docs/ARCHITECTURE.md` §25.2.1):
 }
 ```
 
-`selectable` is `true` exactly when `blocked_reason` is `null`. A reason is one of
-`profile_missing`, `profile_version_changed`, `topic_changed` or `capability_topic_changed`
-(`ARCHITECTURE.md` §25.2.1); it reflects live Stage 4A capability drift, never a persisted
-selection state. Sentinels and min/max stay backend-internal and are not exposed here. No database
-I/O: this form has the same MQTT/MariaDB independence as the default `/metrics` response.
-`include` still accepts exactly one of `capabilities` or `history_profiles`, never both.
+`selectable`/`blocked_reason` here describe the **current code-side profile and current Stage 4A
+capability only** — this form never reads the database, so it never compares against a persisted
+`optional_series` row and never reports `profile_definition_changed`. A stored-policy conflict for
+an already-selected series is database state, reported only by the selection GET/PUT surface below;
+a profile can read `selectable: true` here while a `PUT` for it still fails with `409` if its
+persisted definition has drifted from current code. `selectable` is `true` exactly when
+`blocked_reason` is `null`; a reason here is one of `profile_missing`, `profile_version_changed`,
+`topic_changed` or `capability_topic_changed` (`ARCHITECTURE.md` §25.2.8). Sentinels and min/max
+stay backend-internal and are not exposed here. No database I/O: this form has the same
+MQTT/MariaDB independence as the default `/metrics` response. `include` still accepts exactly one
+of `capabilities` or `history_profiles`, never both.
 
 ### `GET /api/v1/optional-history/selection`
 
@@ -461,8 +466,11 @@ selection:
 `active_revision` is the revision governing the current minute; `head_revision` is the latest
 accepted revision regardless of when it takes effect. `pending` is `true` exactly when they differ.
 Each member's `blocked_reason` reflects the *persisted* series snapshot against *current* code and
-capabilities, so a member can become blocked long after its revision was created without that
-revision ever being mutated. `503` when the database is unavailable.
+capabilities — here a fifth reason, `profile_definition_changed`, can also appear: the same
+`(identity, expected_topic, profile_version)`, but the persisted definition (unit/kind/sentinels/
+min/max/energy) no longer matches current code, a code-definition error rather than a device or
+capability fact. Either way, a member can become blocked long after its revision was created
+without that revision ever being mutated or deleted. `503` when the database is unavailable.
 
 ### `PUT /api/v1/optional-history/selection`
 
@@ -489,8 +497,15 @@ answered with the revision it actually produced, not a second one and not a conf
 |---|---|
 | `200` | Applied (or an identical idempotent retry of an already-applied request). |
 | `400` | Duplicate identity, unknown identity, or a currently unselectable (blocked) profile. |
-| `409` | `base_revision` is stale: the head has moved and this is not that head's own retry. |
+| `409` | `base_revision` is stale (the head has moved and this is not that head's own retry), **or** a requested identity already has a persisted series whose stored definition no longer matches current code. |
 | `503` | The database is unavailable. |
 
-A `409` means the caller must `GET` the current selection and decide again; the backend never
-guesses which of two concurrent, genuinely different requests should win.
+A `409` for a stale `base_revision` means the caller must `GET` the current selection and decide
+again; the backend never guesses which of two concurrent, genuinely different requests should win.
+A `409` for a stored-definition conflict means an identity's on-disk historical meaning disagrees
+with the running code for the exact same `(identity, expected_topic, profile_version)` — a
+deployment/code error, not a race — and it fails the whole request closed: no revision is created,
+the head does not move, and the old row is never mutated. An *ambiguous retry* (same
+`base_revision`, same resolved identity set) is answered `200`/`idempotent_replay: true` only if
+every one of those already-selected series still matches current code; if the stored definition
+was altered in the meantime, the retry also fails `409` rather than falsely reporting success.

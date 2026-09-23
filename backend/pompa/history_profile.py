@@ -1,4 +1,4 @@
-"""Stage 4B checkpoint B: the ``HistoryProfile`` domain model (``docs/ARCHITECTURE.md`` §25.2.1).
+"""Stage 4B checkpoint B: the ``HistoryProfile`` domain model (``docs/ARCHITECTURE.md`` §25.2.1/§25.2.8).
 
 A ``HistoryProfile`` is never a canonical ``Metric``: canonical logical metric
 keys, physical capability identities (Stage 4A, ``capabilities.py``) and
@@ -6,13 +6,25 @@ history-profile identities are three distinct namespaces. Nothing here is
 inferred from a topic or description substring, a payload's generic
 Stage 4A ``kind``, its ``available`` fact, or a legacy heuristic; every field
 below is either directly evidenced by the tracked reference
-(``docs/reference/heishamon/``) or an explicit, non-heuristic catalog fact
-from the legacy repository, and unevidenced sentinel/range fields are left
-empty/``None`` rather than guessed.
+(``docs/reference/heishamon/``), an explicit, non-heuristic catalog fact from
+the legacy repository, or an explicitly labelled project design choice, and
+unevidenced sentinel/range fields are left empty/``None`` rather than guessed.
+
+One code-side ``HistoryProfile`` version is exactly one immutable *semantic*
+definition (``ProfileSemantics``, everything except ``label``): changing a
+presentation label never requires a new ``profile_version``, but changing
+``expected_topic``, ``unit``, ``kind``, ``semantic_type``, ``sentinels``,
+``min_value``, ``max_value`` or ``energy`` on an already-selected identity
+does. ``label`` is presentation metadata / the first-seen historical
+presentation snapshot; an already-persisted series keeps its own stored
+label forever, regardless of later code changes.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 from dataclasses import dataclass
 from typing import Literal, Mapping
 
@@ -34,8 +46,8 @@ _CANONICAL_SOURCE_IDENTITIES: frozenset[str] = frozenset(
 class HistoryProfile:
     identity: str  # physical identity, e.g. "TOP21" or "XTOP1" (Stage 4A capability namespace)
     expected_topic: str  # the Stage 4A effective capability topic this profile's meaning binds to
-    profile_version: int  # positive; a topic/meaning change requires a new version, never a mutation
-    label: str
+    profile_version: int  # positive; a semantic change requires a new version, never a mutation
+    label: str  # presentation only; never part of the semantic definition (see module docstring)
     unit: str | None
     kind: Kind
     semantic_type: SemanticType
@@ -49,14 +61,29 @@ class HistoryProfile:
             raise ValueError(f"{self.identity} already serves a canonical metric source")
         if self.profile_version < 1:
             raise ValueError(f"{self.identity}: profile_version must be positive")
+        if not all(math.isfinite(s) for s in self.sentinels):
+            raise ValueError(f"{self.identity}: sentinels must be finite")
+        if self.min_value is not None and not math.isfinite(self.min_value):
+            raise ValueError(f"{self.identity}: min_value must be finite")
+        if self.max_value is not None and not math.isfinite(self.max_value):
+            raise ValueError(f"{self.identity}: max_value must be finite")
+        if (self.min_value is not None and self.max_value is not None
+                and self.min_value > self.max_value):
+            raise ValueError(f"{self.identity}: min_value must not exceed max_value")
 
 
 def _temp_profile(identity: str, topic: str, label: str) -> HistoryProfile:
-    # docs/reference/heishamon/MQTT-Topics.md documents each as "(°C)"; the legacy repository's
-    # explicit (non-heuristic) catalog assigns TEMPERATURE_SENTINELS = (-78, -128) to each of these
-    # same identities, matching Pompa Next's own canonical convention (catalog.TEMP_SENTINELS)
-    # applied uniformly to every canonical temperature source; realne_dane.md directly observed
-    # -128 on two of them (Defrost_Temp, Ipm_Temp). No documented min/max exists for any of them.
+    # Evidence, kept precisely separated by source:
+    # - docs/reference/heishamon/MQTT-Topics.md documents this identity, its topic and its "(°C)"
+    #   meaning; it does NOT document any sentinel value for it.
+    # - the legacy repository's explicit (non-heuristic) catalog fact assigns
+    #   TEMPERATURE_SENTINELS = (-78, -128) to all six of these same identities.
+    # - docs/reference/heishamon/realne_dane.md directly observes -128 on two of them
+    #   (Defrost_Temp, Ipm_Temp) in its one checked-in snapshot; -78 is not directly observed there.
+    # Using {-78, -128} for all six is therefore a project decision supported by that evidence and
+    # by Pompa Next's own existing canonical temperature convention (catalog.TEMP_SENTINELS applied
+    # uniformly to every canonical temperature source), not a claim that the tracked reference
+    # itself documents these sentinel values. No documented min/max exists for any of them.
     return HistoryProfile(identity, topic, 1, label, "°C", "mean", "measurement",
                           frozenset({-78.0, -128.0}), None, None, False)
 
@@ -89,19 +116,25 @@ HISTORY_PROFILES: tuple[HistoryProfile, ...] = (
     # main/Expansion_Valve "(Steps)": no sentinel/range documented or observed.
     HistoryProfile("TOP142", "main/Expansion_Valve", 1, "Zawór rozprężny", "steps", "mean",
                    "measurement", frozenset(), None, None, False),
-    # XTOP1/XTOP4: Stage 4A-verified extra/ topics (capabilities._VERIFIED_XTOP_TOPICS), observed
-    # 0 W in realne_dane.md, factually cooling power in W (energy=True). The legacy explicit catalog
-    # assigns POWER_SENTINELS (-200) to these extra/ identities, but Pompa Next's own canonical
-    # catalog deliberately does not assign TOP_POWER_SENTINELS to any XTOP source (only to the TOP
-    # fallback), and no XTOP sentinel reading has been directly observed — so this stays unknown
-    # rather than importing the legacy assumption, per the "unknown evidence stays unknown" rule.
-    # No min/max is documented for either identity, and canonical catalog.min_value=0.0 for the
-    # four canonical power metrics is this project's own curated convention, not evidence about
-    # these specific, never-canonical cooling channels; left None rather than assumed.
+    # XTOP1/XTOP4 v1 (owner decision, frozen): evidence is kept precisely separated by claim.
+    # - W identity/meaning ("Cool_Power_Consumption_Extra"/"Cool_Power_Production_Extra", observed
+    #   0 W in realne_dane.md; exact topics from Stage 4A's verified capability model): tracked
+    #   evidence.
+    # - -200 sentinel: an explicit, non-heuristic legacy product catalog fact (POWER_SENTINELS
+    #   assigned to these same two identities). docs/reference/heishamon/MQTT-Topics.md does NOT
+    #   document -200 for XTOP identities; this is legacy catalog evidence, not tracked-reference
+    #   evidence.
+    # - min_value=0.0 (rejecting any other negative reading): a PROJECT DESIGN CHOICE, not
+    #   evidence from either source, deliberately aligned with Pompa Next's own existing canonical
+    #   power algebra (catalog._power(..., min_value=0.0)). It exists so an unknown negative
+    #   cooling-power value can never automatically become valid historical energy: fail closed
+    #   on the unevidenced case instead of silently accepting every finite number. No optional
+    #   data has ever been persisted for these identities, so this v1 definition needed no
+    #   migration to correct.
     HistoryProfile("XTOP1", "extra/Cool_Power_Consumption_Extra", 1, "Pobór mocy chłodzenia", "W",
-                   "mean", "measurement", frozenset(), None, None, True),
+                   "mean", "measurement", frozenset({-200.0}), 0.0, None, True),
     HistoryProfile("XTOP4", "extra/Cool_Power_Production_Extra", 1, "Moc chłodnicza", "W",
-                   "mean", "measurement", frozenset(), None, None, True),
+                   "mean", "measurement", frozenset({-200.0}), 0.0, None, True),
 )
 
 HISTORY_PROFILES_BY_IDENTITY: dict[str, HistoryProfile] = {p.identity: p for p in HISTORY_PROFILES}
@@ -123,12 +156,76 @@ def capability_topics(capabilities: tuple[Capability, ...] | None = None) -> dic
     return {c.reference.identity: c.topic for c in caps}
 
 
+# ------------------------------------------------------------------ semantic definition
+
+
+@dataclass(frozen=True, slots=True)
+class ProfileSemantics:
+    """The comparable, versioned *meaning* of a ``HistoryProfile``: everything except its
+    presentation ``label``. Two profiles with equal ``ProfileSemantics`` are the same
+    historical meaning; a label may differ freely without creating a new series or
+    requiring a ``profile_version`` bump (see module docstring)."""
+
+    identity: str
+    expected_topic: str
+    profile_version: int
+    unit: str | None
+    kind: Kind
+    semantic_type: SemanticType
+    sentinels: frozenset[float]
+    min_value: float | None
+    max_value: float | None
+    energy: bool
+
+
+def profile_semantics(profile: HistoryProfile) -> ProfileSemantics:
+    return ProfileSemantics(profile.identity, profile.expected_topic, profile.profile_version,
+                            profile.unit, profile.kind, profile.semantic_type, profile.sentinels,
+                            profile.min_value, profile.max_value, profile.energy)
+
+
+def semantic_fingerprint(profile: HistoryProfile) -> str:
+    """A deterministic digest of one profile's semantic definition (label excluded).
+
+    Golden-value guard (docs/ARCHITECTURE.md §25.2.8): a test pins the expected digest
+    of every existing ``HistoryProfile``. If this ever changes for an *existing*
+    ``(identity, profile_version)`` pair, the fix is to increment ``profile_version``
+    on the intended new meaning, never to update the test's expected digest — that
+    would silently accept a stored-series definition conflict (§25.2.8, ``PUT``/``GET``
+    drift as ``profile_definition_changed``).
+    """
+    semantics = profile_semantics(profile)
+    payload = json.dumps(
+        {
+            "identity": semantics.identity,
+            "expected_topic": semantics.expected_topic,
+            "profile_version": semantics.profile_version,
+            "unit": semantics.unit,
+            "kind": semantics.kind,
+            "semantic_type": semantics.semantic_type,
+            "sentinels": sorted(semantics.sentinels),
+            "min_value": semantics.min_value,
+            "max_value": semantics.max_value,
+            "energy": semantics.energy,
+        },
+        sort_keys=True, separators=(",", ":"), allow_nan=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 BlockReason = Literal["profile_missing", "profile_version_changed", "topic_changed",
-                      "capability_topic_changed"]
+                      "capability_topic_changed", "profile_definition_changed"]
 
 
 def history_profile_dict(profile: HistoryProfile, topics: Mapping[str, str | None]) -> dict:
     """The factual public projection of one code-side ``HistoryProfile`` (§25.2, Part 10).
+
+    ``selectable``/``blocked_reason`` here describe the *current code-side profile and
+    current Stage 4A capability* only — this call never compares against a persisted
+    ``optional_series`` row, so ``profile_definition_changed`` never appears here and
+    this endpoint stays free of any database dependency. A stored-policy conflict for an
+    already-selected series is database state, reported only by the selection GET/PUT
+    surface (`GET`/`PUT /api/v1/optional-history/selection`).
 
     Sentinels and min/max stay backend-internal: no concrete frontend/product
     need has been identified for exposing them yet.
@@ -150,16 +247,34 @@ def history_profile_dict(profile: HistoryProfile, topics: Mapping[str, str | Non
 
 
 def drift_reason(identity: str, expected_topic: str, profile_version: int,
-                 profiles: Mapping[str, HistoryProfile], topics: Mapping[str, str | None]
-                 ) -> BlockReason | None:
+                 profiles: Mapping[str, HistoryProfile], topics: Mapping[str, str | None],
+                 persisted_semantics: ProfileSemantics | None = None) -> BlockReason | None:
     """Whether a persisted (or about-to-be-persisted) series meaning is still selectable.
 
     Compares one immutable historical meaning ``(identity, expected_topic,
     profile_version)`` against the *current* code (``profiles``) and the
     *current* Stage 4A effective capability topics (``topics``). ``None``
     means selectable; a reason means blocked (``docs/ARCHITECTURE.md``
-    §25.2.1) without mutating or deleting anything the caller already
+    §25.2.1/§25.2.8) without mutating or deleting anything the caller already
     persisted.
+
+    A capability that is currently missing from the effective catalog
+    entirely surfaces as ``capability_topic_changed`` (its topic lookup
+    returns ``None``, which can never equal a real ``expected_topic``); a
+    dedicated ``capability_missing`` reason is not worth a fifth vocabulary
+    entry unless it later needs to be told apart from an ordinary topic
+    change.
+
+    ``persisted_semantics``, when given, is the *actual* stored
+    ``ProfileSemantics`` of an existing ``optional_series`` row for this
+    exact ``(identity, expected_topic, profile_version)`` tuple. When it
+    disagrees with the current code's own semantics for that tuple —
+    identity/topic/version match, but ``unit``/``kind``/``semantic_type``/
+    ``sentinels``/``min_value``/``max_value``/``energy`` do not — that is
+    ``profile_definition_changed``: a code-definition error (a semantic
+    field changed without a ``profile_version`` bump), not a fact about the
+    device. Omitted (``None``) for the pre-persistence selectability check,
+    which has no existing row to compare against.
     """
     profile = profiles.get(identity)
     if profile is None:
@@ -170,4 +285,6 @@ def drift_reason(identity: str, expected_topic: str, profile_version: int,
         return "topic_changed"
     if topics.get(identity) != expected_topic:
         return "capability_topic_changed"
+    if persisted_semantics is not None and persisted_semantics != profile_semantics(profile):
+        return "profile_definition_changed"
     return None

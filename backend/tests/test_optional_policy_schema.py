@@ -8,6 +8,8 @@ import json
 import pytest
 
 from conftest import row
+import pompa.optional_policy as op
+from pompa.history_profile import HistoryProfile
 from pompa.storage import StorageUnavailable
 
 
@@ -120,6 +122,80 @@ def test_dangling_member_series_reference_is_rejected(mariadb):
             s.lock_policy_head()
             revision_id = s.insert_revision(1, 60, 1000)
             s.insert_revision_members(revision_id, [999999])  # no such series id
+
+
+def _profile(**overrides) -> HistoryProfile:
+    base = dict(identity="TOP21", expected_topic="main/Outside_Pipe_Temp", profile_version=1,
+               label="Temperatura rury zewnętrznej", unit="°C", kind="mean",
+               semantic_type="measurement", sentinels=frozenset({-78.0, -128.0}),
+               min_value=None, max_value=None, energy=False)
+    base.update(overrides)
+    return HistoryProfile(**base)
+
+
+def test_resolve_series_id_reuses_an_exact_semantic_match(mariadb):
+    mariadb.ensure_schema()
+    profile = _profile()
+    with mariadb.session() as s:
+        first = op.resolve_series_id(s, profile, 1000)
+        second = op.resolve_series_id(s, profile, 2000)
+    assert first == second
+
+
+def test_resolve_series_id_reuses_across_a_label_only_change(mariadb):
+    """Label is presentation only; changing it never creates a new series or a conflict,
+    and the persisted row keeps its original stored label."""
+    mariadb.ensure_schema()
+    with mariadb.session() as s:
+        first = op.resolve_series_id(s, _profile(label="Original"), 1000)
+        second = op.resolve_series_id(s, _profile(label="Different label entirely"), 2000)
+    assert first == second
+    with mariadb._connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT label FROM optional_series WHERE id = %s", (first,))
+        assert cur.fetchone()[0] == "Original"
+
+
+@pytest.mark.parametrize("overrides", [
+    {"unit": "K"},
+    {"kind": "last"},
+    {"semantic_type": "counter"},
+    {"sentinels": frozenset({-1.0})},
+    {"min_value": 0.0},
+    {"max_value": 100.0},
+    {"energy": True},
+])
+def test_resolve_series_id_fails_closed_on_semantic_conflict(mariadb, overrides):
+    mariadb.ensure_schema()
+    with mariadb.session() as s:
+        op.resolve_series_id(s, _profile(), 1000)
+    with pytest.raises(op.SeriesDefinitionConflict):
+        with mariadb.session() as s:
+            op.resolve_series_id(s, _profile(**overrides), 2000)
+    # The conflict must never mutate the originally persisted row.
+    with mariadb.session() as s:
+        stored = op.resolve_series_id(s, _profile(), 3000)
+    with mariadb._connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT unit, kind, semantic_type, sentinels_json, min_value, max_value, energy"
+                    " FROM optional_series WHERE id = %s", (stored,))
+        unit, kind, semantic_type, sentinels_json, min_value, max_value, energy = cur.fetchone()
+        assert (unit, kind, semantic_type, bool(energy)) == ("°C", "mean", "measurement", False)
+        assert json.loads(sentinels_json) == sorted({-78.0, -128.0})
+        assert min_value is None and max_value is None
+
+
+def test_binary_identity_topic_collation_is_exact(mariadb):
+    """Protocol identity/topic text compares exactly, independent of the database's default
+    collation: a case difference is a different tuple, never an alias."""
+    mariadb.ensure_schema()
+    with mariadb.session() as s:
+        lower_id = op.resolve_series_id(s, _profile(expected_topic="main/Ipm_Temp"), 1000)
+        upper_id = op.resolve_series_id(s, _profile(expected_topic="main/IPM_TEMP"), 1000)
+    assert lower_id != upper_id
+
+    with mariadb.session() as s:
+        a_id = op.resolve_series_id(s, _profile(identity="TOP21"), 1000)
+        b_id = op.resolve_series_id(s, _profile(identity="top21"), 1000)
+    assert a_id != b_id
 
 
 def test_lock_latest_minute_ts_reads_the_current_read_of_sample_1m(mariadb):

@@ -814,16 +814,50 @@ deployment (§25.2.8's own "deferred" list).
 **`HistoryProfile` implemented** (`pompa/history_profile.py`): an initial, explicitly curated set
 of 15 identities — TOP21, TOP50–TOP53, TOP55, TOP63, TOP64, TOP66, TOP90, TOP91, TOP93, TOP142,
 XTOP1, XTOP4 — each evidenced from the tracked reference and/or an explicit (non-heuristic) legacy
-catalog fact, never a topic/description substring or a physically-plausible guess. Six identities
-(the five temperature probes plus `TOP52`) share the canonical `{-78, -128}` sentinel pair, evidenced
-by the tracked reference, the legacy explicit catalog and, for two of them, a direct observed
-reading; every other profile has an empty sentinel set and no min/max, because no such evidence
-exists — including `XTOP1`/`XTOP4`, where the legacy catalog's `POWER_SENTINELS` assumption is
-deliberately *not* imported, because Pompa Next's own canonical catalog does not assign
-`TOP_POWER_SENTINELS` to any `XTOP` source either. `XTOP1`/`XTOP4` do carry `energy=true`: their W
-semantics are evidenced, independent of the still-deferred optional-power kWh question. Asserted
-by test, from the canonical catalog itself: no chosen identity ever serves a canonical metric
-source. This is code/domain knowledge only; nothing here is persisted until a profile is selected.
+catalog fact, or an explicitly labelled project design choice; never a topic/description substring,
+a payload's generic Stage 4A `kind`, or a physically-plausible guess. `__post_init__` additionally
+rejects a non-positive `profile_version`, a canonical-source identity, a non-finite sentinel or
+min/max, and an inverted `min_value > max_value` range.
+
+The six temperature profiles share the canonical `{-78, -128}` sentinel pair. Evidence is kept
+precisely separated by claim: the tracked `MQTT-Topics.md` documents each identity, topic and its
+"(°C)" meaning only, **not** a sentinel value; the legacy repository's explicit (non-heuristic)
+catalog fact assigns `TEMPERATURE_SENTINELS` to all six; the tracked `realne_dane.md` directly
+observes `-128` on two of them in its one checked-in snapshot (`-78` is not directly observed
+there). Using the pair for all six is therefore a project decision supported by that evidence and
+by Pompa Next's own existing canonical temperature convention, never a claim that the tracked
+reference itself documents the sentinel values. Every other non-power profile has an empty
+sentinel set and no min/max, because no such evidence exists for it.
+
+`XTOP1`/`XTOP4` v1 is an explicit owner decision, frozen with its evidence kept separated by claim:
+their W identity/meaning is tracked/observed Stage 4A evidence; their `{-200}` sentinel is an
+explicit, non-heuristic legacy product catalog fact (**not** documented by the tracked reference);
+their `min_value = 0.0` is a **project design choice**, not evidence from either source, deliberately
+aligned with Pompa Next's own existing canonical power algebra (`catalog._power(..., min_value=0.0)`)
+so that an unevidenced negative cooling-power reading fails closed instead of silently becoming
+valid historical energy — every other finite negative value (e.g. `-1`) is `REJECTED`, only `-200`
+is the documented "unknown" `SENTINEL`. No optional data had ever been persisted for these two
+identities, so correcting this v1 definition needed no migration. `energy=true` for both: their W
+semantics are evidenced, independent of the still-deferred optional-power kWh question.
+
+Asserted by test, from the canonical catalog itself: no chosen identity ever serves a canonical
+metric source. A golden-value test also pins a deterministic semantic fingerprint
+(`history_profile.semantic_fingerprint`) of every existing profile; if code ever changes an
+existing `(identity, profile_version)`'s semantics, the fingerprint test fails loudly, and the
+correct fix is a new `profile_version`, never updating the expected fingerprint. This is
+code/domain knowledge only; nothing here is persisted until a profile is selected.
+
+**One profile version is one immutable semantic definition; `label` is not semantic.** The
+semantic fields are `identity`, `expected_topic`, `profile_version`, `unit`, `kind`,
+`semantic_type`, `sentinels`, `min_value`, `max_value` and `energy`
+(`history_profile.ProfileSemantics`/`profile_semantics`). `label` is presentation metadata — a
+first-seen historical presentation snapshot — and changing it, alone, never requires a new
+`profile_version` and never creates a new series; an already-persisted series keeps its own stored
+label forever regardless of later code changes. Any intentional change to a semantic field
+requires a new `profile_version`, even though `expected_topic` is already part of the uniqueness
+tuple: reusing an existing `(identity, expected_topic, profile_version)` with different semantics
+is a code-definition error, not a new historical meaning, and is caught rather than silently
+applied (below).
 
 **The numeric-parsing primitive is extracted** (`pompa.catalog.parse_numeric`): float conversion,
 the finite-number check, the sentinel check and the min/max check, in that order. Canonical
@@ -841,10 +875,25 @@ old selected series; the persisted row is already self-describing. The identity 
 unchanged — one historical meaning is still exactly `(identity, expected_topic, profile_version)`,
 enforced by a `UNIQUE` constraint — the other columns are that meaning's frozen description.
 `optional_policy_revision.base_revision_id` is additionally `UNIQUE`, giving the linear chain a
-real database-level guarantee (one child per base) beyond the application-level head lock. A
+real database-level guarantee (one child per base) beyond the application-level head lock.
+`optional_series.identity`/`expected_topic` use an explicit binary collation
+(`utf8mb4`/`utf8mb4_bin`), independent of the database's default collation: protocol identity/topic
+text compares exactly, so a case difference is a different tuple, never a silent alias — `label`
+keeps the default collation, since it is display text never compared or looked up by value. A
 genesis revision (id 1, no base, `effective_from_minute = 0`, empty selection) and a head already
 pointing at it are seeded idempotently by `Storage.ensure_schema()`; no `optional_sample_1m` or
 `optional_rollup_1h` table exists yet.
+
+**An existing series is verified before reuse, never trusted blind, and never mutated on
+conflict.** `Session.get_or_create_series` recovers an existing row's id under the `UNIQUE`
+constraint (`INSERT ... ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`) without changing any
+column of that row — but the recovered id alone proves nothing about the row's *other* columns.
+`optional_policy.resolve_series_id` always follows with a locking/current read (`lock_series`) and
+compares the complete stored `ProfileSemantics` against the current code's; a match reuses the id,
+a mismatch raises `SeriesDefinitionConflict` and fails the whole PUT transaction closed — no new
+revision, no head movement, and the old row is never touched. This is the practical enforcement of
+the "one version, one meaning" rule above: a code change to an existing profile's semantics without
+a version bump is caught here, at write time, not discovered later as silently wrong history.
 
 **The policy-head lock generalizes to every read of what it protects.** Checkpoint A proved that a
 locking read of the head row observes committed truth even inside this repository's
@@ -866,20 +915,49 @@ canonical minute (from `Session.lock_latest_minute_ts`, a current read of the ne
 row, not `MAX(ts)`) plus one minute; and the current head revision's own `effective_from_minute`.
 The database transaction never overlaps the `Recorder` lock.
 
-**Drift/blocking uses exactly four reasons** (`history_profile.drift_reason`): `profile_missing`,
-`profile_version_changed`, `topic_changed`, `capability_topic_changed`. It compares one persisted
-series meaning against *current* code and *current* Stage 4A capability topics; a blocked member is
-never mutated or deleted, and blocking one member never blocks canonical operation or any other
-member.
+**Drift/blocking uses exactly five reasons** (`history_profile.drift_reason`): `profile_missing`,
+`profile_version_changed`, `topic_changed`, `capability_topic_changed`, and
+`profile_definition_changed` — same `(identity, expected_topic, profile_version)`, but the
+persisted `ProfileSemantics` disagrees with current code's for that tuple (a code-definition error,
+never a fact about the device). A capability currently missing from the effective catalog entirely
+surfaces as `capability_topic_changed` (its topic lookup returns `None`, which can never equal a
+real `expected_topic`); a sixth, dedicated reason is not worth the vocabulary unless it later needs
+to be told apart from an ordinary topic change. It compares one persisted series meaning against
+*current* code and *current* Stage 4A capability topics; a blocked member is never mutated or
+deleted, and blocking one member never blocks canonical operation or any other member.
 
-**Ambiguous PUT retries are idempotent** (§25.2.1's required property, now implemented): a retry
-supplying the same `base_revision` whose current head's own `base_revision_id` and resolved series
-set match is answered with the already-created revision, never a second one and never a conflict; a
+**Ambiguous PUT retries are idempotent** (§25.2.1's required property, now implemented) *and*
+semantic-safe: a retry supplying the same `base_revision` whose current head's own
+`base_revision_id` and resolved `(identity, expected_topic, profile_version)` set match is answered
+with the already-created revision only after also verifying every one of those existing members'
+stored `ProfileSemantics` still equals the current code's — coarse identity agreement is not
+sufficient by itself, since it cannot by construction distinguish an ordinary replay from a replay
+racing a code change that altered semantics without a version bump. That specific case raises
+`SeriesDefinitionConflict` (never a false idempotent success) exactly like a fresh PUT would. A
 genuinely different concurrent request against a since-moved head is refused (`StaleBaseRevision`).
 
 **Deferred beyond checkpoint B**: `OptionalAccumulator` and optional ingest runtime state,
 `optional_sample_1m`/`optional_rollup_1h`, optional raw recording/rollup/purge, optional history
 query endpoints, and any CT109 optional-history deployment.
+
+#### 25.2.9 Constraints recorded now for checkpoint C
+
+Documentation only; no runtime path below is implemented yet.
+
+**Lock order.** A future canonical-plus-optional persist transaction must lock
+`optional_policy_head` **before** touching or inserting into `sample_1m`, preserving exactly the
+same lock order a policy PUT already uses (policy head, then the canonical minute frontier/sample).
+Reversing this order for only one of the two transaction kinds would create a deadlock inversion
+that does not exist today.
+
+**Membership resolved at persist time, not at minute-open time.** The future `OptionalAccumulator`
+observes and computes values for every history-eligible profile continuously, regardless of current
+selection (§25.2.1) — but which of those already-computed per-minute facts are actually *known*
+for a given minute must be decided when that minute is persisted, by re-resolving the timeline
+policy applicable to it under the same policy-head locking/current-read transaction, never by
+capturing selection membership once when the minute opens. A policy PUT may commit while a minute
+is already open; only a persist-time resolution can be correct for that minute without retroactively
+reclassifying anything already committed (§25.2.1's required race property).
 
 ### 25.3 Stage 4C — one activity interpretation and durable events
 

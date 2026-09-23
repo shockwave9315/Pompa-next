@@ -15,7 +15,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from .history_profile import (
-    HISTORY_PROFILES_BY_IDENTITY, BlockReason, HistoryProfile, capability_topics, drift_reason,
+    HISTORY_PROFILES_BY_IDENTITY, BlockReason, HistoryProfile, ProfileSemantics, capability_topics,
+    drift_reason, profile_semantics,
 )
 from .minute import MINUTE, floor_minute
 from .storage import SeriesRow, Storage
@@ -25,9 +26,63 @@ class StaleBaseRevision(Exception):
     """The supplied ``base_revision`` is not (and was never) the current head; retry with GET."""
 
 
+class SeriesDefinitionConflict(Exception):
+    """A persisted ``optional_series`` row's semantic definition no longer matches the current
+    code-side ``HistoryProfile`` of the same ``(identity, expected_topic, profile_version)``.
+
+    The stored row is never mutated or reused; a semantic field changed without a
+    ``profile_version`` bump is a code-definition error, and the fix is to increment
+    ``profile_version`` before the changed meaning can be selected (docs/ARCHITECTURE.md §25.2.8).
+    """
+
+    def __init__(self, identity: str, expected_topic: str, profile_version: int):
+        super().__init__(
+            f"{identity} (topic={expected_topic!r}, profile_version={profile_version}) has a"
+            " persisted semantic definition that no longer matches the current code; increment"
+            " profile_version before this changed meaning can be selected"
+        )
+        self.identity = identity
+        self.expected_topic = expected_topic
+        self.profile_version = profile_version
+
+
 def _sentinels_json(sentinels: frozenset[float]) -> str:
     """The checkpoint-A-proven deterministic encoding (docs/ARCHITECTURE.md §25.2.2), for a set."""
     return json.dumps(sorted(sentinels), separators=(",", ":"), allow_nan=False)
+
+
+def series_semantics(row: SeriesRow) -> ProfileSemantics:
+    """The persisted counterpart of ``history_profile.profile_semantics``, decoded from storage."""
+    return ProfileSemantics(row.identity, row.expected_topic, row.profile_version, row.unit,
+                            row.kind, row.semantic_type, frozenset(json.loads(row.sentinels_json)),
+                            row.min_value, row.max_value, row.energy)
+
+
+def resolve_series_id(session, profile: HistoryProfile, created_at: int) -> int:
+    """Get-or-create the series row for ``profile``, failing closed on any semantic conflict.
+
+    ``Session.get_or_create_series`` recovers an existing row's id under the
+    unique ``(identity, expected_topic, profile_version)`` constraint without
+    ever mutating that row (§25.2.8: an existing row's ``label`` in
+    particular is never touched). The recovered id alone proves nothing about
+    that row's *other* columns, so this always follows up with a locking/
+    current read (``lock_series``) and verifies the complete stored semantic
+    definition equals the current code's, before the id is trusted for a new
+    revision. A prior code change to an existing ``(identity, topic,
+    version)``'s semantics without a version bump raises
+    ``SeriesDefinitionConflict`` instead of silently reusing the stale row.
+    """
+    sentinels_json = _sentinels_json(profile.sentinels)
+    series_id = session.get_or_create_series(
+        profile.identity, profile.expected_topic, profile.profile_version, profile.label,
+        profile.unit, profile.kind, profile.semantic_type, sentinels_json, profile.min_value,
+        profile.max_value, profile.energy, created_at)
+    stored = session.lock_series(series_id)
+    assert stored is not None, "get_or_create_series returned an id with no row"
+    if series_semantics(stored) != profile_semantics(profile):
+        raise SeriesDefinitionConflict(profile.identity, profile.expected_topic,
+                                       profile.profile_version)
+    return series_id
 
 
 def resolve_effective_from_minute(recorder_safe_from: int, clock_after_lock: float,
@@ -76,7 +131,8 @@ class ReplaceResult:
 
 def _member_info(row: SeriesRow, topics: dict[str, str | None]) -> MemberInfo:
     reason = drift_reason(row.identity, row.expected_topic, row.profile_version,
-                          HISTORY_PROFILES_BY_IDENTITY, topics)
+                          HISTORY_PROFILES_BY_IDENTITY, topics,
+                          persisted_semantics=series_semantics(row))
     return MemberInfo(row.identity, row.expected_topic, row.profile_version, row.label, row.unit,
                       row.kind, row.semantic_type, row.energy, reason)
 
@@ -161,9 +217,24 @@ def replace_selection(recorder, storage: Storage, base_revision: int, identities
 
         if head_id != base_revision:
             if head_base_id == base_revision:
+                head_members = s.lock_revision_members(head_id)
                 head_keys = sorted((m.identity, m.expected_topic, m.profile_version)
-                                   for m in s.lock_revision_members(head_id))
+                                   for m in head_members)
                 if head_keys == requested_keys:
+                    # Coarse identity match alone is not enough (§25.2.8): a replay must not
+                    # bypass the semantic-snapshot check. Every requested_keys entry came from a
+                    # *current* profile, so an identity/topic/version match already rules out
+                    # profile_missing/topic_changed/version_changed for every head member here;
+                    # the only way one can still disagree is a semantic field changed in code
+                    # without a version bump, which must fail closed, never replay as success.
+                    profiles_by_key = {(p.identity, p.expected_topic, p.profile_version): p
+                                       for p in profiles}
+                    for member in head_members:
+                        current = profiles_by_key[(member.identity, member.expected_topic,
+                                                   member.profile_version)]
+                        if series_semantics(member) != profile_semantics(current):
+                            raise SeriesDefinitionConflict(member.identity, member.expected_topic,
+                                                           member.profile_version)
                     return ReplaceResult(RevisionInfo(head_id, head_effective_from),
                                          idempotent_replay=True)
             raise StaleBaseRevision(
@@ -175,12 +246,7 @@ def replace_selection(recorder, storage: Storage, base_revision: int, identities
                                                         head_effective_from)
         created_at = int(now)
 
-        series_ids = [
-            s.get_or_create_series(p.identity, p.expected_topic, p.profile_version, p.label, p.unit,
-                                   p.kind, p.semantic_type, _sentinels_json(p.sentinels), p.min_value,
-                                   p.max_value, p.energy, created_at)
-            for p in profiles
-        ]
+        series_ids = [resolve_series_id(s, p, created_at) for p in profiles]
         new_revision_id = s.insert_revision(head_id, effective_from, created_at)
         s.insert_revision_members(new_revision_id, series_ids)
         s.update_policy_head(new_revision_id)

@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from conftest import T0
 from pompa.api import create_app
+from pompa.history_profile import HISTORY_PROFILES_BY_IDENTITY
 from pompa.ingest import Ingest
 from pompa.minute import MinuteAccumulator
 from pompa.recorder import Recorder
@@ -178,3 +179,65 @@ def test_no_optional_sample_1m_table_exists_yet(mariadb):
             "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()"
             " AND TABLE_NAME IN ('optional_sample_1m', 'optional_rollup_1h')")
         assert cur.fetchone()[0] == 0
+
+
+# ------------------------------------------------------------------ stored semantic-definition conflict
+
+
+def _seed_stale_member(storage, identity, expected_topic, profile_version):
+    """Simulate an optional_series row persisted by an *older* code version, before its
+    semantic definition changed -- without going through replace_selection, which would
+    itself now correctly refuse to create a conflicting row (§25.2.8)."""
+    with storage.session() as s:
+        head_id = s.lock_policy_head()
+        series_id = s.get_or_create_series(identity, expected_topic, profile_version, "old label",
+                                           "K", "last", "counter", "[-1.0]", None, None, False, 1000)
+        new_revision = s.insert_revision(head_id, 60, 1000)
+        s.insert_revision_members(new_revision, [series_id])
+        s.update_policy_head(new_revision)
+
+
+def test_get_reports_profile_definition_changed(mariadb):
+    api = RealApi(mariadb, start=T0)
+    profile = HISTORY_PROFILES_BY_IDENTITY["TOP21"]
+    _seed_stale_member(api.storage, "TOP21", profile.expected_topic, profile.profile_version)
+
+    body = api.body("/api/v1/optional-history/selection")
+    assert [m["identity"] for m in body["head_members"]] == ["TOP21"]
+    assert body["head_members"][0]["blocked_reason"] == "profile_definition_changed"
+    # The historical row remains selected by the policy timeline; it is blocked, not removed.
+    assert [m["identity"] for m in body["active_members"]] == ["TOP21"]
+
+
+def test_put_fails_closed_on_stored_definition_conflict(mariadb):
+    api = RealApi(mariadb, start=T0)
+    profile = HISTORY_PROFILES_BY_IDENTITY["TOP21"]
+    _seed_stale_member(api.storage, "TOP21", profile.expected_topic, profile.profile_version)
+    head_before = api.body("/api/v1/optional-history/selection")["head_revision"]["id"]
+
+    r = api.put("/api/v1/optional-history/selection", {"base_revision": head_before, "identities": ["TOP21"]})
+    assert r.status_code == 409, r.text
+
+    after = api.body("/api/v1/optional-history/selection")
+    assert after["head_revision"]["id"] == head_before  # no new revision, head unmoved
+    with api.storage._connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT unit, kind FROM optional_series WHERE identity = 'TOP21'")
+        assert cur.fetchone() == ("K", "last")  # the old row was never mutated
+
+
+def test_ambiguous_replay_fails_closed_when_stored_definition_was_altered(mariadb):
+    """An ordinary idempotent replay (§25.2.8 Part 13) must not bypass the semantic check:
+    if the persisted series no longer matches current code, the retry fails closed, never
+    a false idempotent 200."""
+    api = RealApi(mariadb, start=T0)
+    r1 = api.put("/api/v1/optional-history/selection", {"base_revision": 1, "identities": ["TOP21"]}, t=T0)
+    assert r1.status_code == 200, r1.text
+
+    # Simulate the code's TOP21 semantics having changed since this row was written (a version
+    # bump the deployer forgot), by altering the already-persisted row directly.
+    with api.storage._connection() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE optional_series SET unit = 'K' WHERE identity = 'TOP21'")
+        conn.commit()
+
+    r2 = api.put("/api/v1/optional-history/selection", {"base_revision": 1, "identities": ["TOP21"]})
+    assert r2.status_code == 409, r2.text

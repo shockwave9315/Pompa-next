@@ -167,6 +167,9 @@ class FakeSession:
         self.optional_series_by_key[key] = series_id
         return series_id
 
+    def lock_series(self, series_id):
+        return self.optional_series.get(series_id)
+
     def insert_revision(self, base_revision_id, effective_from_minute, created_at):
         if effective_from_minute % 60:
             raise ValueError(f"unaligned effective_from_minute {effective_from_minute}")

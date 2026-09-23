@@ -19,7 +19,9 @@ from . import optional_policy
 from .capabilities import capability_dict, effective_capabilities
 from .history_profile import HISTORY_PROFILES, capability_topics, history_profile_dict
 from .minute import MINUTE, iso_utc
-from .optional_policy import MemberInfo, RevisionInfo, SelectionView, StaleBaseRevision
+from .optional_policy import (
+    MemberInfo, RevisionInfo, SelectionView, SeriesDefinitionConflict, StaleBaseRevision,
+)
 from .recorder import Recorder
 from .storage import Storage, StorageUnavailable
 from .timegrid import BUCKETS, Unrepresentable, local_midnight, purge_cutoff
@@ -175,7 +177,7 @@ def create_app(recorder: Recorder, storage: Storage, clock: Callable[[], float] 
         try:
             result = optional_policy.replace_selection(
                 recorder, storage, body.base_revision, body.identities, clock)
-        except StaleBaseRevision as e:
+        except (StaleBaseRevision, SeriesDefinitionConflict) as e:
             raise HTTPException(status_code=409, detail=str(e)) from None
         except ValueError as e:
             raise _bad(str(e)) from None
