@@ -141,13 +141,12 @@ def test_rollup_schema_is_the_approved_table(mariadb):
         assert cur.fetchone() == ("InnoDB",)
         cur.execute("SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()"
                     " ORDER BY TABLE_NAME")
-        # The two canonical history tables plus exactly the Stage 4B checkpoint B policy tables
-        # (docs/ARCHITECTURE.md §25.2.1); no optional_sample_1m/optional_rollup_1h yet, no
-        # undocumented table.
+        # Canonical history, policy tables, and Checkpoint C optional raw; no optional rollup.
         assert cur.fetchall() == (
             ("optional_policy_head",),
             ("optional_policy_member",),
             ("optional_policy_revision",),
+            ("optional_sample_1m",),
             ("optional_series",),
             ("rollup_1h",),
             ("sample_1m",),

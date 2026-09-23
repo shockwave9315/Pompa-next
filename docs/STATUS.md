@@ -2,10 +2,9 @@
 
 ## Current stage
 
-**Stage 4B — checkpoint B DONE.** Configurable optional history. Checkpoint B adds the
-`HistoryProfile` domain model and the production immutable policy timeline/selection API; no
-optional value is recorded, aggregated or queryable yet — there is still no `OptionalAccumulator`
-and no `optional_sample_1m` table. Frontend work starts after Stage 4.
+**Stage 4B — checkpoint C DONE.** Configurable optional history now records selected, known
+optional minute values internally beside canonical minutes. Optional rollup, purge and history
+query remain for checkpoint D. Frontend work starts after Stage 4.
 
 Stage 4A — DONE and merged to `main` (PR #6, merge commit
 `a34aaead89fae3359769cf2737aab42fd274d145`).
@@ -73,10 +72,8 @@ expected unrecorded partial minute. No optional capability was persisted.
 
 ## Stage 4B
 
-**Checkpoint A (architecture/contract freeze) and checkpoint B (policy foundation) — DONE.** Not
-yet the optional recorder implementation: no `OptionalAccumulator`, no `optional_sample_1m` table,
-no optional value is ever read, written or computed. Branch `stage-4b-optional-history`, draft
-PR #7, not merged.
+**Checkpoints A (architecture/contract), B (policy foundation), and C (raw recording) — DONE.**
+Branch `stage-4b-optional-history`, draft PR #7, not merged.
 
 ### Implemented
 
@@ -113,15 +110,23 @@ PR #7, not merged.
   alone. The golden fingerprint map is now keyed by `(identity, profile_version)` and append-only.
 - Full backend suite verified against real MariaDB; every MariaDB-gated test skips cleanly without
   `POMPA_TEST_DB_HOST`.
+- Checkpoint C continuously tracks separate optional source evidence for every current
+  `HistoryProfile`, integrates it in an independent `OptionalAccumulator`, and queues one immutable
+  `RecordedMinute` pair per canonical recorded minute. Optional source expiry does not segment
+  canonical accumulation.
+- One head-first locking transaction resolves current policy membership at persist time, writes
+  canonical and selected-known optional raw together, and retains the same protected retry,
+  refusal, and bounded waiting semantics. `optional_sample_1m` stores deterministic complete JSON
+  keyed by stable series id; a restrictive FK enforces its canonical subset relation. Blocked or
+  unknown selected members have no JSON key; zero remains a known value.
+- Canonical rollup continues. A transitional purge guard refuses any deletion range containing
+  optional raw until checkpoint D implements optional rollup and combined proof/deletion.
 
 ### Deferred
 
 See `docs/ARCHITECTURE.md` §25.2.8: the complete eligible profile list, optional-power energy
 beyond `XTOP1`/`XTOP4`, and a max-selection-count remain open questions. Remaining checkpoints:
 
-- **Checkpoint C:** continuous optional source state; `OptionalAccumulator`; pairing with canonical
-  minutes; `optional_sample_1m` JSON persistence; one protected/waiting write path; atomic
-  canonical + optional raw persistence.
 - **Checkpoint D:** `optional_rollup_1h`; late-hour rebuild; purge proof/integration; optional
   history query through the existing history algebra/API.
 - **Checkpoint E:** full tests/docs; owner CT109 runtime validation; publication-gap evidence;
@@ -129,13 +134,12 @@ beyond `XTOP1`/`XTOP4`, and a max-selection-count remain open questions. Remaini
 
 ## Out of scope
 
-- Optional-history runtime recording, logging-selection API, event engine, reports and SET
-  publishing.
+- Optional rollup/history query, event engine, reports and SET publishing.
 - Frontend and legacy compatibility or historical migration.
 - Changing the 21 canonical metric semantics, Stage 1–4A history invariants, or the 365-day
   default raw retention.
 
 ## Next
 
-Checkpoint C of Stage 4B: `OptionalAccumulator` and continuous optional source state, building on
-the checkpoint A/B foundation. See `docs/ROADMAP.md` for later stages.
+Checkpoint D of Stage 4B: `optional_rollup_1h`, late-hour rebuild, shared purge proof/deletion,
+and optional history query/algebra. See `docs/ROADMAP.md` for later stages.

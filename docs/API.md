@@ -3,7 +3,8 @@
 The default contract of Pompa Next was frozen at Stage 3. Stage 4A adds the opt-in capability and
 physical-reading forms described below while preserving those default response semantics. Stage 4B
 checkpoint B adds one opt-in metrics form and one new DB-backed endpoint pair for the
-optional-history policy; it adds no optional value recording, history query or CT109 change.
+optional-history policy. Checkpoint C adds internal raw minute recording; it adds no optional
+history query or CT109 change.
 
 Domain rules behind it are in [`ARCHITECTURE.md`](ARCHITECTURE.md). This file describes only what
 the HTTP surface promises.
@@ -402,13 +403,14 @@ Activity/events, reports and commands belong to later Stage 4 checkpoints. This 
 endpoint or response for them until implemented and contract-tested. The frontend starts only
 after the complete product-backend contract is documented.
 
-## Stage 4B checkpoint B: optional-history policy
+## Stage 4B optional-history selection
 
 Checkpoint A froze the architecture (`ARCHITECTURE.md` §25.2.1); checkpoint B implements the
-`HistoryProfile` domain model, the production immutable policy timeline, and this API. **No
-optional value is recorded, aggregated or queryable yet** — there is no `OptionalAccumulator`, no
-`optional_sample_1m` table and no history endpoint for optional series. These endpoints only
-declare and inspect *selection*, never persisted optional readings.
+`HistoryProfile` domain model, the production immutable policy timeline, and this API. Checkpoint C
+may record selected optional values internally in `optional_sample_1m` for canonical
+recorded minutes. There is still no optional historical query or optional energy output. These
+endpoints declare and inspect *selection*; default `/live`, `/metrics`, `/status`, and `/history`
+response shapes are unchanged, and raw optional JSON is not exposed publicly.
 
 ### `GET /api/v1/metrics?include=history_profiles`
 

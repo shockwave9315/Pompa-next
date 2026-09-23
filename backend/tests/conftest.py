@@ -74,6 +74,7 @@ class FakeSession:
         self.optional_revisions = dict(storage.optional_revisions)
         self.optional_members = {k: set(v) for k, v in storage.optional_members.items()}
         self.optional_head = storage.optional_head
+        self.optional_raw = dict(storage.optional_raw)
 
     def upsert_minutes(self, rows):
         for r in rows:
@@ -94,10 +95,25 @@ class FakeSession:
         return (min(self.rows), max(self.rows)) if self.rows else (None, None)
 
     def delete_minutes_before(self, cutoff):
+        if any(t < cutoff for t in self.optional_raw):
+            raise ValueError("optional raw FK would reject canonical deletion")
         doomed = [t for t in self.rows if t < cutoff]
         for t in doomed:
             del self.rows[t]
         return len(doomed)
+
+    def replace_optional_minute(self, ts, values):
+        if values:
+            assert ts in self.rows
+            self.optional_raw[ts] = dict(values)
+        else:
+            self.optional_raw.pop(ts, None)
+
+    def read_optional_minutes(self, start, end):
+        return [(t, dict(v)) for t, v in sorted(self.optional_raw.items()) if start <= t < end]
+
+    def first_optional_minute(self, start, end):
+        return min((t for t in self.optional_raw if start <= t < end), default=None)
 
     def rolled_until(self):
         return max(h for h, _ in self.rollup) + 3600 if self.rollup else None
@@ -218,6 +234,7 @@ class FakeStorage:
         self.optional_revisions = {1: (1, None, 0, 0)}  # id -> (id, base_id, effective_from, created_at)
         self.optional_members = {1: set()}  # revision_id -> {series_id}
         self.optional_head = 1
+        self.optional_raw = {}
         self._next_optional_series_id = 1
         self._next_optional_revision_id = 2
 
@@ -246,6 +263,7 @@ class FakeStorage:
         self.optional_series, self.optional_series_by_key = tx.optional_series, tx.optional_series_by_key
         self.optional_revisions, self.optional_members = tx.optional_revisions, tx.optional_members
         self.optional_head = tx.optional_head
+        self.optional_raw = tx.optional_raw
 
     @contextmanager
     def session(self):
@@ -361,6 +379,7 @@ def mariadb():
         cur.execute("DROP TABLE IF EXISTS optional_policy_head")
         cur.execute("DROP TABLE IF EXISTS optional_policy_revision")
         cur.execute("DROP TABLE IF EXISTS optional_series")
+        cur.execute("DROP TABLE IF EXISTS optional_sample_1m")
         cur.execute("DROP TABLE IF EXISTS sample_1m")
         cur.execute("DROP TABLE IF EXISTS rollup_1h")
         conn.commit()

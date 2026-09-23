@@ -1,4 +1,4 @@
-"""MariaDB storage: DDL and parameterized queries for ``sample_1m`` and ``rollup_1h``.
+"""MariaDB storage: canonical history, optional raw history and policy tables.
 
 No domain calculations live here; rollup contents are computed by
 ``aggregation`` and passed in as plain tuples.
@@ -11,6 +11,7 @@ its reads share one snapshot and its writes commit together or not at all.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
@@ -27,6 +28,16 @@ assert all(_IDENT.match(k) for k in RECORDED_KEYS)
 
 TABLE = "sample_1m"
 ROLLUP = "rollup_1h"
+OPTIONAL_RAW = "optional_sample_1m"
+
+OPTIONAL_RAW_DDL = (
+    f"CREATE TABLE IF NOT EXISTS {OPTIONAL_RAW} ("
+    " ts INT UNSIGNED NOT NULL PRIMARY KEY,"
+    " values_json JSON NOT NULL CHECK (JSON_VALID(values_json)),"
+    f" CONSTRAINT fk_optional_raw_canonical FOREIGN KEY (ts) REFERENCES {TABLE}(ts)"
+    " ON DELETE RESTRICT"
+    ") ENGINE=InnoDB"
+)
 
 # (series, n, v_sum, v_min, v_max, v_last)
 RollupValues = tuple[str, int, float, float, float, float]
@@ -44,8 +55,7 @@ ROLLUP_DDL = (
     ") ENGINE=InnoDB"
 )
 
-# Stage 4B checkpoint B: production policy tables (docs/ARCHITECTURE.md §25.2.1). No
-# optional_sample_1m/optional_rollup_1h yet (checkpoints C/D). Series/revisions/members are
+# Stage 4B checkpoint B: production policy tables (docs/ARCHITECTURE.md §25.2.1). Series/revisions/members are
 # immutable after insert: only OPTIONAL_POLICY_HEAD.revision_id is ever UPDATEd.
 OPTIONAL_SERIES = "optional_series"
 OPTIONAL_POLICY_REVISION = "optional_policy_revision"
@@ -204,6 +214,29 @@ class Session:
     def delete_minutes_before(self, cutoff: int) -> int:
         self._cur.execute(f"DELETE FROM {TABLE} WHERE ts < %s", (cutoff,))
         return self._cur.rowcount
+
+    def replace_optional_minute(self, ts: int, values: dict[str, float]) -> None:
+        """Replace the complete JSON document, or delete an empty selected-known minute."""
+        if ts % MINUTE:
+            raise ValueError(f"unaligned minute ts {ts}")
+        if not values:
+            self._cur.execute(f"DELETE FROM {OPTIONAL_RAW} WHERE ts = %s", (ts,))
+            return
+        document = json.dumps(values, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        self._cur.execute(
+            f"INSERT INTO {OPTIONAL_RAW} (ts, values_json) VALUES (%s, %s)"
+            " ON DUPLICATE KEY UPDATE values_json = VALUES(values_json)", (ts, document))
+
+    def read_optional_minutes(self, start: int, end: int) -> list[tuple[int, dict[str, float]]]:
+        self._cur.execute(f"SELECT ts, values_json FROM {OPTIONAL_RAW}"
+                          " WHERE ts >= %s AND ts < %s ORDER BY ts", (start, end))
+        return [(int(ts), json.loads(document)) for ts, document in self._cur.fetchall()]
+
+    def first_optional_minute(self, start: int, end: int) -> int | None:
+        self._cur.execute(f"SELECT ts FROM {OPTIONAL_RAW} WHERE ts >= %s AND ts < %s"
+                          " ORDER BY ts LIMIT 1", (start, end))
+        row = self._cur.fetchone()
+        return None if row is None else int(row[0])
 
     # ---------------------------------------------------------------- rollup_1h
 
@@ -478,8 +511,8 @@ class Storage:
     def ensure_schema(self) -> None:
         """Create the tables or add missing recorded columns. Never drops anything.
 
-        Also creates the Stage 4B checkpoint B optional-history policy tables
-        (§25.2.1) and, idempotently, their one immutable genesis revision: an
+        Also creates the Stage 4B optional-history policy and raw tables
+        (§25.2.1, §25.2.10) and, idempotently, one immutable genesis revision: an
         empty selection, effective from the beginning of time, with the
         singleton head already pointing at it. Canonical ``sample_1m``/
         ``rollup_1h`` schema and data are never touched by this addition.
@@ -500,6 +533,7 @@ class Storage:
             cur.execute(OPTIONAL_POLICY_REVISION_DDL)
             cur.execute(OPTIONAL_POLICY_MEMBER_DDL)
             cur.execute(OPTIONAL_POLICY_HEAD_DDL)
+            cur.execute(OPTIONAL_RAW_DDL)
             cur.execute(
                 f"INSERT IGNORE INTO {OPTIONAL_POLICY_REVISION}"
                 " (id, base_revision_id, effective_from_minute, created_at)"

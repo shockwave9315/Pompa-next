@@ -977,6 +977,59 @@ minute opens. A policy PUT may commit while a minute is already open; only a per
 resolution can be correct for that minute without retroactively reclassifying anything already
 committed (§25.2.1's required race property).
 
+#### 25.2.10 Checkpoint C — optional raw recording (DONE)
+
+`Ingest.optional_sources` holds one history-specific source state for every current
+`HistoryProfile`, separate from canonical `Ingest.sources`. It tracks `seen_live`, the latest
+non-retained numeric value or unknown, and its receive time. Every profile is observed from process
+start independent of policy selection. Retained deliveries still update the Stage 4A physical live
+reading, but never establish optional history. A non-retained sentinel or rejected payload replaces
+the previous optional value with unknown. Reconnect, disconnect, Offline LWT (retained or not), and
+detected backward clock steps invalidate confirmed optional values. Fresh optional values require
+connection, non-Offline LWT, current-epoch non-retained evidence, a known value and the same
+half-open 600-second source-life window as canonical history. Optional expiry queries never enter
+canonical `Ingest.next_expiry_after`.
+
+`OptionalAccumulator` has its own cursor, UTC minute boundary, expiry walk, per-profile mean sum,
+whole-minute validity and final-segment value, and open-minute poison state. It receives the same
+pre-event recorder timestamps as `MinuteAccumulator` and computes all profiles without policy or
+database access. A mean is known only for a wholly valid minute and is rounded to six decimals;
+`last` uses the final segment even if an earlier segment was unknown. Its optional expiry splits
+cannot change canonical segmentation or floating-point arithmetic. On a backward clock correction,
+the open optional minute is poisoned if it already integrated pre-correction time, and its source
+evidence is invalidated; the following non-retained event may establish fresh evidence.
+
+The recorder pairs only an optional minute whose `ts` equals a canonical `MinuteRow.ts`; it
+discards optional-only results and supplies an empty optional fact for a canonical minute with no
+optional result. One immutable `RecordedMinute` pair enters the existing single waiting/protected
+queue. Overflow drops the whole never-submitted pair; ambiguous failure protects and retries the
+same pair; `RebuildRefused` removes whole permanently unwritable pairs. Existing row counters
+remain counts of canonical minutes.
+
+`optional_sample_1m(ts INT UNSIGNED PRIMARY KEY, values_json JSON NOT NULL)` is created
+idempotently. Its restrictive foreign key to `sample_1m(ts)` enforces
+`optional_sample_1m.ts ⊆ sample_1m.ts` without cascade deletion. Each JSON object contains only
+selected, unblocked, known values under string-encoded persistent `series_id` keys. Deterministic
+encoding uses sorted keys, compact separators and `allow_nan=False`; an empty document is deleted,
+and an upsert replaces the complete prior document. A selected unknown value has no key (or no
+optional row if no other value is known); real zero is stored as `0.0`.
+
+For each write batch, `persist` locks `optional_policy_head` first, then loads the immutable
+revision/member chain through current/locking reads, resolving each minute by the latest descendant
+effective at its own `ts` (including same-boundary ties). It checks each selected series snapshot
+against the current profile and capability topic; any drift is selected-but-unknown for that
+minute. The transaction checks for purged rolled hours before any upsert, writes canonical raw,
+then optional raw, and corrects touched canonical rolled hours atomically. Optional storage failure
+rolls back both; ambiguous retries repeat whole-document replacement from the same protected pair.
+Policy membership is never captured at minute-open, close or queue time.
+
+Until checkpoint D has `optional_rollup_1h` and a shared purge proof, the existing canonical purge
+fails closed for any deletion range containing optional raw. It deletes neither canonical nor
+optional raw in that operation. Canonical-only old ranges still purge as before. Canonical hourly
+rollup continues normally, including through hours with optional raw, so that evidence remains
+available for D to construct optional rollups later. No optional history query, kWh output or
+optional raw public API exists in checkpoint C.
+
 ### 25.3 Stage 4C — one activity interpretation and durable events
 
 **Frozen direction:** One backend interpretation serves friendly operational state, CO/CWU

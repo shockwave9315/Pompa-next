@@ -1,11 +1,9 @@
-"""Stage 4B checkpoint B: the optional-history policy domain (``docs/ARCHITECTURE.md`` §25.2.1).
+"""Stage 4B optional-history policy domain (``docs/ARCHITECTURE.md`` §25.2.1).
 
 SQL mechanics live in ``storage.Session``; this module owns policy *meaning*:
 resolving ``effective_from_minute``, replacing the selection under the one
 database serialization point, and reporting active-versus-pending selection
-with per-member drift/blocking. No optional value is read, written or
-computed here — checkpoint B adds no ``OptionalAccumulator`` and no
-``optional_sample_1m`` persistence.
+with per-member drift/blocking. Minute values are computed elsewhere.
 """
 
 from __future__ import annotations
@@ -157,6 +155,31 @@ def _resolve_active_revision_id(storage_session, head_id: int, minute_ts: int) -
         if effective_from <= minute_ts or base_id is None:
             return rid
         revision_id = base_id
+
+
+def locked_timeline(session, head_id: int, minute_timestamps: Sequence[int]) -> dict[int, tuple[SeriesRow, ...]]:
+    """Resolve one batch from current/locking revision and member reads after the head lock.
+
+    The chain is loaded once, newest descendant first. Equal effective boundaries
+    naturally prefer the first (newest) matching revision.
+    """
+    if not minute_timestamps:
+        return {}
+    chain: list[tuple[int, tuple[SeriesRow, ...]]] = []
+    revision_id = head_id
+    while True:
+        row = session.lock_revision(revision_id)
+        if row is None:
+            raise RuntimeError(f"optional policy revision chain broken at {revision_id}")
+        rid, base_id, effective_from, _ = row
+        chain.append((effective_from, tuple(session.lock_revision_members(rid))))
+        if base_id is None:
+            break
+        revision_id = base_id
+    resolved = {}
+    for ts in minute_timestamps:
+        resolved[ts] = next(members for effective_from, members in chain if effective_from <= ts)
+    return resolved
 
 
 def read_selection(storage: Storage, now: float) -> SelectionView:
