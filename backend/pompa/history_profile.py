@@ -61,6 +61,8 @@ class HistoryProfile:
             raise ValueError(f"{self.identity} already serves a canonical metric source")
         if self.profile_version < 1:
             raise ValueError(f"{self.identity}: profile_version must be positive")
+        if self.energy and self.kind != "mean":
+            raise ValueError(f"{self.identity}: energy requires kind='mean'")
         if not all(math.isfinite(s) for s in self.sentinels):
             raise ValueError(f"{self.identity}: sentinels must be finite")
         if self.min_value is not None and not math.isfinite(self.min_value):

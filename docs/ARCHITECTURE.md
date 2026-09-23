@@ -818,7 +818,7 @@ XTOP1, XTOP4 — each evidenced from the tracked reference and/or an explicit (n
 catalog fact, or an explicitly labelled project design choice; never a topic/description substring,
 a payload's generic Stage 4A `kind`, or a physically-plausible guess. `__post_init__` additionally
 rejects a non-positive `profile_version`, a canonical-source identity, a non-finite sentinel or
-min/max, and an inverted `min_value > max_value` range.
+min/max, an inverted `min_value > max_value` range, or `energy=true` with a kind other than `mean`.
 
 The six temperature profiles share the canonical `{-78, -128}` sentinel pair. Evidence is kept
 precisely separated by claim: the tracked `MQTT-Topics.md` documents each identity, topic and its

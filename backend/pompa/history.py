@@ -50,7 +50,7 @@ COP_LABELS = {"cop_co": "COP CO", "cop_dhw": "COP CWU", "cop_total": "COP łącz
 HISTORY_SERIES: tuple[str, ...] = RECORDED_KEYS + tuple(COP_SERIES)
 HOURLY_BUCKETS = ("1h", "1d", "total")
 COP_FIELDS: tuple[str, ...] = ("cop", "paired_minutes", "input_kwh", "output_kwh")
-OPTIONAL_SELECTOR = re.compile(r"^optional:([A-Z][A-Z0-9]*)@([1-9][0-9]*)$")
+OPTIONAL_SELECTOR = re.compile(r"^optional:([A-Z][A-Z0-9]*)@([1-9][0-9]{0,9})$")
 
 
 class HistoryRequestError(ValueError):

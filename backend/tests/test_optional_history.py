@@ -55,6 +55,25 @@ def test_selector_parser_and_default_contract():
                                                 "series": "optional:TOP21@1"}).status_code == 400
 
 
+@pytest.mark.parametrize("version,grammar_valid,status", [
+    ("1", True, 200),
+    ("4294967295", True, 400),  # INT UNSIGNED ceiling, no persisted meaning
+    ("4294967296", True, 400),  # 10 digits but beyond INT UNSIGNED, still an unknown meaning
+    ("10000000000", False, 400),  # 11 digits
+    ("9" * 5000, False, 400),
+    ("0001", False, 400),
+])
+def test_optional_selector_version_boundary(version, grammar_valid, status):
+    selector = f"optional:TOP21@{version}"
+    assert bool(history.OPTIONAL_SELECTOR.fullmatch(selector)) is grammar_valid
+    api = Api(start=T0)
+    select(api.storage, ["TOP21"], T0)
+    response = api.get("/api/v1/history", None, **{
+        "from": "2027-01-15T08:00:00Z", "to": "2027-01-15T08:01:00Z",
+        "series": selector})
+    assert response.status_code == status
+
+
 def test_series_discovery_is_persisted_and_mqtt_independent(mariadb):
     db = mariadb
     db.ensure_schema()

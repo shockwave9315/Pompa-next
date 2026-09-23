@@ -138,6 +138,17 @@ def test_only_two_identities_carry_energy_true():
     assert {p.identity for p in HISTORY_PROFILES if p.energy} == {"XTOP1", "XTOP4"}
 
 
+def test_optional_energy_requires_mean_kind():
+    base = HISTORY_PROFILES_BY_IDENTITY["XTOP1"]
+    with pytest.raises(ValueError, match="energy requires kind='mean'"):
+        HistoryProfile(base.identity, base.expected_topic, base.profile_version, base.label,
+                       base.unit, "last", base.semantic_type, base.sentinels,
+                       base.min_value, base.max_value, True)
+    assert HistoryProfile(base.identity, base.expected_topic, base.profile_version, base.label,
+                          base.unit, "mean", base.semantic_type, base.sentinels,
+                          base.min_value, base.max_value, True) == base
+
+
 def test_history_profile_rejects_a_canonical_source_identity():
     from pompa.history_profile import HistoryProfile
 
