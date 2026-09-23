@@ -1,12 +1,17 @@
+import math
+import threading
+from contextlib import contextmanager
+
 import pytest
 
-from conftest import Api, T0, FakeStorage, row
+from conftest import Api, T0, FakeStorage, row, recorded
 from pompa.history_profile import HISTORY_PROFILES_BY_IDENTITY
 from pompa.ingest import Ingest
 from pompa.minute import MinuteAccumulator
 from pompa.optional_minute import OptionalMinute
 from pompa.optional_policy import replace_selection, resolve_series_id
 from pompa.recorder import RecordedMinute, Recorder, PurgeRefused, persist, purge_step, roll_next_hour
+from pompa.storage import Session
 from pompa.storage import StorageUnavailable
 from pompa.timegrid import HOUR
 
@@ -222,7 +227,8 @@ def test_waiting_overflow_discards_whole_pair():
 
 def test_rebuild_refusal_removes_whole_pair():
     db = FakeStorage()
-    persist(db, [row(T0, outside_temp=1.0), row(T0 + 3 * HOUR, outside_temp=2.0)])
+    persist(db, [recorded(row(T0, outside_temp=1.0)),
+                 recorded(row(T0 + 3 * HOUR, outside_temp=2.0))])
     assert roll_next_hour(db, T0 + HOUR) == T0
     assert roll_next_hour(db, T0 + 4 * HOUR) == T0 + 3 * HOUR
     assert purge_step(db, T0 + 100 * HOUR, 1, None, 24)[1] == 1
@@ -255,3 +261,243 @@ def test_optional_events_and_expiry_do_not_change_canonical():
         return {ts: {key: None if value is None else value.hex() for key, value in values.items()}
                 for ts, values in rows.items()}
     assert bits(baseline.storage.rows) == bits(changed.storage.rows)
+
+
+@pytest.mark.parametrize("changes", [
+    [(0, "1e307")],
+    [(0, "1e307"), (30, "-1e307")],
+])
+def test_nonfinite_optional_mean_never_poison_production_recorder(mariadb, changes):
+    db = mariadb
+    db.ensure_schema()
+    select(db, ["TOP64"], T0)
+    ing = Ingest(600)
+    rec = Recorder(ing, MinuteAccumulator(ing, T0), db, 4)
+    rec.on_connect(T0)
+    rec.on_message("main/Main_Outlet_Temp", "35", False, T0)
+    for offset, value in changes:
+        rec.on_message("main/High_Pressure", value, False, T0 + offset)
+    rec.tick(T0 + 60)  # no exception escapes and the protected batch clears
+    with db.session() as s:
+        assert len(s.read_minutes(T0, T0 + 60)) == 1
+        assert s.read_optional_minutes(T0, T0 + 60) == []
+    assert rec._protected == [] and rec.rows_written == 1
+    rec.tick(T0 + 120)
+    with db.session() as s:
+        assert len(s.read_minutes(T0, T0 + 120)) == 2
+        assert s.read_optional_minutes(T0, T0 + 120) == []
+    assert rec._protected == [] and rec.rows_written == 2
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan")])
+def test_defensive_persist_omits_nonfinite_optional_fact(any_storage, bad):
+    db = any_storage
+    select(db, ["TOP64"], T0)
+    persist(db, [pair(T0, TOP64=bad)])
+    with db.session() as s:
+        assert len(s.read_minutes(T0, T0 + 60)) == 1
+        assert s.read_optional_minutes(T0, T0 + 60) == []
+
+
+def test_fake_optional_json_rejects_nonfinite_like_production():
+    db = FakeStorage()
+    with pytest.raises(ValueError):
+        with db.session() as s:
+            s.rows[T0] = row(T0).values
+            s.replace_optional_minute(T0, {"1": math.inf})
+    assert db.optional_raw == {}
+
+
+def test_persist_requires_explicit_recorded_minute_pair():
+    db = FakeStorage()
+    with pytest.raises(TypeError, match="RecordedMinute"):
+        persist(db, [row(T0)])
+    assert db.rows == {}
+
+
+def _roll_all(db, closed_before):
+    while roll_next_hour(db, closed_before) is not None:
+        pass
+
+
+def _old_raw(db, *pairs):
+    db.ensure_schema()
+    persist(db, list(pairs))
+    _roll_all(db, T0 + 4 * HOUR)
+
+
+def _purge_old(db, max_hours=2):
+    return purge_step(db, T0 + 100 * HOUR, 1, None, max_hours)
+
+
+def test_purge_canonical_only_and_empty_selection(mariadb):
+    db = mariadb
+    db.ensure_schema()
+    select(db, [], T0)  # a non-genesis but empty revision is still empty selection
+    _old_raw(db, pair(T0), pair(T0 + 3 * HOUR))
+    assert _purge_old(db)[1] == 1
+    with db.session() as s:
+        assert s.read_minutes(T0, T0 + 60) == []
+        assert len(s.read_minutes(T0 + 3 * HOUR, T0 + 3 * HOUR + 60)) == 1
+
+
+@pytest.mark.parametrize("known", [True, False])
+def test_purge_preserves_selected_known_and_unknown(mariadb, known):
+    db = mariadb
+    db.ensure_schema()
+    select(db, ["TOP21"], T0)
+    _old_raw(db, pair(T0, **({"TOP21": 4.0} if known else {})), pair(T0 + 3 * HOUR))
+    with pytest.raises(PurgeRefused):
+        _purge_old(db)
+    with db.session() as s:
+        assert len(s.read_minutes(T0, T0 + 60)) == 1
+        assert bool(s.read_optional_minutes(T0, T0 + 60)) is known
+
+
+def test_purge_mid_hour_selection_unknown_blocks_actual_minute(mariadb):
+    db = mariadb
+    db.ensure_schema()
+    select(db, ["TOP21"], T0 + 30 * 60)
+    _old_raw(db, pair(T0), pair(T0 + 30 * 60), pair(T0 + 3 * HOUR))
+    with pytest.raises(PurgeRefused):
+        _purge_old(db, max_hours=1)
+    with db.session() as s:
+        assert len(s.read_minutes(T0, T0 + HOUR)) == 2
+        assert s.read_optional_minutes(T0, T0 + HOUR) == []
+
+
+def test_purge_uses_persisted_selection_even_if_profile_disappears(mariadb, monkeypatch):
+    db = mariadb
+    db.ensure_schema()
+    select(db, ["TOP21"], T0)
+    _old_raw(db, pair(T0), pair(T0 + 3 * HOUR))
+    monkeypatch.setattr("pompa.recorder.HISTORY_PROFILES_BY_IDENTITY", {})
+    with pytest.raises(PurgeRefused):
+        _purge_old(db)
+
+
+def test_purge_optional_row_later_in_same_chunk_refuses_all(mariadb):
+    db = mariadb
+    db.ensure_schema()
+    select(db, ["TOP21"], T0 + HOUR)
+    _old_raw(db, pair(T0), pair(T0 + HOUR, TOP21=5.0), pair(T0 + 3 * HOUR))
+    with pytest.raises(PurgeRefused):
+        _purge_old(db, max_hours=2)
+    with db.session() as s:
+        assert len(s.read_minutes(T0, T0 + HOUR + 60)) == 2
+        assert len(s.read_optional_minutes(T0, T0 + HOUR + 60)) == 1
+
+
+def test_purge_optional_row_exactly_at_end_does_not_block(mariadb):
+    db = mariadb
+    db.ensure_schema()
+    select(db, ["TOP21"], T0 + 2 * HOUR)
+    _old_raw(db, pair(T0), pair(T0 + 2 * HOUR, TOP21=6.0), pair(T0 + 3 * HOUR))
+    assert _purge_old(db, max_hours=2)[1] == 1
+    with db.session() as s:
+        assert s.read_minutes(T0, T0 + 60) == []
+        assert len(s.read_optional_minutes(T0 + 2 * HOUR, T0 + 2 * HOUR + 60)) == 1
+
+
+def test_production_persist_blocks_put_until_committed(mariadb, monkeypatch):
+    db = mariadb
+    db.ensure_schema()
+    base = select(db, ["TOP21"], T0)
+    ing = Ingest(600)
+    recorder = Recorder(ing, MinuteAccumulator(ing, T0), db, 2)
+    persist_locked = threading.Event()
+    release_persist = threading.Event()
+    put_attempted = threading.Event()
+    put_finished = threading.Event()
+    failures = []
+    result = {}
+    original = Session.lock_policy_head
+
+    def observed_lock(session):
+        if threading.current_thread().name == "persist_writer":
+            head = original(session)
+            persist_locked.set()
+            if not release_persist.wait(5):
+                raise AssertionError("persist lock release timed out")
+            return head
+        if threading.current_thread().name == "policy_put":
+            put_attempted.set()
+        return original(session)
+
+    monkeypatch.setattr(Session, "lock_policy_head", observed_lock)
+
+    def writer():
+        try:
+            persist(db, [pair(T0, TOP21=12.0)])
+        except BaseException as e:
+            failures.append(e)
+
+    def putter():
+        try:
+            result["put"] = replace_selection(recorder, db, base, [], lambda: T0 + 27)
+        except BaseException as e:
+            failures.append(e)
+        finally:
+            put_finished.set()
+
+    first = threading.Thread(target=writer, name="persist_writer")
+    second = threading.Thread(target=putter, name="policy_put")
+    first.start()
+    try:
+        assert persist_locked.wait(5)
+        second.start()
+        assert put_attempted.wait(5)
+        assert not put_finished.wait(0.2), "PUT finished while persist held the production head lock"
+    finally:
+        release_persist.set()
+    first.join(5)
+    second.join(5)
+    assert not first.is_alive() and not second.is_alive() and not failures
+    assert result["put"].revision.effective_from_minute > T0
+    with db.session() as s:
+        assert len(s.read_minutes(T0, T0 + 60)) == 1
+        assert list(s.read_optional_minutes(T0, T0 + 60)[0][1].values()) == [12.0]
+
+
+def test_lost_ack_then_put_then_protected_retry_keeps_exact_json(mariadb):
+    db = mariadb
+    db.ensure_schema()
+    base = select(db, ["TOP21"], T0)
+    ing = Ingest(600)
+    rec = Recorder(ing, MinuteAccumulator(ing, T0), db, 2)
+    rec.on_connect(T0)
+    rec.on_message("main/Main_Outlet_Temp", "35", False, T0)
+    rec.on_message("main/Outside_Pipe_Temp", "12.5", False, T0)
+    original = db.session
+    used = False
+
+    @contextmanager
+    def lost_ack_once():
+        nonlocal used
+        with original() as s:
+            yield s
+        if not used:
+            used = True
+            raise StorageUnavailable("ack lost after commit")
+
+    db.session = lost_ack_once
+    try:
+        rec.tick(T0 + 60)
+    finally:
+        db.session = original
+    assert used and len(rec._protected) == 1 and rec.rows_written == 0
+    protected = rec._protected[0]
+
+    def stored():
+        with db.session() as s:
+            canonical = s.read_minutes(T0, T0 + 60)
+            s._cur.execute("SELECT values_json FROM optional_sample_1m WHERE ts = %s", (T0,))
+            return canonical, s._cur.fetchone()[0]
+
+    before = stored()
+    assert before[1] is not None
+    change = replace_selection(rec, db, base, [], lambda: T0 + 65)
+    assert change.revision.effective_from_minute > T0
+    rec.tick(T0 + 60)
+    assert rec._protected == [] and rec.rows_written == 1
+    assert protected.ts == T0 and stored() == before

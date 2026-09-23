@@ -997,7 +997,11 @@ database access. A mean is known only for a wholly valid minute and is rounded t
 `last` uses the final segment even if an earlier segment was unknown. Its optional expiry splits
 cannot change canonical segmentation or floating-point arithmetic. On a backward clock correction,
 the open optional minute is poisoned if it already integrated pre-correction time, and its source
-evidence is invalidated; the following non-retained event may establish fresh evidence.
+evidence is invalidated; the following non-retained event may establish fresh evidence. A finite
+source payload can overflow the time-weighted segment or sum: any non-finite optional mean
+arithmetic makes that profile unknown for the minute, permanently for that minute. The close path
+checks the derived mean again before emitting it. Persistence also omits any unexpectedly
+non-finite optional fact. This optional domain invalidity never prevents canonical persistence.
 
 The recorder pairs only an optional minute whose `ts` equals a canonical `MinuteRow.ts`; it
 discards optional-only results and supplies an empty optional fact for a canonical minute with no
@@ -1024,11 +1028,16 @@ rolls back both; ambiguous retries repeat whole-document replacement from the sa
 Policy membership is never captured at minute-open, close or queue time.
 
 Until checkpoint D has `optional_rollup_1h` and a shared purge proof, the existing canonical purge
-fails closed for any deletion range containing optional raw. It deletes neither canonical nor
-optional raw in that operation. Canonical-only old ranges still purge as before. Canonical hourly
-rollup continues normally, including through hours with optional raw, so that evidence remains
-available for D to construct optional rollups later. No optional history query, kWh output or
-optional raw public API exists in checkpoint C.
+locks the policy head first, reads the exact candidate canonical minute timestamps and their
+persisted policy memberships with current/locking reads, and fails closed if **any** candidate
+minute was under a non-empty selection. This protects selected-known optional raw and
+selected-but-unknown evidence, including a selected minute with no `optional_sample_1m` row. The
+optional-row check remains as a second guard. A refused operation deletes neither canonical nor
+optional raw; canonical-only old ranges still purge as before. Canonical hourly rollup continues
+normally. Until D, canonical raw remains for every recorded minute intersecting a non-empty
+optional selection so D can prove both `selected_minutes` and `known_minutes`. D replaces this
+conservative guard with `optional_rollup_1h` and shared proof/deletion. No optional history query,
+kWh output or optional raw public API exists in checkpoint C.
 
 ### 25.3 Stage 4C — one activity interpretation and durable events
 

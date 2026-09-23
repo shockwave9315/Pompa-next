@@ -1,4 +1,5 @@
 from conftest import T0
+import pytest
 
 from pompa.ingest import Ingest
 from pompa.optional_minute import OptionalAccumulator
@@ -80,3 +81,22 @@ def test_empty_open_minute_remains_usable_on_clock_step():
     acc.discard_open()
     event(ing, acc, T0, "main/Outside_Pipe_Temp", "7")
     assert acc.advance(T0 + 60)[0].values["TOP21"] == 7.0
+
+
+@pytest.mark.parametrize("changes", [
+    [(0, "1e307")],  # one segment product overflows
+    [(0, "1e307"), (10, "1e307"), (20, "1e307")],  # finite segments overflow the sum
+    [(0, "1e307"), (30, "-1e307")],  # naive infinity plus negative infinity is NaN
+])
+def test_nonfinite_derived_mean_is_unknown(changes):
+    ing, acc = setup()
+    for offset, value in changes:
+        event(ing, acc, T0 + offset, "main/High_Pressure", value)
+    minute = acc.advance(T0 + 60)[0]
+    assert minute.values["TOP64"] is None
+
+
+def test_extreme_finite_last_value_does_not_need_mean_arithmetic():
+    ing, acc = setup()
+    event(ing, acc, T0, "main/Room_Heater_Operations_Hours", "1e307")
+    assert acc.advance(T0 + 60)[0].values["TOP90"] == 1e307

@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 from contextlib import contextmanager
@@ -60,6 +61,21 @@ def minutes(start, count, step=60):
     return [sample(start + step * i, i) for i in range(count)]
 
 
+def recorded(canonical_row):
+    """Explicit empty optional fact for a canonical-only test minute."""
+    from pompa.optional_minute import OptionalMinute
+    from pompa.recorder import RecordedMinute
+
+    return RecordedMinute(canonical_row, OptionalMinute(canonical_row.ts, {}))
+
+
+def persist_canonical(storage, canonical_rows):
+    """Canonical-focused tests call production persist with explicit RecordedMinute pairs."""
+    from pompa.recorder import persist
+
+    return persist(storage, [recorded(r) for r in canonical_rows])
+
+
 class FakeSession:
     """Mirrors ``pompa.storage.Session`` over the dictionaries of a FakeStorage transaction."""
 
@@ -102,10 +118,21 @@ class FakeSession:
             del self.rows[t]
         return len(doomed)
 
+    def lock_minute_timestamps(self, start, end):
+        return sorted(t for t in self.rows if start <= t < end)
+
+    def lock_oldest_minute_ts(self):
+        return min(self.rows) if self.rows else None
+
+    def lock_rollup_counts(self, start, end, series):
+        return {h: n for (h, s), (n, *_rest) in self.rollup.items()
+                if s == series and start <= h < end}
+
     def replace_optional_minute(self, ts, values):
         if values:
             assert ts in self.rows
-            self.optional_raw[ts] = dict(values)
+            document = json.dumps(values, sort_keys=True, separators=(",", ":"), allow_nan=False)
+            self.optional_raw[ts] = json.loads(document)
         else:
             self.optional_raw.pop(ts, None)
 

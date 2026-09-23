@@ -38,7 +38,8 @@ Rollup and purge (after a tick whose flush fully succeeded):
   Raw minutes at or above it are simply not rolled yet.
 * Purge deletes whole hours below ``min(purge_cutoff, oldest pending minute's
   hour)`` and only after proving, per hour, that the rollup accounts for every
-  stored minute. Any doubt deletes nothing. The raw evidence of an hour that a
+  stored minute, and that no candidate canonical minute was under optional
+  selection. Any doubt deletes nothing. The raw evidence of an hour that a
   pending minute can still enter is therefore never purged before its rebuild.
   That proof is also what lets a surviving rollup row stand as evidence of
   deletion, which is how ``Session.first_purged_hour`` answers every path.
@@ -47,6 +48,7 @@ Rollup and purge (after a tick whose flush fully succeeded):
 from __future__ import annotations
 
 import logging
+import math
 import threading
 from collections import deque
 from collections.abc import Callable, Iterable
@@ -138,7 +140,7 @@ def rebuild_hour(session: Session, hour_ts: int) -> None:
                                           for k in SERIES if (s := folded.get(k)) is not None])
 
 
-def persist(storage: Storage, rows: list[RecordedMinute | MinuteRow]) -> None:
+def persist(storage: Storage, rows: list[RecordedMinute]) -> None:
     """Upsert minutes and rebuild every touched, already rolled hour in one transaction.
 
     A touched hour that is already rolled but whose raw evidence was already
@@ -149,22 +151,22 @@ def persist(storage: Storage, rows: list[RecordedMinute | MinuteRow]) -> None:
     and rollup untouched. ``Session.first_purged_hour`` is the one fact that
     decides it, here and on the read path.
     """
-    pairs = [r if isinstance(r, RecordedMinute) else RecordedMinute(r, OptionalMinute(r.ts, {}))
-             for r in rows]
+    if any(not isinstance(r, RecordedMinute) for r in rows):
+        raise TypeError("persist requires RecordedMinute pairs")
     with storage.session() as s:
         head_id = s.lock_policy_head()
-        timeline = locked_timeline(s, head_id, [r.ts for r in pairs])
+        timeline = locked_timeline(s, head_id, [r.ts for r in rows])
         rolled_until = s.rolled_until()
-        touched = (sorted({floor_hour(r.ts) for r in pairs if r.ts < rolled_until})
+        touched = (sorted({floor_hour(r.ts) for r in rows if r.ts < rolled_until})
                   if rolled_until is not None else [])
         refused = [h for h in touched if s.first_purged_hour(h, h + HOUR) is not None]
         if refused:
             raise RebuildRefused(
                 f"hour(s) {', '.join(iso_utc(h) for h in refused)} are rolled but their raw evidence"
                 " was already purged; refusing to rebuild them from a new partial write", refused)
-        s.upsert_minutes([r.canonical for r in pairs])
+        s.upsert_minutes([r.canonical for r in rows])
         topics = capability_topics()
-        for pair in pairs:
+        for pair in rows:
             values = {}
             for member in timeline[pair.ts]:
                 if drift_reason(member.identity, member.expected_topic, member.profile_version,
@@ -172,7 +174,7 @@ def persist(storage: Storage, rows: list[RecordedMinute | MinuteRow]) -> None:
                                 persisted_semantics=series_semantics(member)) is not None:
                     continue
                 value = pair.optional.values.get(member.identity)
-                if value is not None:
+                if value is not None and math.isfinite(value):
                     values[str(member.id)] = value
             s.replace_optional_minute(pair.ts, values)
         for hour_ts in touched:
@@ -196,23 +198,37 @@ def purge_step(storage: Storage, now: float, retention_days: int, pending_from: 
 
     Returns ``(cutoff, deleted rows, more to delete)``; ``cutoff`` is ``None``
     when nothing may be purged. Raises ``PurgeRefused`` (deleting nothing)
-    when an affected hour's rollup does not account for all its stored minutes.
+    when an affected hour's rollup is incomplete or a candidate minute was
+    under optional selection (until Checkpoint D can preserve that evidence).
     """
     with storage.session() as s:
+        head_id = s.lock_policy_head()
         cutoff = purge_cutoff(now, s.rolled_until(), retention_days)
         if cutoff is None:
             return None, 0, False
         if pending_from is not None:
             cutoff = min(cutoff, floor_hour(pending_from))
-        oldest, _ = s.minute_bounds()
+        oldest = s.lock_oldest_minute_ts()
         if oldest is None or oldest >= cutoff:
             return cutoff, 0, False
         first = floor_hour(oldest)
         end = min(cutoff, first + max_hours * HOUR)
-        for hour_ts, stored, rolled in s.hour_counts(first, end, RECORDED):
+        candidates = s.lock_minute_timestamps(first, end)
+        timeline = locked_timeline(s, head_id, candidates)
+        counts: dict[int, int] = {}
+        for ts in candidates:
+            hour = floor_hour(ts)
+            counts[hour] = counts.get(hour, 0) + 1
+        rolled_counts = s.lock_rollup_counts(first, end, RECORDED)
+        for hour_ts, stored in sorted(counts.items()):
+            rolled = rolled_counts.get(hour_ts)
             if rolled != stored:
                 raise PurgeRefused(f"rollup of hour {iso_utc(hour_ts)} accounts for {rolled or 0}"
                                    f" of {stored} stored minutes")
+        for ts in candidates:
+            if timeline[ts]:
+                raise PurgeRefused(f"minute {iso_utc(ts)} was under optional selection;"
+                                   " raw evidence awaits Checkpoint D rollup")
         if (optional_ts := s.first_optional_minute(first, end)) is not None:
             raise PurgeRefused(f"optional raw minute {iso_utc(optional_ts)} awaits Checkpoint D rollup")
         return cutoff, s.delete_minutes_before(end), end < cutoff

@@ -8,8 +8,9 @@ failure, and none of them invents a health verdict.
 import pytest
 
 from conftest import RUNNING, T0, Api, minutes
+from conftest import persist_canonical, recorded
 from conftest import row as make_row
-from pompa.recorder import persist, roll_next_hour
+from pompa.recorder import roll_next_hour
 from pompa.timegrid import HOUR
 
 H0 = T0 - T0 % HOUR  # 2027-01-15T08:00:00Z is already hour-aligned
@@ -128,7 +129,7 @@ def test_status_sources_stay_the_diagnostic_view_of_the_same_selection(api):
 
 def test_status_reports_a_rollup_failure_as_a_fact():
     api = Api()
-    persist(api.storage, minutes(H0, 120))  # two stored hours, nothing rolled yet
+    persist_canonical(api.storage, minutes(H0, 120))  # two stored hours, nothing rolled yet
     api.storage.fail_commit = 1
     api.tick(H0 + 3 * HOUR)
     rollup = api.body("/api/v1/status", H0 + 3 * HOUR)["recorder"]["rollup"]
@@ -142,7 +143,7 @@ def test_status_reports_a_rollup_failure_as_a_fact():
 
 def test_status_reports_a_purge_refusal_as_a_fact():
     api = Api()
-    persist(api.storage, minutes(H0, 10 * 60))
+    persist_canonical(api.storage, minutes(H0, 10 * 60))
     while roll_next_hour(api.storage, H0 + 10 * HOUR) is not None:
         pass
     with api.storage.session() as s:  # a rollup that does not account for its minutes
@@ -157,14 +158,14 @@ def test_status_reports_a_purge_refusal_as_a_fact():
 def test_status_reports_a_rebuild_refusal_as_a_fact_through_http():
     """A minute landing in a purged rolled hour must surface as refused_rows/last_refusal, via HTTP."""
     api = Api()
-    persist(api.storage, minutes(H0, 60))  # one rolled hour
+    persist_canonical(api.storage, minutes(H0, 60))  # one rolled hour
     while roll_next_hour(api.storage, H0 + HOUR) is not None:
         pass
     with api.storage.session() as s:  # the hour's raw evidence is now physically gone
         s.delete_minutes_before(H0 + HOUR)
 
     api.recorder.schema_ready = True
-    api.recorder._protected = [make_row(H0, outside_temp=1.0)]
+    api.recorder._protected = [recorded(make_row(H0, outside_temp=1.0))]
     api.tick(H0 + HOUR + 60)
 
     recorder = api.body("/api/v1/status", H0 + HOUR + 60)["recorder"]

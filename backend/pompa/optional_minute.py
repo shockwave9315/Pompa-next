@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping
@@ -63,14 +64,28 @@ class OptionalAccumulator:
                         self._whole[p.identity] = False
                         self._end_value[p.identity] = None
                     else:
-                        self._sum[p.identity] += source.value * dt
+                        if p.kind == "mean" and self._whole[p.identity]:
+                            segment = source.value * dt
+                            if not math.isfinite(segment):
+                                self._whole[p.identity] = False
+                            else:
+                                total = self._sum[p.identity] + segment
+                                if math.isfinite(total):
+                                    self._sum[p.identity] = total
+                                else:
+                                    self._whole[p.identity] = False
                         self._end_value[p.identity] = source.value
             self.cursor = stop
             if stop == end:
                 if self._valid and self.minute_start >= self.process_start:
+                    def mean_value(identity: str) -> float | None:
+                        if not self._whole[identity]:
+                            return None
+                        mean = self._sum[identity] / MINUTE
+                        return round(mean, 6) if math.isfinite(mean) else None
+
                     values = {
-                        p.identity: (round(self._sum[p.identity] / MINUTE, 6)
-                                     if self._whole[p.identity] else None)
+                        p.identity: mean_value(p.identity)
                         if p.kind == "mean" else self._end_value[p.identity]
                         for p in HISTORY_PROFILES
                     }

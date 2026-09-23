@@ -215,6 +215,24 @@ class Session:
         self._cur.execute(f"DELETE FROM {TABLE} WHERE ts < %s", (cutoff,))
         return self._cur.rowcount
 
+    def lock_minute_timestamps(self, start: int, end: int) -> list[int]:
+        """Current, locked canonical minutes in the exact candidate purge range."""
+        self._cur.execute(f"SELECT ts FROM {TABLE} WHERE ts >= %s AND ts < %s"
+                          " ORDER BY ts FOR UPDATE", (start, end))
+        return [int(row[0]) for row in self._cur.fetchall()]
+
+    def lock_oldest_minute_ts(self) -> int | None:
+        """Current oldest raw minute after the policy-head lock."""
+        self._cur.execute(f"SELECT ts FROM {TABLE} ORDER BY ts LIMIT 1 FOR UPDATE")
+        row = self._cur.fetchone()
+        return None if row is None else int(row[0])
+
+    def lock_rollup_counts(self, start: int, end: int, series: str) -> dict[int, int]:
+        """Current rollup counts for the canonical completeness proof."""
+        self._cur.execute(f"SELECT hour_ts, n FROM {ROLLUP} WHERE hour_ts >= %s AND hour_ts < %s"
+                          " AND series = %s FOR UPDATE", (start, end, series))
+        return {int(hour): int(n) for hour, n in self._cur.fetchall()}
+
     def replace_optional_minute(self, ts: int, values: dict[str, float]) -> None:
         """Replace the complete JSON document, or delete an empty selected-known minute."""
         if ts % MINUTE:
@@ -234,7 +252,7 @@ class Session:
 
     def first_optional_minute(self, start: int, end: int) -> int | None:
         self._cur.execute(f"SELECT ts FROM {OPTIONAL_RAW} WHERE ts >= %s AND ts < %s"
-                          " ORDER BY ts LIMIT 1", (start, end))
+                          " ORDER BY ts LIMIT 1 FOR UPDATE", (start, end))
         row = self._cur.fetchone()
         return None if row is None else int(row[0])
 

@@ -3,7 +3,7 @@
 import threading
 from contextlib import contextmanager
 
-from conftest import RUNNING, T0, FakeStorage
+from conftest import RUNNING, T0, FakeStorage, persist_canonical, recorded
 from conftest import row as conf_row
 from pompa.ingest import Ingest
 from pompa.minute import MINUTE, MinuteAccumulator, floor_minute
@@ -354,10 +354,10 @@ H = 3600
 
 def purged_rolled_hour(db, hour_ts):
     """A rolled hour whose raw evidence is gone: exactly what purge leaves behind."""
-    from pompa.recorder import persist, roll_next_hour
+    from pompa.recorder import roll_next_hour
 
     from conftest import minutes
-    persist(db, minutes(hour_ts, 60))
+    persist_canonical(db, minutes(hour_ts, 60))
     while roll_next_hour(db, 2**32 - 1) is not None:
         pass
     with db.session() as s:
@@ -370,7 +370,7 @@ def test_refused_row_is_dropped_instead_of_blocking_the_queue():
     purged_rolled_hour(db, T0)
     rec, _ = make(start=T0 + 600, storage=db)
     rec.schema_ready = True
-    rec._protected = [conf_row(T0 + 600, outside_temp=1.0)]
+    rec._protected = [recorded(conf_row(T0 + 600, outside_temp=1.0))]
 
     rec.tick(T0 + 660)
     snap = rec.snapshot(lambda: T0 + 660)[1]["recorder"]
@@ -384,7 +384,7 @@ def test_refused_row_is_dropped_instead_of_blocking_the_queue():
         assert s.read_minutes(T0, T0 + H) == []  # nothing rebuilt the purged hour
 
     # The recorder keeps working: a later minute in a writable hour is persisted normally.
-    rec._waiting.append(conf_row(T0 + H, outside_temp=2.0))
+    rec._waiting.append(recorded(conf_row(T0 + H, outside_temp=2.0)))
     rec.tick(T0 + H + 120)
     assert sorted(db.rows) == [T0 + H]
     snap = rec.snapshot(lambda: T0 + H + 120)[1]["recorder"]
@@ -416,7 +416,8 @@ def test_refusal_keeps_the_writable_rows_of_a_mixed_batch():
     db = FakeStorage()
     purged_rolled_hour(db, T0)
     rec, _ = make(start=T0 + 600, storage=db)
-    rec._protected = [conf_row(T0 + 600, outside_temp=1.0), conf_row(T0 + H, outside_temp=2.0)]
+    rec._protected = [recorded(conf_row(T0 + 600, outside_temp=1.0)),
+                      recorded(conf_row(T0 + H, outside_temp=2.0))]
     rec.schema_ready = True
 
     rec.tick(T0 + H + 120)
@@ -432,7 +433,7 @@ def test_refusal_does_not_stop_rollup_and_purge():
     purged_rolled_hour(db, T0)
     rec, _ = make(start=T0 + 600, storage=db)
     rec.retention_days = 365
-    rec._protected = [conf_row(T0 + 600, outside_temp=1.0)]
+    rec._protected = [recorded(conf_row(T0 + 600, outside_temp=1.0))]
     rec.schema_ready = True
 
     rec.tick(T0 + 400 * 86400)

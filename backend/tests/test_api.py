@@ -6,11 +6,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from conftest import T0, FakeStorage, minutes
+from conftest import persist_canonical
 from pompa.api import create_app
 from pompa.catalog import RECORDED_KEYS
 from pompa.ingest import Ingest
 from pompa.minute import MinuteAccumulator, iso_utc
-from pompa.recorder import Recorder, persist, purge_step, roll_next_hour
+from pompa.recorder import Recorder, purge_step, roll_next_hour
 from pompa.timegrid import HOUR
 
 Z = "2027-01-15T08:{:02d}:00Z"  # T0 + n minutes
@@ -186,7 +187,7 @@ def purged_and_gapped(storage):
     by the Stage 3 review: contract tests must prove the 422/200 split at the API boundary, not
     only inside the history engine.
     """
-    persist(storage, [r for r in minutes(H0, 72 * 60) if not GAP_HOUR <= r.ts < GAP_HOUR + HOUR])
+    persist_canonical(storage, [r for r in minutes(H0, 72 * 60) if not GAP_HOUR <= r.ts < GAP_HOUR + HOUR])
     while roll_next_hour(storage, H0 + 72 * HOUR) is not None:
         pass
     now = H0 + 72 * HOUR

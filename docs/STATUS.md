@@ -120,7 +120,14 @@ Branch `stage-4b-optional-history`, draft PR #7, not merged.
   keyed by stable series id; a restrictive FK enforces its canonical subset relation. Blocked or
   unknown selected members have no JSON key; zero remains a known value.
 - Canonical rollup continues. A transitional purge guard refuses any deletion range containing
-  optional raw until checkpoint D implements optional rollup and combined proof/deletion.
+  a canonical minute under non-empty optional selection, including selected-but-unknown minutes
+  with no optional raw row, until checkpoint D implements optional rollup and combined
+  proof/deletion. A separate optional-row guard remains as defense in depth.
+- Checkpoint C adversarial corrections: optional derived non-finite arithmetic becomes unknown
+  before persistence, with a second finite check at the selected-known JSON boundary; the fake
+  enforces production JSON serialization. Production `persist` accepts only explicit
+  `RecordedMinute` pairs. Real MariaDB tests cover the former poison pair, policy-aware purge,
+  persist/PUT serialization, and a lost-ack protected retry across a later PUT.
 
 ### Deferred
 
