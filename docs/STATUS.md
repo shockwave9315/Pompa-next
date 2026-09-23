@@ -2,9 +2,9 @@
 
 ## Current stage
 
-**Stage 4B — checkpoint C DONE.** Configurable optional history now records selected, known
-optional minute values internally beside canonical minutes. Optional rollup, purge and history
-query remain for checkpoint D. Frontend work starts after Stage 4.
+**Stage 4B — Checkpoints A–D DONE; Checkpoint E IN PROGRESS.** Repository-side optional history
+is implemented and Checkpoint D is adversarially verified. Owner CT109 deployment and runtime
+validation are pending; Stage 4B is not yet done. Frontend work starts after Stage 4.
 
 Stage 4A — DONE and merged to `main` (PR #6, merge commit
 `a34aaead89fae3359769cf2737aab42fd274d145`).
@@ -149,7 +149,7 @@ beyond `XTOP1`/`XTOP4`, and a max-selection-count remain open questions. Remaini
 
 - **Checkpoint E:** full tests/docs; owner CT109 runtime validation; publication-gap evidence;
   storage/table/index/backup measurements; eligible-list and max-selection decisions if evidence
-  supports them.
+  supports them. Repository preparation is complete; owner CT109 evidence is pending.
 
 ## Out of scope
 
@@ -160,6 +160,6 @@ beyond `XTOP1`/`XTOP4`, and a max-selection-count remain open questions. Remaini
 
 ## Next
 
-Checkpoint E of Stage 4B: final tests/docs, owner CT109 runtime validation, publication-gap
-evidence, real storage/table/index/backup measurements, and eligible-list/max-selection decisions
-if evidence supports them. See `docs/ROADMAP.md` for later stages.
+Owner CT109 validation for Checkpoint E: collect publication-gap and actual raw/rollup,
+storage/index/backup evidence, then decide the eligible list and max-selection policy from those
+facts. See `docs/ROADMAP.md` for later stages.

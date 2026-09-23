@@ -146,8 +146,7 @@ assert len(HISTORY_PROFILES_BY_IDENTITY) == len(HISTORY_PROFILES), "duplicate Hi
 def parse_history_profile_value(profile: HistoryProfile, payload: str) -> tuple[float | None, Outcome]:
     """Parse one payload against a ``HistoryProfile``, via the shared primitive.
 
-    No production caller exists yet (checkpoint C adds ``OptionalAccumulator``);
-    this is proved correct now so that future caller can be trusted immediately.
+    Optional history source observation uses this for every matching publication.
     """
     return parse_numeric(payload, profile.sentinels, profile.min_value, profile.max_value)
 
