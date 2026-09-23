@@ -214,7 +214,7 @@ def create_app(recorder: Recorder, storage: Storage, clock: Callable[[], float] 
             return history_engine.query(storage, start, end, bucket, names, clock())
         except Unrepresentable as e:
             raise HTTPException(status_code=422, detail=str(e)) from None
-        except ValueError as e:
+        except history_engine.HistoryRequestError as e:
             raise _bad(str(e)) from None
         except StorageUnavailable as e:
             raise HTTPException(status_code=503, detail=f"database unavailable: {e}") from None

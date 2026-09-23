@@ -32,7 +32,7 @@ from collections.abc import Sequence
 import re
 
 from .aggregation import (
-    PAIRS, RECORDED, OptionalHistoryInconsistent, OptionalStats, Stats, combine_maps,
+    MINUTES_PER_KWH_W, PAIRS, RECORDED, OptionalHistoryInconsistent, OptionalStats, Stats, combine_maps,
     combine_optional_maps, cop,
     coverage_percent, energy_kwh, fold_minutes, fold_optional_minutes, is_power, minute_columns,
 )
@@ -51,6 +51,10 @@ HISTORY_SERIES: tuple[str, ...] = RECORDED_KEYS + tuple(COP_SERIES)
 HOURLY_BUCKETS = ("1h", "1d", "total")
 COP_FIELDS: tuple[str, ...] = ("cop", "paired_minutes", "input_kwh", "output_kwh")
 OPTIONAL_SELECTOR = re.compile(r"^optional:([A-Z][A-Z0-9]*)@([1-9][0-9]*)$")
+
+
+class HistoryRequestError(ValueError):
+    """A requested historical selector is malformed or has no persisted meaning."""
 
 
 def optional_selector(row: SeriesRow) -> str:
@@ -139,7 +143,7 @@ def query(storage: Storage, start: int, end: int, bucket: str, series: Sequence[
     """History for minute-aligned ``start < end``. Raises ``Unrepresentable`` (422)."""
     unknown = [s for s in series if s not in HISTORY_SERIES and not OPTIONAL_SELECTOR.fullmatch(s)]
     if unknown:
-        raise ValueError(f"unknown series: {', '.join(unknown)}")
+        raise HistoryRequestError(f"unknown series: {', '.join(unknown)}")
     needed = _needed(series)
 
     with storage.session() as s:
@@ -149,11 +153,14 @@ def query(storage: Storage, start: int, end: int, bucket: str, series: Sequence[
             if match:
                 found = s.find_optional_series(match[1], int(match[2]))
                 if not found:
-                    raise ValueError(f"unknown persisted optional series: {selector}")
+                    raise HistoryRequestError(f"unknown persisted optional series: {selector}")
                 if len(found) != 1:
                     raise OptionalHistoryInconsistent(f"ambiguous persisted optional series: {selector}")
+                if found[0].kind not in ("mean", "last"):
+                    raise OptionalHistoryInconsistent(f"invalid persisted optional kind: {selector}")
                 optional_rows[selector] = found[0]
         optional_ids = [row.id for row in optional_rows.values()]
+        optional_by_id = {row.id: row for row in optional_rows.values()}
         rolled_until = s.rolled_until()
         if bucket == "auto":
             resolved = auto_bucket(start, end)
@@ -190,13 +197,11 @@ def query(storage: Storage, start: int, end: int, bucket: str, series: Sequence[
         if optional_ids:
             for h, sid, selected, known, v_sum, v_min, v_max, v_last in s.read_optional_rollup(
                     roll_lo, roll_hi, optional_ids):
-                fields = (v_sum, v_min, v_max, v_last)
-                if (known == 0 and any(value is not None for value in fields)) or (
-                        known > 0 and any(value is None for value in fields)):
+                if selected <= 0 or (optional_by_id[sid].kind == "last" and v_sum is not None):
                     raise OptionalHistoryInconsistent(
-                        f"optional rollup {h}/{sid} has incompatible known count and statistics")
-                values = None if known == 0 else Stats(known, v_sum, v_min, v_max, v_last)
-                optional_rolled.setdefault(h, {})[sid] = OptionalStats(selected, known, values)
+                        f"optional rollup {h}/{sid} has invalid selected count or last-series sum")
+                optional_rolled.setdefault(h, {})[sid] = OptionalStats(
+                    selected, known, v_sum, v_min, v_max, v_last)
 
     per_bucket: list[dict[str, Stats]] = []
     optional_per_bucket: list[dict[int, OptionalStats]] = []
@@ -212,7 +217,8 @@ def query(storage: Storage, start: int, end: int, bucket: str, series: Sequence[
                 part = fold_minutes(minute_part, needed)
                 optional_part = (fold_optional_minutes(
                     [ts for ts, _ in minute_part], timeline,
-                    dict(optional_raw[bisect_left(optional_raw_ts, pa):bisect_left(optional_raw_ts, pb)]))
+                    dict(optional_raw[bisect_left(optional_raw_ts, pa):bisect_left(optional_raw_ts, pb)]),
+                    set(optional_ids))
                     if optional_ids else {})
             acc = combine_maps(acc, part)
             if optional_ids:
@@ -234,6 +240,16 @@ _SERIES_VALUES = {  # one bucket-aligned array per history field of an ordinary 
 }
 
 
+def _optional_sum_required(stats: OptionalStats | None, selector: str, a: int, b: int
+                           ) -> float | None:
+    if stats is None or stats.known_minutes == 0:
+        return None
+    if stats.v_sum is None:
+        raise Unrepresentable(
+            f"{selector} aggregate sum is not representable for bucket {iso_utc(a)}–{iso_utc(b)}")
+    return stats.v_sum
+
+
 def _response(start, end, requested, resolved, edges, per_bucket, series, now,
               optional_per_bucket=None, optional_rows=None) -> dict:
     buckets = []
@@ -253,16 +269,24 @@ def _response(start, end, requested, resolved, edges, per_bucket, series, now,
         if optional_rows and name in optional_rows:
             row = optional_rows[name]
             stats = [acc.get(row.id) for acc in optional_per_bucket]
-            values = [None if st is None else st.values for st in stats]
             first = "avg" if row.kind == "mean" else "last"
             entry = optional_series_metadata(row)
             entry.pop("selector")
-            entry.update({first: _SERIES_VALUES[first](values), "min": _SERIES_VALUES["min"](values),
-                          "max": _SERIES_VALUES["max"](values),
+            if row.kind == "mean":
+                primary = [None if (total := _optional_sum_required(st, name, a, b)) is None
+                           else total / st.known_minutes
+                           for st, (a, b) in zip(stats, edges)]
+            else:
+                primary = [None if st is None else st.v_last for st in stats]
+            entry.update({first: primary,
+                          "min": [None if st is None else st.v_min for st in stats],
+                          "max": [None if st is None else st.v_max for st in stats],
                           "selected_minutes": [0 if st is None else st.selected_minutes for st in stats],
                           "known_minutes": [0 if st is None else st.known_minutes for st in stats]})
             if row.energy:
-                entry["kwh"] = [energy_kwh(value) for value in values]
+                entry["kwh"] = [None if (total := _optional_sum_required(st, name, a, b)) is None
+                                else total / MINUTES_PER_KWH_W
+                                for st, (a, b) in zip(stats, edges)]
         elif name in COP_SERIES:
             fields = history_fields(name)
             pair_in, pair_out = PAIRS[COP_SERIES[name]]

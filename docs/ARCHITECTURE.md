@@ -776,7 +776,8 @@ PRIMARY KEY (hour_ts, series_id)
 ```
 
 `selected_minutes > 0`; `0 <= known_minutes <= selected_minutes`; when `known_minutes == 0`,
-`v_sum`, `v_min`, `v_max` and `v_last` are `NULL`. `selected_minutes` comes from canonical recorded
+`v_sum`, `v_min`, `v_max` and `v_last` are `NULL`. When known is positive, min/max/last are finite;
+`v_sum` may be finite or NULL. `selected_minutes` comes from canonical recorded
 minutes intersected with policy-timeline participation, never from optional raw-row count.
 `known_minutes` and the value statistics come only from stored optional known values. Different
 series meanings (§25.2.5) are never automatically combined.
@@ -1043,12 +1044,19 @@ kWh output or optional raw public API existed in checkpoint C.
 
 `optional_rollup_1h` has primary key `(hour_ts, series_id)` and a restrictive FK to
 `optional_series(id)`. Each row has positive `selected_minutes`, `known_minutes` between zero and
-selected, and nullable `v_sum`, `v_min`, `v_max`, `v_last`. All four statistics are NULL exactly
-when known is zero. `OptionalStats` combines selected and known counts with the existing
-chronological `Stats` algebra. For each canonical recorded minute, selected ids come from the
+selected, and nullable `v_sum`, `v_min`, `v_max`, `v_last`. All four statistics are NULL when
+known is zero. With positive known count, min/max/last stay finite; sum may be NULL.
+`OptionalStats` keeps these optional facts separate from canonical `Stats` and combines them in
+the same chronological binary-float association. Persisted `kind=last` never computes a sum:
+NULL means not applicable. For `kind=mean`, NULL with positive known count means the aggregate
+sum exceeded binary DOUBLE representability. Once lost, a later opposite-signed value cannot
+recover it. This is valid history, not corruption, and does not stop rolling, late persistence or
+purge. For each canonical recorded minute, selected ids come from the
 persisted policy timeline; known ids and values come from its optional raw JSON. Natural canonical
 gaps contribute nothing. Raw keys that are invalid, non-finite, or unselected for their minute
-fail closed as inconsistent stored evidence. Current profiles, capability drift and selection
+fail closed as inconsistent stored evidence. Read-only queries validate all loaded raw JSON keys
+and values but aggregate only requested series; a valid unrequested huge series cannot affect
+another answer. Current profiles, capability drift and selection
 availability never reinterpret old raw or rolled facts.
 
 There is still one `rolled_until`, derived from canonical `rollup_1h`. Rolling a stored UTC hour
@@ -1075,7 +1083,11 @@ auto-bucket promotion, `MAX_BUCKETS`, and canonical `rolled_until`. Minute bucke
 hourly or larger buckets use optional rollup for complete rolled hours and raw for partial or
 unrolled hours. Per-bucket selected and known counts remain distinct. Persisted `energy=true`
 adds kWh from known minute-average W only (`Σ W / 60000`); no optional COP is inferred. Default
-history requests remain canonical-only.
+history requests remain canonical-only. A requested mean bucket with positive known count and
+NULL sum cannot supply `avg`, and a persisted energy series in that state cannot supply `kwh`;
+either request returns 422 Unrepresentable. A last series remains fully queryable from
+last/min/max/counts without a sum. Rollup reads validate the structural NULL pattern and reject
+a non-NULL sum for persisted `kind=last`; they never consult current profiles.
 
 ### 25.3 Stage 4C — one activity interpretation and durable events
 

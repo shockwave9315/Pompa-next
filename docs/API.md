@@ -298,6 +298,10 @@ buckets.
   Bare identities, malformed versions, and unknown persisted meanings return 400. No optional
   selector is included by default. Mixed canonical and optional requests share one database
   snapshot, bucket calendar, raw/rollup boundary, and 3000-bucket limit.
+- A valid optional bucket may have known values whose binary-float sum cannot be represented.
+  Its selected/known counts and min/max/last remain durable. `kind=last` has no historical sum
+  and remains queryable. A requested mean `avg` or `energy=true` `kwh` that needs an
+  unrepresentable sum returns 422; it is never reported as unknown, zero, infinity, or a 500.
 - `cop` is `Σ paired output / Σ paired input` over minutes where all required power channels are
   known. It is `null` when there are no paired minutes or the paired input sum is 0. Instantaneous
   COP values are never averaged.
@@ -310,7 +314,7 @@ bucket.
 | Status | When |
 |---|---|
 | `400` | Malformed parameters: missing `from`/`to`, unparseable or naive timestamps, non-minute alignment, `from >= to`, unknown bucket, unknown or duplicate series, invalid or repeated `include`. |
-| `422` | Well-formed but unrepresentable: more than 3000 buckets, a range or partial edge hour whose raw minutes were provably purged, instants outside 1970–2100. |
+| `422` | Well-formed but unrepresentable: more than 3000 buckets, a range or partial edge hour whose raw minutes were provably purged, an optional mean/energy bucket whose known-value sum cannot fit in binary DOUBLE, or instants outside 1970–2100. |
 | `503` | The database is unavailable for `/api/v1/history`, `/api/v1/optional-history/selection`, or `/api/v1/optional-history/series`. |
 
 The body is `{"detail": "…"}`. `422` for purged raw means the backend knows the minutes existed and

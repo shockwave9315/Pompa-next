@@ -6,7 +6,7 @@ import pytest
 
 from conftest import T0, row
 from pompa import history
-from pompa.aggregation import (OptionalHistoryInconsistent, OptionalStats, Stats, combine_optional,
+from pompa.aggregation import (OptionalHistoryInconsistent, OptionalStats, combine_optional,
                                fold_optional_minutes)
 from pompa.history_profile import HISTORY_PROFILES_BY_IDENTITY
 from pompa.optional_minute import OptionalMinute
@@ -43,19 +43,22 @@ def roll_rows(db, start=T0, end=T0 + HOUR):
 
 def test_optional_stats_pure_fold_selected_unknown_zero_and_order():
     class Member:
-        def __init__(self, sid):
+        def __init__(self, sid, kind="mean"):
             self.id = sid
+            self.kind = kind
     selected = {T0: [Member(7), Member(8)], T0 + 60: [Member(7)], T0 + 180: [Member(7)]}
     result = fold_optional_minutes([T0, T0 + 60, T0 + 180], selected,
                                    {T0: {"7": 0.0}, T0 + 180: {"7": 3.0}})
-    assert result[7] == OptionalStats(3, 2, Stats(2, 3.0, 0.0, 3.0, 3.0))
-    assert result[8] == OptionalStats(1, 0, None)
-    assert combine_optional(OptionalStats(1, 1, Stats.of(1.0)),
-                            OptionalStats(1, 1, Stats.of(2.0))).values.last == 2.0
+    assert result[7] == OptionalStats(3, 2, 3.0, 0.0, 3.0, 3.0)
+    assert result[8] == OptionalStats(1, 0, None, None, None, None)
+    assert combine_optional(OptionalStats(1, 1, 1.0, 1.0, 1.0, 1.0),
+                            OptionalStats(1, 1, 2.0, 2.0, 2.0, 2.0)).v_last == 2.0
     with pytest.raises(OptionalHistoryInconsistent):
         fold_optional_minutes([T0], {T0: []}, {T0: {"7": 2.0}})
     with pytest.raises(OptionalHistoryInconsistent):
         fold_optional_minutes([T0], {T0: [Member(7)]}, {T0: [7.0]})
+    with pytest.raises(OptionalHistoryInconsistent):
+        fold_optional_minutes([T0], {T0: [Member(7)]}, {T0: {"7": 10**1000}})
 
 
 def test_optional_rollup_ddl_and_checks(mariadb):
@@ -82,7 +85,9 @@ def test_optional_rollup_ddl_and_checks(mariadb):
     with db.session() as s:
         sid = s.list_optional_series()[0].id
     bad = [(0, 0, None, None, None, None), (1, 2, 3., 3., 3., 3.),
-           (1, 0, 3., None, None, None), (1, 1, None, None, None, None)]
+           (1, 0, 3., None, None, None), (1, 0, None, 3., None, None),
+           (1, 1, None, None, 3., 3.), (1, 1, None, 3., None, 3.),
+           (1, 1, None, 3., 3., None)]
     for fields in bad:
         with pytest.raises(StorageUnavailable):
             with db.session() as s:
@@ -90,6 +95,12 @@ def test_optional_rollup_ddl_and_checks(mariadb):
     with db.session() as s:
         s.replace_optional_rollup_hour(T0, [(sid, 1, 0, None, None, None, None)])
         assert s.read_optional_rollup(T0, T0 + HOUR)[0][2:] == (1, 0, None, None, None, None)
+    with db.session() as s:
+        s.replace_optional_rollup_hour(T0, [(sid, 1, 1, 3.0, 3.0, 3.0, 3.0)])
+        assert s.read_optional_rollup(T0, T0 + HOUR)[0][2:] == (1, 1, 3.0, 3.0, 3.0, 3.0)
+    with db.session() as s:
+        s.replace_optional_rollup_hour(T0, [(sid, 1, 1, None, 3.0, 3.0, 3.0)])
+        assert s.read_optional_rollup(T0, T0 + HOUR)[0][2:] == (1, 1, None, 3.0, 3.0, 3.0)
 
 
 def test_hour_rollup_policy_boundary_gaps_zero_and_unknown(mariadb):

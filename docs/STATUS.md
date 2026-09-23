@@ -136,6 +136,11 @@ Branch `stage-4b-optional-history`, draft PR #7, not merged.
   `optional:IDENTITY@VERSION` selectors extend the existing `/history` engine, including mixed
   canonical/optional requests, version isolation, raw/rollup equivalence, Warsaw DST, and
   persisted `energy=true` kWh. Default API shapes remain canonical and unchanged.
+- Checkpoint D adversarial correction: optional `last` history never sums values; optional
+  mean/energy sum overflow stores `v_sum=NULL` with known counts and finite min/max/last intact.
+  Rollup, late persistence and shared purge proceed. A requested unrepresentable avg/kWh returns
+  422, while valid unrequested optional series cannot poison another query. Loaded raw JSON still
+  receives full consistency validation. Canonical `Stats` and minute arithmetic are unchanged.
 
 ### Deferred
 

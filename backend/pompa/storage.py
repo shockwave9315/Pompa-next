@@ -140,7 +140,7 @@ OPTIONAL_ROLLUP_DDL = (
     " (selected_minutes > 0 AND known_minutes <= selected_minutes),\n"
     "  CONSTRAINT ck_optional_rollup_values CHECK"
     " ((known_minutes = 0 AND v_sum IS NULL AND v_min IS NULL AND v_max IS NULL AND v_last IS NULL)"
-    " OR (known_minutes > 0 AND v_sum IS NOT NULL AND v_min IS NOT NULL"
+    " OR (known_minutes > 0 AND v_min IS NOT NULL"
     " AND v_max IS NOT NULL AND v_last IS NOT NULL)),\n"
     f"  CONSTRAINT fk_optional_rollup_series FOREIGN KEY (series_id)"
     f" REFERENCES {OPTIONAL_SERIES}(id) ON DELETE RESTRICT\n"

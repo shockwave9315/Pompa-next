@@ -129,10 +129,7 @@ class RecordedMinute:
 
 def _optional_rollup_values(folded: dict[int, OptionalStats]) -> list[tuple]:
     return [(sid, st.selected_minutes, st.known_minutes,
-             None if st.values is None else st.values.sum,
-             None if st.values is None else st.values.min,
-             None if st.values is None else st.values.max,
-             None if st.values is None else st.values.last)
+             st.v_sum, st.v_min, st.v_max, st.v_last)
             for sid, st in sorted(folded.items()) if st.selected_minutes]
 
 
