@@ -157,8 +157,9 @@ def _resolve_active_revision_id(storage_session, head_id: int, minute_ts: int) -
         revision_id = base_id
 
 
-def locked_timeline(session, head_id: int, minute_timestamps: Sequence[int]) -> dict[int, tuple[SeriesRow, ...]]:
-    """Resolve one batch from current/locking revision and member reads after the head lock.
+def _timeline(session, head_id: int, minute_timestamps: Sequence[int], *, locking: bool
+              ) -> dict[int, tuple[SeriesRow, ...]]:
+    """Load one immutable chain for many minutes, using one consistent read mode.
 
     The chain is loaded once, newest descendant first. Equal effective boundaries
     naturally prefer the first (newest) matching revision.
@@ -167,12 +168,14 @@ def locked_timeline(session, head_id: int, minute_timestamps: Sequence[int]) -> 
         return {}
     chain: list[tuple[int, tuple[SeriesRow, ...]]] = []
     revision_id = head_id
+    revision = session.lock_revision if locking else session.read_revision
+    members = session.lock_revision_members if locking else session.read_revision_members
     while True:
-        row = session.lock_revision(revision_id)
+        row = revision(revision_id)
         if row is None:
             raise RuntimeError(f"optional policy revision chain broken at {revision_id}")
         rid, base_id, effective_from, _ = row
-        chain.append((effective_from, tuple(session.lock_revision_members(rid))))
+        chain.append((effective_from, tuple(members(rid))))
         if base_id is None:
             break
         revision_id = base_id
@@ -180,6 +183,18 @@ def locked_timeline(session, head_id: int, minute_timestamps: Sequence[int]) -> 
     for ts in minute_timestamps:
         resolved[ts] = next(members for effective_from, members in chain if effective_from <= ts)
     return resolved
+
+
+def locked_timeline(session, head_id: int, minute_timestamps: Sequence[int]
+                    ) -> dict[int, tuple[SeriesRow, ...]]:
+    """Current/locking timeline after a policy-head lock, for writes and purge."""
+    return _timeline(session, head_id, minute_timestamps, locking=True)
+
+
+def snapshot_timeline(session, head_id: int, minute_timestamps: Sequence[int]
+                      ) -> dict[int, tuple[SeriesRow, ...]]:
+    """Plain consistent-snapshot timeline for read-only history queries."""
+    return _timeline(session, head_id, minute_timestamps, locking=False)
 
 
 def read_selection(storage: Storage, now: float) -> SelectionView:

@@ -56,7 +56,8 @@ from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
 
-from .aggregation import RECORDED, SERIES, fold_minutes
+from .aggregation import (RECORDED, SERIES, OptionalHistoryInconsistent, OptionalStats,
+                          fold_minutes, fold_optional_minutes)
 from .ingest import LWT_OFFLINE, Ingest, PhysicalReading
 from .minute import MINUTE, MinuteAccumulator, MinuteRow, floor_minute, iso_utc
 from .optional_minute import OptionalAccumulator, OptionalMinute
@@ -126,18 +127,37 @@ class RecordedMinute:
         return self.canonical.ts
 
 
+def _optional_rollup_values(folded: dict[int, OptionalStats]) -> list[tuple]:
+    return [(sid, st.selected_minutes, st.known_minutes,
+             None if st.values is None else st.values.sum,
+             None if st.values is None else st.values.min,
+             None if st.values is None else st.values.max,
+             None if st.values is None else st.values.last)
+            for sid, st in sorted(folded.items()) if st.selected_minutes]
+
+
+def _fold_optional_hour(session: Session, hour_ts: int, minutes: list[int],
+                        head_id: int) -> dict[int, OptionalStats]:
+    timeline = locked_timeline(session, head_id, minutes)
+    raw = dict(session.read_optional_minutes(hour_ts, hour_ts + HOUR, locking=True))
+    return fold_optional_minutes(minutes, timeline, raw)
+
+
 def rebuild_hour(session: Session, hour_ts: int) -> None:
-    """Replace one hour of ``rollup_1h`` with the ordered fold of its stored minutes.
+    """Atomically replace canonical and complete optional rollups for a stored hour.
 
     Only ever called for an hour that stores minutes: replacing a rolled hour
     with an empty fold would delete evidence instead of correcting it.
     """
-    rows = session.read_minutes(hour_ts, hour_ts + HOUR)
+    head_id = session.lock_policy_head()
+    rows = session.read_minutes(hour_ts, hour_ts + HOUR, locking=True)
     if not rows:
         raise ValueError(f"refusing to rebuild hour {iso_utc(hour_ts)} from no stored minutes")
     folded = fold_minutes(rows)
+    optional = _fold_optional_hour(session, hour_ts, [ts for ts, _ in rows], head_id)
     session.replace_rollup_hour(hour_ts, [(k, s.n, s.sum, s.min, s.max, s.last)
                                           for k in SERIES if (s := folded.get(k)) is not None])
+    session.replace_optional_rollup_hour(hour_ts, _optional_rollup_values(optional))
 
 
 def persist(storage: Storage, rows: list[RecordedMinute]) -> None:
@@ -156,7 +176,7 @@ def persist(storage: Storage, rows: list[RecordedMinute]) -> None:
     with storage.session() as s:
         head_id = s.lock_policy_head()
         timeline = locked_timeline(s, head_id, [r.ts for r in rows])
-        rolled_until = s.rolled_until()
+        rolled_until = s.lock_rolled_until()
         touched = (sorted({floor_hour(r.ts) for r in rows if r.ts < rolled_until})
                   if rolled_until is not None else [])
         refused = [h for h in touched if s.first_purged_hour(h, h + HOUR) is not None]
@@ -184,8 +204,9 @@ def persist(storage: Storage, rows: list[RecordedMinute]) -> None:
 def roll_next_hour(storage: Storage, closed_before: int) -> int | None:
     """Roll the first stored hour at or above ``rolled_until`` if it ends by ``closed_before``."""
     with storage.session() as s:
-        rolled_until = s.rolled_until()
-        first = s.first_minute_at_or_after(0 if rolled_until is None else rolled_until)
+        s.lock_policy_head()
+        rolled_until = s.lock_rolled_until()
+        first = s.lock_first_minute_at_or_after(0 if rolled_until is None else rolled_until)
         if first is None or floor_hour(first) + HOUR > closed_before:
             return None
         rebuild_hour(s, floor_hour(first))
@@ -198,12 +219,11 @@ def purge_step(storage: Storage, now: float, retention_days: int, pending_from: 
 
     Returns ``(cutoff, deleted rows, more to delete)``; ``cutoff`` is ``None``
     when nothing may be purged. Raises ``PurgeRefused`` (deleting nothing)
-    when an affected hour's rollup is incomplete or a candidate minute was
-    under optional selection (until Checkpoint D can preserve that evidence).
+    when either canonical or optional rollup fails its raw-evidence proof.
     """
     with storage.session() as s:
         head_id = s.lock_policy_head()
-        cutoff = purge_cutoff(now, s.rolled_until(), retention_days)
+        cutoff = purge_cutoff(now, s.lock_rolled_until(), retention_days)
         if cutoff is None:
             return None, 0, False
         if pending_from is not None:
@@ -214,7 +234,6 @@ def purge_step(storage: Storage, now: float, retention_days: int, pending_from: 
         first = floor_hour(oldest)
         end = min(cutoff, first + max_hours * HOUR)
         candidates = s.lock_minute_timestamps(first, end)
-        timeline = locked_timeline(s, head_id, candidates)
         counts: dict[int, int] = {}
         for ts in candidates:
             hour = floor_hour(ts)
@@ -225,12 +244,25 @@ def purge_step(storage: Storage, now: float, retention_days: int, pending_from: 
             if rolled != stored:
                 raise PurgeRefused(f"rollup of hour {iso_utc(hour_ts)} accounts for {rolled or 0}"
                                    f" of {stored} stored minutes")
-        for ts in candidates:
-            if timeline[ts]:
-                raise PurgeRefused(f"minute {iso_utc(ts)} was under optional selection;"
-                                   " raw evidence awaits Checkpoint D rollup")
-        if (optional_ts := s.first_optional_minute(first, end)) is not None:
-            raise PurgeRefused(f"optional raw minute {iso_utc(optional_ts)} awaits Checkpoint D rollup")
+        try:
+            timeline = locked_timeline(s, head_id, candidates)
+            raw = dict(s.read_optional_minutes(first, end, locking=True))
+            stored = {(h, sid): (selected, known, v_sum, v_min, v_max, v_last)
+                      for h, sid, selected, known, v_sum, v_min, v_max, v_last
+                      in s.read_optional_rollup(first, end, locking=True)}
+            expected = {}
+            for hour_ts in range(first, end, HOUR):
+                hour_minutes = [ts for ts in candidates if hour_ts <= ts < hour_ts + HOUR]
+                hour_raw = {ts: values for ts, values in raw.items()
+                            if hour_ts <= ts < hour_ts + HOUR}
+                folded = fold_optional_minutes(hour_minutes, timeline, hour_raw)
+                for sid, selected, known, v_sum, v_min, v_max, v_last in _optional_rollup_values(folded):
+                    expected[(hour_ts, sid)] = (selected, known, v_sum, v_min, v_max, v_last)
+            if expected != stored:
+                raise PurgeRefused("optional rollup does not match selected/known raw evidence")
+        except OptionalHistoryInconsistent as e:
+            raise PurgeRefused(f"optional raw evidence is inconsistent: {e}") from e
+        s.delete_optional_minutes(first, end)
         return cutoff, s.delete_minutes_before(end), end < cutoff
 
 
@@ -437,7 +469,7 @@ class Recorder:
         for _ in range(ROLL_HOURS_PER_TICK):
             try:
                 hour_ts = roll_next_hour(self.storage, closed_before)
-            except StorageUnavailable as e:
+            except (StorageUnavailable, OptionalHistoryInconsistent) as e:
                 if self.rollup_error is None:
                     log.warning("rollup failed, retried next tick: %s", e)
                 self.rollup_error, self.rollup_error_at = str(e), now

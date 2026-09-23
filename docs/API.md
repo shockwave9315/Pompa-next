@@ -3,8 +3,9 @@
 The default contract of Pompa Next was frozen at Stage 3. Stage 4A adds the opt-in capability and
 physical-reading forms described below while preserving those default response semantics. Stage 4B
 checkpoint B adds one opt-in metrics form and one new DB-backed endpoint pair for the
-optional-history policy. Checkpoint C adds internal raw minute recording; it adds no optional
-history query or CT109 change.
+optional-history policy. Checkpoint C adds internal raw minute recording. Checkpoint D adds
+persisted optional-series discovery and explicit optional history selectors; default responses
+remain canonical. There is no CT109 change.
 
 Domain rules behind it are in [`ARCHITECTURE.md`](ARCHITECTURE.md). This file describes only what
 the HTTP surface promises.
@@ -20,8 +21,9 @@ the HTTP surface promises.
 | `GET /api/v1/history` | All historical charts and summaries | no | yes |
 | `GET /api/v1/optional-history/selection` | Active-vs-pending optional-history selection | no | yes |
 | `PUT /api/v1/optional-history/selection` | Replace the desired optional-history selection | no | yes |
+| `GET /api/v1/optional-history/series` | Discover persisted optional historical meanings | no | yes |
 
-The application contract exposes the seven product API endpoints above; FastAPI may additionally
+The application contract exposes the eight product API endpoints above; FastAPI may additionally
 expose its standard documentation/OpenAPI routes (`/docs`, `/redoc`, `/openapi.json`). `/api/v1` is
 a fresh namespace, not inherited legacy versioning.
 
@@ -235,14 +237,14 @@ evidence trail, not because the policy is undecided.
 
 ## `GET /api/v1/history`
 
-All historical charts and summaries. The only endpoint that reads persisted data.
+Historical charts and summaries from persisted data.
 
 | Parameter | Required | Meaning |
 |---|---|---|
 | `from` | yes | Start instant, inclusive. ISO 8601 with an explicit offset, or `YYYY-MM-DD` local midnight. Whole minutes only. |
 | `to` | yes | End instant, exclusive. Same forms. Must be later than `from`. |
 | `bucket` | no, default `auto` | `auto`, `1m`, `5m`, `1h`, `1d`, `total`. |
-| `series` | no, default all | Comma-separated metric keys plus `cop_co`, `cop_dhw`, `cop_total`. No duplicates. |
+| `series` | no, default canonical set | Comma-separated canonical metric/COP keys and exact persisted optional selectors such as `optional:TOP21@1`. No duplicates. |
 
 `auto` chooses its base bucket from range length alone: ≤36 h → `1m`, ≤10 days → `5m`, ≤120 days →
 `1h`, longer → `1d`. If that chosen `1m`/`5m` bucket would require the raw minutes of an hour that
@@ -286,6 +288,16 @@ buckets.
   A `null` value alongside `recorded_minutes > 0` means the metric was unknown in the recorded
   minutes, not that the minutes are missing.
 - `kwh` is `Σ W / 60000` over known minutes only, never extrapolated over missing ones.
+- An explicit `optional:IDENTITY@VERSION` selector resolves to one persisted `optional_series`
+  meaning. Mean series return `avg`, `min`, `max`, `selected_minutes`, `known_minutes`; last series
+  return `last`, `min`, `max`, `selected_minutes`, `known_minutes`. Persisted `energy=true` adds
+  `kwh = Σ known minute-average W / 60000`. Metadata comes from the persisted series row:
+  `series_id`, `identity`, `topic`, `profile_version`, `label`, `unit`, `kind`, `semantic_type`,
+  `energy`. A selected unknown minute increments only `selected_minutes`; a missing recorded
+  minute increments neither count. Different versions are separate selectors and never joined.
+  Bare identities, malformed versions, and unknown persisted meanings return 400. No optional
+  selector is included by default. Mixed canonical and optional requests share one database
+  snapshot, bucket calendar, raw/rollup boundary, and 3000-bucket limit.
 - `cop` is `Σ paired output / Σ paired input` over minutes where all required power channels are
   known. It is `null` when there are no paired minutes or the paired input sum is 0. Instantaneous
   COP values are never averaged.
@@ -299,7 +311,7 @@ bucket.
 |---|---|
 | `400` | Malformed parameters: missing `from`/`to`, unparseable or naive timestamps, non-minute alignment, `from >= to`, unknown bucket, unknown or duplicate series, invalid or repeated `include`. |
 | `422` | Well-formed but unrepresentable: more than 3000 buckets, a range or partial edge hour whose raw minutes were provably purged, instants outside 1970–2100. |
-| `503` | `/api/v1/history` only: the database is unavailable. `/api/v1/optional-history/selection` shares this meaning; see its own section below. |
+| `503` | The database is unavailable for `/api/v1/history`, `/api/v1/optional-history/selection`, or `/api/v1/optional-history/series`. |
 
 The body is `{"detail": "…"}`. `422` for purged raw means the backend knows the minutes existed and
 were physically deleted — it is never a consequence of a range simply being old. A range that was
@@ -397,7 +409,8 @@ that identity.
 Each endpoint accepts only its one documented `include` value or no `include`; unknown,
 comma-separated, empty, and repeated `include` values return `400`. The five Stage 1–4A endpoint
 paths remain unchanged. `/status` keeps its Stage 3 shape and `uncatalogued_topics` name, which can
-still list known non-core capability topics. `/history` still accepts only canonical series keys.
+still list known non-core capability topics. Default `/history` remains canonical; explicit
+Stage 4B selectors are documented below.
 
 Activity/events, reports and commands belong to later Stage 4 checkpoints. This document lists no
 endpoint or response for them until implemented and contract-tested. The frontend starts only
@@ -407,10 +420,19 @@ after the complete product-backend contract is documented.
 
 Checkpoint A froze the architecture (`ARCHITECTURE.md` §25.2.1); checkpoint B implements the
 `HistoryProfile` domain model, the production immutable policy timeline, and this API. Checkpoint C
-may record selected optional values internally in `optional_sample_1m` for canonical
-recorded minutes. There is still no optional historical query or optional energy output. These
-endpoints declare and inspect *selection*; default `/live`, `/metrics`, `/status`, and `/history`
-response shapes are unchanged, and raw optional JSON is not exposed publicly.
+records selected-known optional values internally in `optional_sample_1m` for canonical minutes.
+Checkpoint D adds durable hourly counts and explicit historical queries. Default `/live`,
+`/metrics`, `/status`, and `/history` response shapes remain unchanged, and raw optional JSON is
+not exposed publicly.
+
+### `GET /api/v1/optional-history/series`
+
+DB-backed and independent of MQTT. Returns `{"series": [...]}` in stable `series_id` order,
+including disabled, old-version, and currently blocked meanings. Each entry has `selector`
+(`optional:IDENTITY@VERSION`), `series_id`, `identity`, `topic`, `profile_version`, `label`,
+`unit`, `kind`, `semantic_type`, and `energy` from the persisted `optional_series` row. Empty
+before the first selection; disabling selection does not remove historical metadata. Returns
+503 when MariaDB is unavailable.
 
 ### `GET /api/v1/metrics?include=history_profiles`
 

@@ -29,14 +29,17 @@ from __future__ import annotations
 
 from bisect import bisect_left
 from collections.abc import Sequence
+import re
 
 from .aggregation import (
-    PAIRS, RECORDED, Stats, combine_maps, cop, coverage_percent, energy_kwh, fold_minutes, is_power,
-    minute_columns,
+    PAIRS, RECORDED, OptionalHistoryInconsistent, OptionalStats, Stats, combine_maps,
+    combine_optional_maps, cop,
+    coverage_percent, energy_kwh, fold_minutes, fold_optional_minutes, is_power, minute_columns,
 )
 from .catalog import METRICS, METRICS_BY_KEY, RECORDED_KEYS
 from .minute import iso_utc
-from .storage import Storage
+from .optional_policy import snapshot_timeline
+from .storage import SeriesRow, Storage
 from .timegrid import (
     BUCKETS, HOUR, LOCAL_TZ_NAME, MAX_BUCKETS, MINUTE_BUCKETS, Unrepresentable, auto_bucket,
     bucket_edges, ceil_hour, expected_minutes, floor_hour,
@@ -47,6 +50,18 @@ COP_LABELS = {"cop_co": "COP CO", "cop_dhw": "COP CWU", "cop_total": "COP łącz
 HISTORY_SERIES: tuple[str, ...] = RECORDED_KEYS + tuple(COP_SERIES)
 HOURLY_BUCKETS = ("1h", "1d", "total")
 COP_FIELDS: tuple[str, ...] = ("cop", "paired_minutes", "input_kwh", "output_kwh")
+OPTIONAL_SELECTOR = re.compile(r"^optional:([A-Z][A-Z0-9]*)@([1-9][0-9]*)$")
+
+
+def optional_selector(row: SeriesRow) -> str:
+    return f"optional:{row.identity}@{row.profile_version}"
+
+
+def optional_series_metadata(row: SeriesRow) -> dict:
+    return {"selector": optional_selector(row), "series_id": row.id, "identity": row.identity,
+            "topic": row.expected_topic, "profile_version": row.profile_version,
+            "label": row.label, "unit": row.unit, "kind": row.kind,
+            "semantic_type": row.semantic_type, "energy": row.energy}
 
 
 def history_fields(name: str) -> tuple[str, ...]:
@@ -103,6 +118,8 @@ def catalog() -> dict:
 def _needed(series: Sequence[str]) -> tuple[str, ...]:
     needed = {RECORDED}
     for name in series:
+        if OPTIONAL_SELECTOR.fullmatch(name):
+            continue
         if name in COP_SERIES:
             needed.update(PAIRS[COP_SERIES[name]])
         else:
@@ -120,12 +137,23 @@ def _hour_pieces(a: int, b: int):
 def query(storage: Storage, start: int, end: int, bucket: str, series: Sequence[str],
           now: float) -> dict:
     """History for minute-aligned ``start < end``. Raises ``Unrepresentable`` (422)."""
-    unknown = [s for s in series if s not in HISTORY_SERIES]
+    unknown = [s for s in series if s not in HISTORY_SERIES and not OPTIONAL_SELECTOR.fullmatch(s)]
     if unknown:
         raise ValueError(f"unknown series: {', '.join(unknown)}")
     needed = _needed(series)
 
     with storage.session() as s:
+        optional_rows: dict[str, SeriesRow] = {}
+        for selector in series:
+            match = OPTIONAL_SELECTOR.fullmatch(selector)
+            if match:
+                found = s.find_optional_series(match[1], int(match[2]))
+                if not found:
+                    raise ValueError(f"unknown persisted optional series: {selector}")
+                if len(found) != 1:
+                    raise OptionalHistoryInconsistent(f"ambiguous persisted optional series: {selector}")
+                optional_rows[selector] = found[0]
+        optional_ids = [row.id for row in optional_rows.values()]
         rolled_until = s.rolled_until()
         if bucket == "auto":
             resolved = auto_bucket(start, end)
@@ -150,23 +178,50 @@ def query(storage: Storage, start: int, end: int, bucket: str, series: Sequence[
 
         columns = minute_columns(needed)
         raw = [r for a, b in raw_spans for r in s.read_minutes(a, b, columns)]
+        raw_ts = [ts for ts, _ in raw]
+        optional_raw = ([item for a, b in raw_spans for item in s.read_optional_minutes(a, b)]
+                        if optional_ids else [])
+        optional_raw_ts = [ts for ts, _ in optional_raw]
+        timeline = (snapshot_timeline(s, s.read_policy_head(), raw_ts) if optional_ids else {})
         rolled: dict[int, dict[str, Stats]] = {}
         for h, name, n, v_sum, v_min, v_max, v_last in s.read_rollup(roll_lo, roll_hi, needed):
             rolled.setdefault(h, {})[name] = Stats(n, v_sum, v_min, v_max, v_last)
+        optional_rolled: dict[int, dict[int, OptionalStats]] = {}
+        if optional_ids:
+            for h, sid, selected, known, v_sum, v_min, v_max, v_last in s.read_optional_rollup(
+                    roll_lo, roll_hi, optional_ids):
+                fields = (v_sum, v_min, v_max, v_last)
+                if (known == 0 and any(value is not None for value in fields)) or (
+                        known > 0 and any(value is None for value in fields)):
+                    raise OptionalHistoryInconsistent(
+                        f"optional rollup {h}/{sid} has incompatible known count and statistics")
+                values = None if known == 0 else Stats(known, v_sum, v_min, v_max, v_last)
+                optional_rolled.setdefault(h, {})[sid] = OptionalStats(selected, known, values)
 
-    raw_ts = [ts for ts, _ in raw]
     per_bucket: list[dict[str, Stats]] = []
+    optional_per_bucket: list[dict[int, OptionalStats]] = []
     for a, b in edges:
         acc: dict[str, Stats] = {}
+        optional_acc: dict[int, OptionalStats] = {}
         for pa, pb in _hour_pieces(a, b):
             if roll_lo <= pa and pb <= roll_hi:
                 part = rolled.get(pa, {})
+                optional_part = optional_rolled.get(pa, {}) if optional_ids else {}
             else:
-                part = fold_minutes(raw[bisect_left(raw_ts, pa):bisect_left(raw_ts, pb)], needed)
+                minute_part = raw[bisect_left(raw_ts, pa):bisect_left(raw_ts, pb)]
+                part = fold_minutes(minute_part, needed)
+                optional_part = (fold_optional_minutes(
+                    [ts for ts, _ in minute_part], timeline,
+                    dict(optional_raw[bisect_left(optional_raw_ts, pa):bisect_left(optional_raw_ts, pb)]))
+                    if optional_ids else {})
             acc = combine_maps(acc, part)
+            if optional_ids:
+                optional_acc = combine_optional_maps(optional_acc, optional_part)
         per_bucket.append(acc)
+        optional_per_bucket.append(optional_acc)
 
-    return _response(start, end, bucket, resolved, edges, per_bucket, series, now)
+    return _response(start, end, bucket, resolved, edges, per_bucket, series, now,
+                     optional_per_bucket, optional_rows)
 
 
 _SERIES_VALUES = {  # one bucket-aligned array per history field of an ordinary metric
@@ -179,7 +234,8 @@ _SERIES_VALUES = {  # one bucket-aligned array per history field of an ordinary 
 }
 
 
-def _response(start, end, requested, resolved, edges, per_bucket, series, now) -> dict:
+def _response(start, end, requested, resolved, edges, per_bucket, series, now,
+              optional_per_bucket=None, optional_rows=None) -> dict:
     buckets = []
     for (a, b), acc in zip(edges, per_bucket):
         expected = expected_minutes(a, b, now)
@@ -194,13 +250,27 @@ def _response(start, end, requested, resolved, edges, per_bucket, series, now) -
 
     out = {}
     for name in series:
-        fields = history_fields(name)
-        if name in COP_SERIES:
+        if optional_rows and name in optional_rows:
+            row = optional_rows[name]
+            stats = [acc.get(row.id) for acc in optional_per_bucket]
+            values = [None if st is None else st.values for st in stats]
+            first = "avg" if row.kind == "mean" else "last"
+            entry = optional_series_metadata(row)
+            entry.pop("selector")
+            entry.update({first: _SERIES_VALUES[first](values), "min": _SERIES_VALUES["min"](values),
+                          "max": _SERIES_VALUES["max"](values),
+                          "selected_minutes": [0 if st is None else st.selected_minutes for st in stats],
+                          "known_minutes": [0 if st is None else st.known_minutes for st in stats]})
+            if row.energy:
+                entry["kwh"] = [energy_kwh(value) for value in values]
+        elif name in COP_SERIES:
+            fields = history_fields(name)
             pair_in, pair_out = PAIRS[COP_SERIES[name]]
             facts = [cop(acc.get(pair_in), acc.get(pair_out)) for acc in per_bucket]
             entry = {"label": COP_LABELS[name], "unit": None, "kind": "cop"}
             entry.update({f: [fact[f] for fact in facts] for f in fields})
         else:
+            fields = history_fields(name)
             metric = METRICS_BY_KEY[name]
             stats = [acc.get(name) for acc in per_bucket]
             entry = {"label": metric.label, "unit": metric.unit, "kind": metric.kind}

@@ -72,7 +72,8 @@ expected unrecorded partial minute. No optional capability was persisted.
 
 ## Stage 4B
 
-**Checkpoints A (architecture/contract), B (policy foundation), and C (raw recording) — DONE.**
+**Checkpoints A (architecture/contract), B (policy foundation), C (raw recording), and D
+(durable optional history) — DONE.**
 Branch `stage-4b-optional-history`, draft PR #7, not merged.
 
 ### Implemented
@@ -119,34 +120,41 @@ Branch `stage-4b-optional-history`, draft PR #7, not merged.
   refusal, and bounded waiting semantics. `optional_sample_1m` stores deterministic complete JSON
   keyed by stable series id; a restrictive FK enforces its canonical subset relation. Blocked or
   unknown selected members have no JSON key; zero remains a known value.
-- Canonical rollup continues. A transitional purge guard refuses any deletion range containing
-  a canonical minute under non-empty optional selection, including selected-but-unknown minutes
-  with no optional raw row, until checkpoint D implements optional rollup and combined
-  proof/deletion. A separate optional-row guard remains as defense in depth.
+- Checkpoint C's transitional purge guard preserved selected-known and selected-but-unknown
+  evidence until D supplied durable optional rollups.
 - Checkpoint C adversarial corrections: optional derived non-finite arithmetic becomes unknown
   before persistence, with a second finite check at the selected-known JSON boundary; the fake
   enforces production JSON serialization. Production `persist` accepts only explicit
   `RecordedMinute` pairs. Real MariaDB tests cover the former poison pair, policy-aware purge,
   persist/PUT serialization, and a lost-ack protected retry across a later PUT.
+- Checkpoint D stores `optional_rollup_1h` with separate selected/known counts and known-value
+  statistics. Canonical and optional rollups share one `rolled_until`, are rebuilt together for
+  new and late hours, and commit atomically. Shared purge proves exact optional raw/policy/rollup
+  agreement before deleting optional raw and canonical raw together. Selected-but-unknown counts
+  survive purge in rollup rows.
+- `GET /api/v1/optional-history/series` discovers persisted meanings. Explicit
+  `optional:IDENTITY@VERSION` selectors extend the existing `/history` engine, including mixed
+  canonical/optional requests, version isolation, raw/rollup equivalence, Warsaw DST, and
+  persisted `energy=true` kWh. Default API shapes remain canonical and unchanged.
 
 ### Deferred
 
 See `docs/ARCHITECTURE.md` §25.2.8: the complete eligible profile list, optional-power energy
 beyond `XTOP1`/`XTOP4`, and a max-selection-count remain open questions. Remaining checkpoints:
 
-- **Checkpoint D:** `optional_rollup_1h`; late-hour rebuild; purge proof/integration; optional
-  history query through the existing history algebra/API.
 - **Checkpoint E:** full tests/docs; owner CT109 runtime validation; publication-gap evidence;
-  storage/table/index/backup measurements.
+  storage/table/index/backup measurements; eligible-list and max-selection decisions if evidence
+  supports them.
 
 ## Out of scope
 
-- Optional rollup/history query, event engine, reports and SET publishing.
+- Events/activity/cycles, reports, SET publishing and frontend.
 - Frontend and legacy compatibility or historical migration.
 - Changing the 21 canonical metric semantics, Stage 1–4A history invariants, or the 365-day
   default raw retention.
 
 ## Next
 
-Checkpoint D of Stage 4B: `optional_rollup_1h`, late-hour rebuild, shared purge proof/deletion,
-and optional history query/algebra. See `docs/ROADMAP.md` for later stages.
+Checkpoint E of Stage 4B: final tests/docs, owner CT109 runtime validation, publication-gap
+evidence, real storage/table/index/backup measurements, and eligible-list/max-selection decisions
+if evidence supports them. See `docs/ROADMAP.md` for later stages.

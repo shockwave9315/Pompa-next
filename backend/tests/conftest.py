@@ -91,6 +91,7 @@ class FakeSession:
         self.optional_members = {k: set(v) for k, v in storage.optional_members.items()}
         self.optional_head = storage.optional_head
         self.optional_raw = dict(storage.optional_raw)
+        self.optional_rollup = dict(storage.optional_rollup)
 
     def upsert_minutes(self, rows):
         for r in rows:
@@ -98,7 +99,7 @@ class FakeSession:
                 raise ValueError(f"unaligned minute ts {r.ts}")
             self.rows[r.ts] = dict(r.values)
 
-    def read_minutes(self, start, end, keys=None):
+    def read_minutes(self, start, end, keys=None, *, locking=False):
         from pompa.catalog import RECORDED_KEYS
 
         keys = RECORDED_KEYS if keys is None else keys
@@ -106,6 +107,8 @@ class FakeSession:
 
     def first_minute_at_or_after(self, ts):
         return min((t for t in self.rows if t >= ts), default=None)
+
+    lock_first_minute_at_or_after = first_minute_at_or_after
 
     def minute_bounds(self):
         return (min(self.rows), max(self.rows)) if self.rows else (None, None)
@@ -116,6 +119,12 @@ class FakeSession:
         doomed = [t for t in self.rows if t < cutoff]
         for t in doomed:
             del self.rows[t]
+        return len(doomed)
+
+    def delete_optional_minutes(self, start, end):
+        doomed = [t for t in self.optional_raw if start <= t < end]
+        for t in doomed:
+            del self.optional_raw[t]
         return len(doomed)
 
     def lock_minute_timestamps(self, start, end):
@@ -136,7 +145,7 @@ class FakeSession:
         else:
             self.optional_raw.pop(ts, None)
 
-    def read_optional_minutes(self, start, end):
+    def read_optional_minutes(self, start, end, *, locking=False):
         return [(t, dict(v)) for t, v in sorted(self.optional_raw.items()) if start <= t < end]
 
     def first_optional_minute(self, start, end):
@@ -144,6 +153,8 @@ class FakeSession:
 
     def rolled_until(self):
         return max(h for h, _ in self.rollup) + 3600 if self.rollup else None
+
+    lock_rolled_until = rolled_until
 
     def first_purged_hour(self, start, end):
         """Same fact as MariaDB: whole overlapped hours, rollup present, no raw inside."""
@@ -161,6 +172,17 @@ class FakeSession:
             assert n > 0
             self.rollup[(hour_ts, series)] = (n, *stats)
 
+    def replace_optional_rollup_hour(self, hour_ts, values):
+        assert hour_ts % 3600 == 0
+        for key in [k for k in self.optional_rollup if k[0] == hour_ts]:
+            del self.optional_rollup[key]
+        for sid, selected, known, *stats in values:
+            self.optional_rollup[(hour_ts, sid)] = (selected, known, *stats)
+
+    def read_optional_rollup(self, start, end, series_ids=None, *, locking=False):
+        return [(h, sid, *v) for (h, sid), v in sorted(self.optional_rollup.items())
+                if start <= h < end and (series_ids is None or sid in series_ids)]
+
     def read_rollup(self, start, end, series):
         return [(h, s, *v) for (h, s), v in sorted(self.rollup.items()) if start <= h < end and s in series]
 
@@ -176,6 +198,13 @@ class FakeSession:
 
     def read_policy_head(self):
         return self.optional_head
+
+    def list_optional_series(self):
+        return [self.optional_series[sid] for sid in sorted(self.optional_series)]
+
+    def find_optional_series(self, identity, profile_version):
+        return [row for row in self.list_optional_series()
+                if row.identity == identity and row.profile_version == profile_version]
 
     def lock_policy_head(self):
         # Single-threaded fake: a plain read already behaves like the real locking/current read.
@@ -262,6 +291,7 @@ class FakeStorage:
         self.optional_members = {1: set()}  # revision_id -> {series_id}
         self.optional_head = 1
         self.optional_raw = {}
+        self.optional_rollup = {}
         self._next_optional_series_id = 1
         self._next_optional_revision_id = 2
 
@@ -291,6 +321,7 @@ class FakeStorage:
         self.optional_revisions, self.optional_members = tx.optional_revisions, tx.optional_members
         self.optional_head = tx.optional_head
         self.optional_raw = tx.optional_raw
+        self.optional_rollup = tx.optional_rollup
 
     @contextmanager
     def session(self):
@@ -402,6 +433,7 @@ def mariadb():
     )
     with storage._connection() as conn, conn.cursor() as cur:
         # FK-safe drop order: tables that reference another Stage 4B policy table drop first.
+        cur.execute("DROP TABLE IF EXISTS optional_rollup_1h")
         cur.execute("DROP TABLE IF EXISTS optional_policy_member")
         cur.execute("DROP TABLE IF EXISTS optional_policy_head")
         cur.execute("DROP TABLE IF EXISTS optional_policy_revision")

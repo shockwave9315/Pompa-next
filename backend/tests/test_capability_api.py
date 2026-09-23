@@ -10,7 +10,7 @@ CAPABILITY_FIELDS = {
 }
 READING_FIELDS = {"topic", "value", "kind", "raw", "mode", "available", "received_at"}
 PATHS = {"/health", "/api/v1/status", "/api/v1/live", "/api/v1/metrics", "/api/v1/history",
-         "/api/v1/optional-history/selection"}
+         "/api/v1/optional-history/selection", "/api/v1/optional-history/series"}
 RANGE = {"from": "2027-01-15T08:00:00Z", "to": "2027-01-15T08:01:00Z"}
 
 

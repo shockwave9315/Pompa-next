@@ -134,18 +134,18 @@ def test_ambiguous_commit_retry_preserves_pair(any_storage):
     assert list(optional(db)[T0].values()) == [12.0]
 
 
-def test_purge_interlock_and_canonical_rollup(any_storage):
+def test_shared_purge_after_optional_rollup(any_storage):
     db = any_storage
     select(db, ["TOP21"], T0)
     persist(db, [pair(T0, TOP21=2.0)])
     assert roll_next_hour(db, T0 + HOUR) == T0
     persist(db, [pair(T0 + 3 * HOUR)])
     assert roll_next_hour(db, T0 + 4 * HOUR) == T0 + 3 * HOUR
-    with pytest.raises(PurgeRefused):
-        purge_step(db, T0 + 100 * HOUR, 1, None, 24)
-    assert optional(db)[T0]
+    assert purge_step(db, T0 + 100 * HOUR, 1, None, 24)[1] == 1
+    assert optional(db) == {}
     with db.session() as s:
-        assert len(s.read_minutes(T0, T0 + 60)) == 1
+        assert s.read_minutes(T0, T0 + 60) == []
+        assert s.read_optional_rollup(T0, T0 + HOUR)[0][2:4] == (1, 1)
 
 
 def test_continuous_observation_and_future_selection():
@@ -342,28 +342,28 @@ def test_purge_canonical_only_and_empty_selection(mariadb):
 
 
 @pytest.mark.parametrize("known", [True, False])
-def test_purge_preserves_selected_known_and_unknown(mariadb, known):
+def test_purge_preserves_selected_known_and_unknown_rollup(mariadb, known):
     db = mariadb
     db.ensure_schema()
     select(db, ["TOP21"], T0)
     _old_raw(db, pair(T0, **({"TOP21": 4.0} if known else {})), pair(T0 + 3 * HOUR))
-    with pytest.raises(PurgeRefused):
-        _purge_old(db)
+    assert _purge_old(db)[1] == 1
     with db.session() as s:
-        assert len(s.read_minutes(T0, T0 + 60)) == 1
-        assert bool(s.read_optional_minutes(T0, T0 + 60)) is known
+        assert s.read_minutes(T0, T0 + 60) == []
+        assert s.read_optional_minutes(T0, T0 + 60) == []
+        assert s.read_optional_rollup(T0, T0 + HOUR)[0][2:4] == (1, int(known))
 
 
-def test_purge_mid_hour_selection_unknown_blocks_actual_minute(mariadb):
+def test_purge_mid_hour_selection_unknown_is_durable(mariadb):
     db = mariadb
     db.ensure_schema()
     select(db, ["TOP21"], T0 + 30 * 60)
     _old_raw(db, pair(T0), pair(T0 + 30 * 60), pair(T0 + 3 * HOUR))
-    with pytest.raises(PurgeRefused):
-        _purge_old(db, max_hours=1)
+    assert _purge_old(db, max_hours=1)[1] == 2
     with db.session() as s:
-        assert len(s.read_minutes(T0, T0 + HOUR)) == 2
+        assert s.read_minutes(T0, T0 + HOUR) == []
         assert s.read_optional_minutes(T0, T0 + HOUR) == []
+        assert s.read_optional_rollup(T0, T0 + HOUR)[0][2:4] == (1, 0)
 
 
 def test_purge_uses_persisted_selection_even_if_profile_disappears(mariadb, monkeypatch):
@@ -372,20 +372,20 @@ def test_purge_uses_persisted_selection_even_if_profile_disappears(mariadb, monk
     select(db, ["TOP21"], T0)
     _old_raw(db, pair(T0), pair(T0 + 3 * HOUR))
     monkeypatch.setattr("pompa.recorder.HISTORY_PROFILES_BY_IDENTITY", {})
-    with pytest.raises(PurgeRefused):
-        _purge_old(db)
+    assert _purge_old(db)[1] == 1
+    with db.session() as s:
+        assert s.read_optional_rollup(T0, T0 + HOUR)[0][2:4] == (1, 0)
 
 
-def test_purge_optional_row_later_in_same_chunk_refuses_all(mariadb):
+def test_purge_optional_row_later_in_same_chunk_deletes_together(mariadb):
     db = mariadb
     db.ensure_schema()
     select(db, ["TOP21"], T0 + HOUR)
     _old_raw(db, pair(T0), pair(T0 + HOUR, TOP21=5.0), pair(T0 + 3 * HOUR))
-    with pytest.raises(PurgeRefused):
-        _purge_old(db, max_hours=2)
+    assert _purge_old(db, max_hours=2)[1] == 2
     with db.session() as s:
-        assert len(s.read_minutes(T0, T0 + HOUR + 60)) == 2
-        assert len(s.read_optional_minutes(T0, T0 + HOUR + 60)) == 1
+        assert s.read_minutes(T0, T0 + HOUR + 60) == []
+        assert s.read_optional_minutes(T0, T0 + HOUR + 60) == []
 
 
 def test_purge_optional_row_exactly_at_end_does_not_block(mariadb):

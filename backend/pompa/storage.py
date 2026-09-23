@@ -29,6 +29,7 @@ assert all(_IDENT.match(k) for k in RECORDED_KEYS)
 TABLE = "sample_1m"
 ROLLUP = "rollup_1h"
 OPTIONAL_RAW = "optional_sample_1m"
+OPTIONAL_ROLLUP = "optional_rollup_1h"
 
 OPTIONAL_RAW_DDL = (
     f"CREATE TABLE IF NOT EXISTS {OPTIONAL_RAW} ("
@@ -124,6 +125,28 @@ OPTIONAL_POLICY_HEAD_DDL = (
     ") ENGINE=InnoDB"
 )
 
+OPTIONAL_ROLLUP_DDL = (
+    f"CREATE TABLE IF NOT EXISTS {OPTIONAL_ROLLUP} (\n"
+    "  hour_ts INT UNSIGNED NOT NULL,\n"
+    "  series_id INT UNSIGNED NOT NULL,\n"
+    "  selected_minutes SMALLINT UNSIGNED NOT NULL,\n"
+    "  known_minutes SMALLINT UNSIGNED NOT NULL,\n"
+    "  v_sum DOUBLE NULL,\n"
+    "  v_min DOUBLE NULL,\n"
+    "  v_max DOUBLE NULL,\n"
+    "  v_last DOUBLE NULL,\n"
+    "  PRIMARY KEY (hour_ts, series_id),\n"
+    "  CONSTRAINT ck_optional_rollup_counts CHECK"
+    " (selected_minutes > 0 AND known_minutes <= selected_minutes),\n"
+    "  CONSTRAINT ck_optional_rollup_values CHECK"
+    " ((known_minutes = 0 AND v_sum IS NULL AND v_min IS NULL AND v_max IS NULL AND v_last IS NULL)"
+    " OR (known_minutes > 0 AND v_sum IS NOT NULL AND v_min IS NOT NULL"
+    " AND v_max IS NOT NULL AND v_last IS NOT NULL)),\n"
+    f"  CONSTRAINT fk_optional_rollup_series FOREIGN KEY (series_id)"
+    f" REFERENCES {OPTIONAL_SERIES}(id) ON DELETE RESTRICT\n"
+    ") ENGINE=InnoDB"
+)
+
 GENESIS_REVISION_ID = 1
 POLICY_HEAD_ID = 1
 
@@ -191,19 +214,28 @@ class Session:
             self._cur.executemany(_UPSERT_SQL, params)
 
     def read_minutes(self, start: int, end: int,
-                     keys: Sequence[str] = RECORDED_KEYS) -> list[tuple[int, dict[str, float | None]]]:
+                     keys: Sequence[str] = RECORDED_KEYS, *, locking: bool = False
+                     ) -> list[tuple[int, dict[str, float | None]]]:
         """Rows with ``start <= ts < end`` in ascending ``ts``."""
         for k in keys:
             if k not in RECORDED_KEYS:
                 raise ValueError(f"unknown column {k!r}")
         cols = "".join(f", {k}" for k in keys)
-        self._cur.execute(f"SELECT ts{cols} FROM {TABLE} WHERE ts >= %s AND ts < %s ORDER BY ts", (start, end))
+        suffix = " FOR UPDATE" if locking else ""
+        self._cur.execute(f"SELECT ts{cols} FROM {TABLE} WHERE ts >= %s AND ts < %s ORDER BY ts{suffix}",
+                          (start, end))
         return [(int(r[0]), dict(zip(keys, r[1:]))) for r in self._cur.fetchall()]
 
     def first_minute_at_or_after(self, ts: int) -> int | None:
         self._cur.execute(f"SELECT MIN(ts) FROM {TABLE} WHERE ts >= %s", (max(ts, 0),))
         (value,) = self._cur.fetchone()
         return None if value is None else int(value)
+
+    def lock_first_minute_at_or_after(self, ts: int) -> int | None:
+        self._cur.execute(f"SELECT ts FROM {TABLE} WHERE ts >= %s ORDER BY ts LIMIT 1 FOR UPDATE",
+                          (max(ts, 0),))
+        row = self._cur.fetchone()
+        return None if row is None else int(row[0])
 
     def minute_bounds(self) -> tuple[int | None, int | None]:
         """Oldest and newest stored minute."""
@@ -213,6 +245,10 @@ class Session:
 
     def delete_minutes_before(self, cutoff: int) -> int:
         self._cur.execute(f"DELETE FROM {TABLE} WHERE ts < %s", (cutoff,))
+        return self._cur.rowcount
+
+    def delete_optional_minutes(self, start: int, end: int) -> int:
+        self._cur.execute(f"DELETE FROM {OPTIONAL_RAW} WHERE ts >= %s AND ts < %s", (start, end))
         return self._cur.rowcount
 
     def lock_minute_timestamps(self, start: int, end: int) -> list[int]:
@@ -245,9 +281,11 @@ class Session:
             f"INSERT INTO {OPTIONAL_RAW} (ts, values_json) VALUES (%s, %s)"
             " ON DUPLICATE KEY UPDATE values_json = VALUES(values_json)", (ts, document))
 
-    def read_optional_minutes(self, start: int, end: int) -> list[tuple[int, dict[str, float]]]:
+    def read_optional_minutes(self, start: int, end: int, *, locking: bool = False
+                              ) -> list[tuple[int, dict[str, float]]]:
+        suffix = " FOR UPDATE" if locking else ""
         self._cur.execute(f"SELECT ts, values_json FROM {OPTIONAL_RAW}"
-                          " WHERE ts >= %s AND ts < %s ORDER BY ts", (start, end))
+                          f" WHERE ts >= %s AND ts < %s ORDER BY ts{suffix}", (start, end))
         return [(int(ts), json.loads(document)) for ts, document in self._cur.fetchall()]
 
     def first_optional_minute(self, start: int, end: int) -> int | None:
@@ -263,6 +301,11 @@ class Session:
         self._cur.execute(f"SELECT MAX(hour_ts) FROM {ROLLUP}")
         (value,) = self._cur.fetchone()
         return None if value is None else int(value) + HOUR
+
+    def lock_rolled_until(self) -> int | None:
+        self._cur.execute(f"SELECT hour_ts FROM {ROLLUP} ORDER BY hour_ts DESC LIMIT 1 FOR UPDATE")
+        row = self._cur.fetchone()
+        return None if row is None else int(row[0]) + HOUR
 
     def first_purged_hour(self, start: int, end: int) -> int | None:
         """Lowest UTC hour overlapping ``[start, end)`` whose raw minutes were purged.
@@ -327,6 +370,35 @@ class Session:
             (start, end, series))
         return [(int(h), int(c), None if n is None else int(n)) for h, c, n in self._cur.fetchall()]
 
+    def replace_optional_rollup_hour(self, hour_ts: int, values: Iterable[tuple]) -> None:
+        """Replace every optional series row for one hour, including removal of stale rows."""
+        _check_hour(hour_ts)
+        params = [(hour_ts, *value) for value in values]
+        self._cur.execute(f"DELETE FROM {OPTIONAL_ROLLUP} WHERE hour_ts = %s", (hour_ts,))
+        if params:
+            self._cur.executemany(
+                f"INSERT INTO {OPTIONAL_ROLLUP}"
+                " (hour_ts, series_id, selected_minutes, known_minutes, v_sum, v_min, v_max, v_last)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)", params)
+
+    def read_optional_rollup(self, start: int, end: int, series_ids: Sequence[int] | None = None,
+                             *, locking: bool = False) -> list[tuple]:
+        suffix = " FOR UPDATE" if locking else ""
+        where = "hour_ts >= %s AND hour_ts < %s"
+        params: list[int] = [start, end]
+        if series_ids is not None:
+            if not series_ids:
+                return []
+            where += f" AND series_id IN ({', '.join(['%s'] * len(series_ids))})"
+            params.extend(series_ids)
+        self._cur.execute(
+            f"SELECT hour_ts, series_id, selected_minutes, known_minutes, v_sum, v_min, v_max, v_last"
+            f" FROM {OPTIONAL_ROLLUP} WHERE {where} ORDER BY hour_ts, series_id{suffix}", params)
+        return [(int(h), int(sid), int(selected), int(known),
+                 None if a is None else float(a), None if b is None else float(b),
+                 None if c is None else float(c), None if d is None else float(d))
+                for h, sid, selected, known, a, b, c, d in self._cur.fetchall()]
+
     # ------------------------------------------------------------- optional history policy
 
     def read_policy_head(self) -> int:
@@ -335,6 +407,21 @@ class Session:
                           (POLICY_HEAD_ID,))
         (revision_id,) = self._cur.fetchone()
         return int(revision_id)
+
+    def list_optional_series(self) -> list[SeriesRow]:
+        self._cur.execute(
+            f"SELECT id, identity, expected_topic, profile_version, label, unit, kind,"
+            f" semantic_type, sentinels_json, min_value, max_value, energy"
+            f" FROM {OPTIONAL_SERIES} ORDER BY id")
+        return [self._decode_series_row(row) for row in self._cur.fetchall()]
+
+    def find_optional_series(self, identity: str, profile_version: int) -> list[SeriesRow]:
+        self._cur.execute(
+            f"SELECT id, identity, expected_topic, profile_version, label, unit, kind,"
+            f" semantic_type, sentinels_json, min_value, max_value, energy"
+            f" FROM {OPTIONAL_SERIES} WHERE identity = %s AND profile_version = %s ORDER BY id",
+            (identity, profile_version))
+        return [self._decode_series_row(row) for row in self._cur.fetchall()]
 
     def lock_policy_head(self) -> int:
         """The one database serialization point (§25.2.1): a locking/current read, not a plain one.
@@ -552,6 +639,7 @@ class Storage:
             cur.execute(OPTIONAL_POLICY_MEMBER_DDL)
             cur.execute(OPTIONAL_POLICY_HEAD_DDL)
             cur.execute(OPTIONAL_RAW_DDL)
+            cur.execute(OPTIONAL_ROLLUP_DDL)
             cur.execute(
                 f"INSERT IGNORE INTO {OPTIONAL_POLICY_REVISION}"
                 " (id, base_revision_id, effective_from_minute, created_at)"

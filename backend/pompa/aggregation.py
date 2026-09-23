@@ -11,6 +11,7 @@ every path makes raw and rollup reads bit-identical rather than merely close.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
@@ -132,6 +133,83 @@ def combine_maps(a: Mapping[str, Stats], b: Mapping[str, Stats]) -> dict[str, St
     for s, stats in b.items():
         out[s] = combine(out.get(s), stats)
     return out
+
+
+class OptionalHistoryInconsistent(RuntimeError):
+    """Stored optional raw/rollup facts cannot describe one truthful history."""
+
+
+@dataclass(frozen=True, slots=True)
+class OptionalStats:
+    selected_minutes: int
+    known_minutes: int
+    values: Stats | None
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.known_minutes <= self.selected_minutes:
+            raise OptionalHistoryInconsistent("optional selected/known minute counts disagree")
+        if (self.values is None) != (self.known_minutes == 0):
+            raise OptionalHistoryInconsistent("optional known count and value statistics disagree")
+        if self.values is not None:
+            if self.values.n != self.known_minutes or not all(math.isfinite(v) for v in (
+                    self.values.sum, self.values.min, self.values.max, self.values.last)):
+                raise OptionalHistoryInconsistent("optional value statistics are inconsistent or non-finite")
+
+
+def combine_optional(a: OptionalStats | None, b: OptionalStats | None) -> OptionalStats | None:
+    """Combine chronological optional facts using the existing Stats association."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return OptionalStats(a.selected_minutes + b.selected_minutes,
+                         a.known_minutes + b.known_minutes, combine(a.values, b.values))
+
+
+def combine_optional_maps(a: Mapping[int, OptionalStats], b: Mapping[int, OptionalStats]
+                          ) -> dict[int, OptionalStats]:
+    out = dict(a)
+    for sid, stats in b.items():
+        out[sid] = combine_optional(out.get(sid), stats)
+    return out
+
+
+def fold_optional_minutes(minutes: Sequence[int], selected: Mapping[int, Sequence],
+                          raw: Mapping[int, Mapping[str, object]]) -> dict[int, OptionalStats]:
+    """Fold ordered canonical minutes, persisted policy members and optional JSON facts.
+
+    Validates every raw key/value, including keys outside a caller's requested series.
+    """
+    result: dict[int, OptionalStats] = {}
+    minute_set = set(minutes)
+    if any(ts not in minute_set for ts in raw):
+        raise OptionalHistoryInconsistent("optional raw exists without a canonical minute")
+    previous = None
+    for ts in minutes:
+        if previous is not None and ts <= previous:
+            raise ValueError("optional minutes must be folded in ascending order")
+        previous = ts
+        members = {member.id for member in selected[ts]}
+        values: dict[int, float] = {}
+        document = raw.get(ts, {})
+        if not isinstance(document, Mapping):
+            raise OptionalHistoryInconsistent(f"optional raw is not a JSON object at minute {ts}")
+        for key, value in document.items():
+            if not isinstance(key, str) or not key.isascii() or not key.isdecimal() or int(key) <= 0:
+                raise OptionalHistoryInconsistent(f"invalid optional raw series key at minute {ts}")
+            sid = int(key)
+            if str(sid) != key:
+                raise OptionalHistoryInconsistent(f"noncanonical optional raw series key at minute {ts}")
+            if sid not in members:
+                raise OptionalHistoryInconsistent(f"unselected optional raw series {sid} at minute {ts}")
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise OptionalHistoryInconsistent(f"non-finite or nonnumeric optional raw value at minute {ts}")
+            values[sid] = float(value)
+        for sid in members:
+            value = values.get(sid)
+            part = OptionalStats(1, int(value is not None), None if value is None else Stats.of(value))
+            result[sid] = combine_optional(result.get(sid), part)
+    return result
 
 
 # ------------------------------------------------------------------ energy, COP, coverage

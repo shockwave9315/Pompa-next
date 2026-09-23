@@ -763,7 +763,7 @@ with the canonical and optional storage/rollup corrections. Two failure classes 
 
 #### 25.2.4 Long-term optional rollup, roll frontier and purge frontier
 
-Frozen candidate:
+Implemented schema:
 
 ```sql
 optional_rollup_1h
@@ -790,9 +790,9 @@ transaction. Any doubt deletes nothing (§13); there is no independent optional 
 #### 25.2.5 Historical meaning and versioning
 
 One historical series is exactly `(identity, expected_topic, profile_version)`; different meanings
-are never concatenated automatically. A future convenience alias may resolve to the current
-meaning, but a historical query must ultimately resolve to exactly one persistent series id. Final
-public selector syntax is not frozen by checkpoint A.
+are never concatenated automatically. The public selector is
+`optional:IDENTITY@PROFILE_VERSION`, resolving to exactly one persisted series id. A bare identity
+or current-version alias is not accepted.
 
 #### 25.2.6 Default selection
 
@@ -1027,7 +1027,7 @@ then optional raw, and corrects touched canonical rolled hours atomically. Optio
 rolls back both; ambiguous retries repeat whole-document replacement from the same protected pair.
 Policy membership is never captured at minute-open, close or queue time.
 
-Until checkpoint D has `optional_rollup_1h` and a shared purge proof, the existing canonical purge
+During Checkpoint C, before D's shared proof, the canonical purge
 locks the policy head first, reads the exact candidate canonical minute timestamps and their
 persisted policy memberships with current/locking reads, and fails closed if **any** candidate
 minute was under a non-empty selection. This protects selected-known optional raw and
@@ -1037,7 +1037,45 @@ optional raw; canonical-only old ranges still purge as before. Canonical hourly 
 normally. Until D, canonical raw remains for every recorded minute intersecting a non-empty
 optional selection so D can prove both `selected_minutes` and `known_minutes`. D replaces this
 conservative guard with `optional_rollup_1h` and shared proof/deletion. No optional history query,
-kWh output or optional raw public API exists in checkpoint C.
+kWh output or optional raw public API existed in checkpoint C.
+
+#### 25.2.11 Checkpoint D — durable optional history
+
+`optional_rollup_1h` has primary key `(hour_ts, series_id)` and a restrictive FK to
+`optional_series(id)`. Each row has positive `selected_minutes`, `known_minutes` between zero and
+selected, and nullable `v_sum`, `v_min`, `v_max`, `v_last`. All four statistics are NULL exactly
+when known is zero. `OptionalStats` combines selected and known counts with the existing
+chronological `Stats` algebra. For each canonical recorded minute, selected ids come from the
+persisted policy timeline; known ids and values come from its optional raw JSON. Natural canonical
+gaps contribute nothing. Raw keys that are invalid, non-finite, or unselected for their minute
+fail closed as inconsistent stored evidence. Current profiles, capability drift and selection
+availability never reinterpret old raw or rolled facts.
+
+There is still one `rolled_until`, derived from canonical `rollup_1h`. Rolling a stored UTC hour
+locks `optional_policy_head` first, reads the exact canonical minutes, persisted policy and
+optional raw through current/locking reads, and atomically replaces the complete canonical and
+optional hour rollups. Late writes below `rolled_until` repeat that joint rebuild in the raw
+write transaction; a purged hour remains unwritable. Replacing the complete optional hour removes
+stale series rows after a same-ts rewrite. A failed optional rollup write rolls back canonical
+rollup work too.
+
+Purge retains the canonical completeness proof and additionally compares the exact optional fold
+of candidate canonical minutes, persisted policy and optional raw against every stored optional
+rollup row for those hours. Missing, extra or mismatched rows refuse the entire purge. After all
+proofs pass, it deletes optional raw before canonical raw under their restrictive FK, in one
+transaction. The old C selection-based refusal is gone: selected-but-unknown survives as an
+optional rollup row with positive selected count, zero known count and NULL statistics. Policy,
+series metadata and both rollups remain indefinitely. There is no optional retention frontier.
+
+Public history uses exact `optional:IDENTITY@VERSION` selectors, each resolving to one persisted
+`optional_series` row. Versions never concatenate; old or currently blocked meanings remain
+discoverable and queryable. The existing history engine reads canonical and optional facts in one
+consistent snapshot and uses the same exact ranges, UTC hour pieces, Warsaw daily edges,
+auto-bucket promotion, `MAX_BUCKETS`, and canonical `rolled_until`. Minute buckets use raw;
+hourly or larger buckets use optional rollup for complete rolled hours and raw for partial or
+unrolled hours. Per-bucket selected and known counts remain distinct. Persisted `energy=true`
+adds kWh from known minute-average W only (`Σ W / 60000`); no optional COP is inferred. Default
+history requests remain canonical-only.
 
 ### 25.3 Stage 4C — one activity interpretation and durable events
 

@@ -64,7 +64,8 @@ def _parse_series(raw: str | None) -> list[str]:
     keys = [k.strip() for k in raw.split(",") if k.strip()]
     if not keys:
         raise _bad("'series' must list at least one series")
-    unknown = [k for k in keys if k not in history_engine.HISTORY_SERIES]
+    unknown = [k for k in keys if k not in history_engine.HISTORY_SERIES
+               and not history_engine.OPTIONAL_SELECTOR.fullmatch(k)]
     if unknown:
         raise _bad(f"unknown series: {', '.join(unknown)}")
     if len(set(keys)) != len(keys):
@@ -171,6 +172,16 @@ def create_app(recorder: Recorder, storage: Storage, clock: Callable[[], float] 
             raise HTTPException(status_code=503, detail=f"database unavailable: {e}") from None
         return _selection_dict(view)
 
+    @app.get("/api/v1/optional-history/series")
+    def get_optional_history_series() -> dict:
+        """Persisted historical meanings, including old and currently blocked versions."""
+        try:
+            with storage.session() as session:
+                rows = session.list_optional_series()
+        except StorageUnavailable as e:
+            raise HTTPException(status_code=503, detail=f"database unavailable: {e}") from None
+        return {"series": [history_engine.optional_series_metadata(row) for row in rows]}
+
     @app.put("/api/v1/optional-history/selection")
     def put_optional_history_selection(body: SelectionRequest) -> dict:
         """Whole-selection replacement; only future complete minutes are ever affected."""
@@ -203,6 +214,8 @@ def create_app(recorder: Recorder, storage: Storage, clock: Callable[[], float] 
             return history_engine.query(storage, start, end, bucket, names, clock())
         except Unrepresentable as e:
             raise HTTPException(status_code=422, detail=str(e)) from None
+        except ValueError as e:
+            raise _bad(str(e)) from None
         except StorageUnavailable as e:
             raise HTTPException(status_code=503, detail=f"database unavailable: {e}") from None
 

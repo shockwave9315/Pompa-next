@@ -171,16 +171,17 @@ def test_canonical_history_and_metrics_are_unaffected_by_selection_put(mariadb):
         assert s.rolled_until() is None
 
 
-def test_selection_put_does_not_write_optional_raw_and_rollup_is_deferred(mariadb):
+def test_selection_put_does_not_write_optional_raw_or_rollup(mariadb):
     api = RealApi(mariadb, start=T0)
     api.put("/api/v1/optional-history/selection", {"base_revision": 1, "identities": ["TOP21"]}, t=T0)
     with api.storage._connection() as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()"
             " AND TABLE_NAME IN ('optional_sample_1m', 'optional_rollup_1h')")
-        assert cur.fetchone()[0] == 1
+        assert cur.fetchone()[0] == 2
     with api.storage.session() as s:
         assert s.read_optional_minutes(T0, T0 + 60) == []
+        assert s.read_optional_rollup(T0, T0 + 3600) == []
 
 
 # ------------------------------------------------------------------ stored semantic-definition conflict
