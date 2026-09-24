@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 from .capabilities import TypedPayload, effective_capabilities, normalize_payload
 from .catalog import METRICS, SOURCE_BY_TOPIC, Metric, Outcome, Source, parse_value
+from .history_profile import HISTORY_PROFILES, HistoryProfile, parse_history_profile_value
 
 log = logging.getLogger(__name__)
 
@@ -84,6 +85,14 @@ class SourceState:
     max_live_gap: float | None = None
 
 
+@dataclass
+class OptionalSourceState:
+    profile: HistoryProfile
+    seen_live: bool = False
+    value: float | None = None
+    last_live_at: float | None = None
+
+
 class Ingest:
     def __init__(self, stale_after: int):
         self.stale_after = stale_after
@@ -104,6 +113,12 @@ class Ingest:
         self.sources: dict[str, SourceState] = {
             topic: SourceState(metric, source) for topic, (metric, source) in SOURCE_BY_TOPIC.items()
         }
+        self.optional_sources: dict[str, OptionalSourceState] = {
+            p.expected_topic: OptionalSourceState(p) for p in HISTORY_PROFILES
+        }
+        if len(self.optional_sources) != len(HISTORY_PROFILES):
+            raise ValueError("duplicate optional history topic")
+        self._optional_by_identity = {s.profile.identity: s for s in self.optional_sources.values()}
         self._by_metric: dict[str, list[SourceState]] = {
             m.key: [self.sources[s.topic] for s in m.sources] for m in METRICS
         }
@@ -139,6 +154,10 @@ class Ingest:
             s.value = None
             s.last_live_at = None
             s.gap_baseline_at = None
+        for s in self.optional_sources.values():
+            s.seen_live = False
+            s.value = None
+            s.last_live_at = None
         self._clear_physical_readings()
         self.last_live_at = None
         self.alive_since = None
@@ -167,6 +186,11 @@ class Ingest:
             self.physical_readings[identity] = PhysicalReading(
                 identity, topic, normalize_payload(payload), t, retained
             )
+        optional = self.optional_sources.get(topic)
+        if optional is not None and not retained:
+            optional.value, _ = parse_history_profile_value(optional.profile, payload)
+            optional.seen_live = True
+            optional.last_live_at = t
         s = self.sources.get(topic)
         if s is None:
             if len(self.uncatalogued_topics) < MAX_UNCATALOGUED_TOPICS:
@@ -276,6 +300,21 @@ class Ingest:
         ]
         return min(expiries, default=None)
 
+    def optional_historical(self, identity: str, t: float) -> OptionalSourceState | None:
+        if not self.connected or self.lwt == LWT_OFFLINE:
+            return None
+        profile = self._optional_by_identity.get(identity)
+        if (profile is not None and profile.seen_live and profile.value is not None
+                and t < profile.last_live_at + self.stale_after):
+            return profile
+        return None
+
+    def optional_next_expiry_after(self, t: float) -> float | None:
+        expiries = [s.last_live_at + self.stale_after for s in self.optional_sources.values()
+                    if s.value is not None and s.last_live_at is not None
+                    and s.last_live_at + self.stale_after > t]
+        return min(expiries, default=None)
+
     # ------------------------------------------------------------------ internals
 
     def clock_stepped_back(self, t: float) -> None:
@@ -302,6 +341,8 @@ class Ingest:
         for s in self.sources.values():
             s.value = None
             s.gap_baseline_at = None
+        for s in self.optional_sources.values():
+            s.value = None
         self.last_live_at = None
         self.alive_since = None
 

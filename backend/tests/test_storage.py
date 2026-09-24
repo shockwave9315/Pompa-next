@@ -141,7 +141,17 @@ def test_rollup_schema_is_the_approved_table(mariadb):
         assert cur.fetchone() == ("InnoDB",)
         cur.execute("SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()"
                     " ORDER BY TABLE_NAME")
-        assert cur.fetchall() == (("rollup_1h",), ("sample_1m",))  # no third history table
+        # Canonical history, policy tables, optional raw and optional rollup.
+        assert cur.fetchall() == (
+            ("optional_policy_head",),
+            ("optional_policy_member",),
+            ("optional_policy_revision",),
+            ("optional_rollup_1h",),
+            ("optional_sample_1m",),
+            ("optional_series",),
+            ("rollup_1h",),
+            ("sample_1m",),
+        )
 
 
 def test_rollup_doubles_round_trip_exactly(mariadb):

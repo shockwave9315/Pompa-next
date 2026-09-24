@@ -11,6 +11,7 @@ every path makes raw and rollup reads bit-identical rather than merely close.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
@@ -132,6 +133,109 @@ def combine_maps(a: Mapping[str, Stats], b: Mapping[str, Stats]) -> dict[str, St
     for s, stats in b.items():
         out[s] = combine(out.get(s), stats)
     return out
+
+
+class OptionalHistoryInconsistent(RuntimeError):
+    """Stored optional raw/rollup facts cannot describe one truthful history."""
+
+
+@dataclass(frozen=True, slots=True)
+class OptionalStats:
+    selected_minutes: int
+    known_minutes: int
+    v_sum: float | None
+    v_min: float | None
+    v_max: float | None
+    v_last: float | None
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.known_minutes <= self.selected_minutes:
+            raise OptionalHistoryInconsistent("optional selected/known minute counts disagree")
+        if self.known_minutes == 0:
+            if any(v is not None for v in (self.v_sum, self.v_min, self.v_max, self.v_last)):
+                raise OptionalHistoryInconsistent("unknown optional values have non-NULL statistics")
+        elif any(v is None or not math.isfinite(v) for v in (self.v_min, self.v_max, self.v_last)):
+            raise OptionalHistoryInconsistent("known optional min/max/last must be finite")
+        if self.v_sum is not None and not math.isfinite(self.v_sum):
+            raise OptionalHistoryInconsistent("optional sum must be finite or NULL")
+
+
+def combine_optional(a: OptionalStats | None, b: OptionalStats | None) -> OptionalStats | None:
+    """Combine chronological optional facts using the existing Stats association."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    if a.known_minutes == 0:
+        v_sum, v_min, v_max, v_last = b.v_sum, b.v_min, b.v_max, b.v_last
+    elif b.known_minutes == 0:
+        v_sum, v_min, v_max, v_last = a.v_sum, a.v_min, a.v_max, a.v_last
+    else:
+        candidate = None if a.v_sum is None or b.v_sum is None else a.v_sum + b.v_sum
+        v_sum = candidate if candidate is not None and math.isfinite(candidate) else None
+        v_min, v_max, v_last = min(a.v_min, b.v_min), max(a.v_max, b.v_max), b.v_last
+    return OptionalStats(a.selected_minutes + b.selected_minutes,
+                         a.known_minutes + b.known_minutes, v_sum, v_min, v_max, v_last)
+
+
+def combine_optional_maps(a: Mapping[int, OptionalStats], b: Mapping[int, OptionalStats]
+                          ) -> dict[int, OptionalStats]:
+    out = dict(a)
+    for sid, stats in b.items():
+        out[sid] = combine_optional(out.get(sid), stats)
+    return out
+
+
+def fold_optional_minutes(minutes: Sequence[int], selected: Mapping[int, Sequence],
+                          raw: Mapping[int, Mapping[str, object]],
+                          requested_series_ids: set[int] | None = None) -> dict[int, OptionalStats]:
+    """Fold ordered canonical minutes, persisted policy members and optional JSON facts.
+
+    Validates every raw key/value, including keys outside a caller's requested series.
+    """
+    result: dict[int, OptionalStats] = {}
+    minute_set = set(minutes)
+    if any(ts not in minute_set for ts in raw):
+        raise OptionalHistoryInconsistent("optional raw exists without a canonical minute")
+    previous = None
+    for ts in minutes:
+        if previous is not None and ts <= previous:
+            raise ValueError("optional minutes must be folded in ascending order")
+        previous = ts
+        members = {member.id: member for member in selected[ts]}
+        values: dict[int, float] = {}
+        document = raw.get(ts, {})
+        if not isinstance(document, Mapping):
+            raise OptionalHistoryInconsistent(f"optional raw is not a JSON object at minute {ts}")
+        for key, value in document.items():
+            if not isinstance(key, str) or not key.isascii() or not key.isdecimal() or int(key) <= 0:
+                raise OptionalHistoryInconsistent(f"invalid optional raw series key at minute {ts}")
+            sid = int(key)
+            if str(sid) != key:
+                raise OptionalHistoryInconsistent(f"noncanonical optional raw series key at minute {ts}")
+            if sid not in members:
+                raise OptionalHistoryInconsistent(f"unselected optional raw series {sid} at minute {ts}")
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise OptionalHistoryInconsistent(f"non-finite or nonnumeric optional raw value at minute {ts}")
+            try:
+                number = float(value)
+            except OverflowError:
+                raise OptionalHistoryInconsistent(
+                    f"non-finite or nonnumeric optional raw value at minute {ts}") from None
+            if not math.isfinite(number):
+                raise OptionalHistoryInconsistent(f"non-finite or nonnumeric optional raw value at minute {ts}")
+            values[sid] = number
+        for sid, member in members.items():
+            if requested_series_ids is not None and sid not in requested_series_ids:
+                continue
+            if member.kind not in ("mean", "last"):
+                raise OptionalHistoryInconsistent(f"invalid persisted optional kind for series {sid}")
+            value = values.get(sid)
+            part = (OptionalStats(1, 0, None, None, None, None) if value is None else
+                    OptionalStats(1, 1, value if member.kind == "mean" else None,
+                                  value, value, value))
+            result[sid] = combine_optional(result.get(sid), part)
+    return result
 
 
 # ------------------------------------------------------------------ energy, COP, coverage

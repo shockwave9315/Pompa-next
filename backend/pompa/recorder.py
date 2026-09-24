@@ -1,4 +1,4 @@
-"""Recorder: serialises ingest events, closes minutes, buffers and persists rows.
+"""Recorder: serialises ingest events, closes minutes, buffers and persists pairs.
 
 Event entry points run on the MQTT network thread; ``tick`` runs on the single
 recorder thread; ``snapshot`` runs on API threads. One lock guards all
@@ -7,15 +7,15 @@ database never delays MQTT receive handling.
 
 Write buffer, two explicit parts:
 
-* ``_waiting``: closed rows never submitted to storage, FIFO, at most
-  ``buffer_rows``. On overflow the oldest waiting row is dropped and counted;
+* ``_waiting``: closed canonical/optional pairs never submitted to storage, FIFO, at most
+  ``buffer_rows``. On overflow the oldest waiting pair is dropped and counted;
   it was never submitted, so it cannot have been persisted by this recorder.
-* ``_protected``: the batch submitted to storage (at most ``buffer_rows``). An
+* ``_protected``: the batch of pairs submitted to storage (at most ``buffer_rows``). An
   *ambiguous* failure does not prove nothing was committed (the acknowledgement
   may be lost), so the batch is retried unchanged and idempotently until a write
   returns success. It is never dropped and never counted in ``dropped_rows``. A
   *definite refusal* is different: it is raised before anything is upserted and
-  can never succeed, so exactly the rows of the refused hours leave the batch,
+  can never succeed, so exactly the pairs of the refused hours leave the batch,
   are counted in ``refused_rows``, and the rest is written at once.
 
 A flush claims the whole waiting queue only when no protected batch exists.
@@ -38,7 +38,8 @@ Rollup and purge (after a tick whose flush fully succeeded):
   Raw minutes at or above it are simply not rolled yet.
 * Purge deletes whole hours below ``min(purge_cutoff, oldest pending minute's
   hour)`` and only after proving, per hour, that the rollup accounts for every
-  stored minute. Any doubt deletes nothing. The raw evidence of an hour that a
+  stored minute, and that no candidate canonical minute was under optional
+  selection. Any doubt deletes nothing. The raw evidence of an hour that a
   pending minute can still enter is therefore never purged before its rebuild.
   That proof is also what lets a surviving rollup row stand as evidence of
   deletion, which is how ``Session.first_purged_hour`` answers every path.
@@ -47,14 +48,21 @@ Rollup and purge (after a tick whose flush fully succeeded):
 from __future__ import annotations
 
 import logging
+import math
 import threading
 from collections import deque
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from enum import Enum
+from types import MappingProxyType
 
-from .aggregation import RECORDED, SERIES, fold_minutes
+from .aggregation import (RECORDED, SERIES, OptionalHistoryInconsistent, OptionalStats,
+                          fold_minutes, fold_optional_minutes)
 from .ingest import LWT_OFFLINE, Ingest, PhysicalReading
-from .minute import MinuteAccumulator, MinuteRow, iso_utc
+from .minute import MINUTE, MinuteAccumulator, MinuteRow, floor_minute, iso_utc
+from .optional_minute import OptionalAccumulator, OptionalMinute
+from .history_profile import HISTORY_PROFILES_BY_IDENTITY, capability_topics, drift_reason
+from .optional_policy import locked_timeline, series_semantics
 from .storage import Session, Storage, StorageUnavailable
 from .timegrid import HOUR, floor_hour, purge_cutoff
 
@@ -103,21 +111,53 @@ class WriteOutcome(Enum):
     REFUSED = "refused"      # nothing was written and nothing can be; the batch was shrunk
 
 
+@dataclass(frozen=True)
+class RecordedMinute:
+    canonical: MinuteRow
+    optional: OptionalMinute
+
+    def __post_init__(self) -> None:
+        if self.canonical.ts != self.optional.ts:
+            raise ValueError("canonical/optional minute timestamp mismatch")
+        object.__setattr__(self, "canonical", MinuteRow(
+            self.canonical.ts, MappingProxyType(dict(self.canonical.values))))
+
+    @property
+    def ts(self) -> int:
+        return self.canonical.ts
+
+
+def _optional_rollup_values(folded: dict[int, OptionalStats]) -> list[tuple]:
+    return [(sid, st.selected_minutes, st.known_minutes,
+             st.v_sum, st.v_min, st.v_max, st.v_last)
+            for sid, st in sorted(folded.items()) if st.selected_minutes]
+
+
+def _fold_optional_hour(session: Session, hour_ts: int, minutes: list[int],
+                        head_id: int) -> dict[int, OptionalStats]:
+    timeline = locked_timeline(session, head_id, minutes)
+    raw = dict(session.read_optional_minutes(hour_ts, hour_ts + HOUR, locking=True))
+    return fold_optional_minutes(minutes, timeline, raw)
+
+
 def rebuild_hour(session: Session, hour_ts: int) -> None:
-    """Replace one hour of ``rollup_1h`` with the ordered fold of its stored minutes.
+    """Atomically replace canonical and complete optional rollups for a stored hour.
 
     Only ever called for an hour that stores minutes: replacing a rolled hour
     with an empty fold would delete evidence instead of correcting it.
     """
-    rows = session.read_minutes(hour_ts, hour_ts + HOUR)
+    head_id = session.lock_policy_head()
+    rows = session.read_minutes(hour_ts, hour_ts + HOUR, locking=True)
     if not rows:
         raise ValueError(f"refusing to rebuild hour {iso_utc(hour_ts)} from no stored minutes")
     folded = fold_minutes(rows)
+    optional = _fold_optional_hour(session, hour_ts, [ts for ts, _ in rows], head_id)
     session.replace_rollup_hour(hour_ts, [(k, s.n, s.sum, s.min, s.max, s.last)
                                           for k in SERIES if (s := folded.get(k)) is not None])
+    session.replace_optional_rollup_hour(hour_ts, _optional_rollup_values(optional))
 
 
-def persist(storage: Storage, rows: list[MinuteRow]) -> None:
+def persist(storage: Storage, rows: list[RecordedMinute]) -> None:
     """Upsert minutes and rebuild every touched, already rolled hour in one transaction.
 
     A touched hour that is already rolled but whose raw evidence was already
@@ -128,8 +168,12 @@ def persist(storage: Storage, rows: list[MinuteRow]) -> None:
     and rollup untouched. ``Session.first_purged_hour`` is the one fact that
     decides it, here and on the read path.
     """
+    if any(not isinstance(r, RecordedMinute) for r in rows):
+        raise TypeError("persist requires RecordedMinute pairs")
     with storage.session() as s:
-        rolled_until = s.rolled_until()
+        head_id = s.lock_policy_head()
+        timeline = locked_timeline(s, head_id, [r.ts for r in rows])
+        rolled_until = s.lock_rolled_until()
         touched = (sorted({floor_hour(r.ts) for r in rows if r.ts < rolled_until})
                   if rolled_until is not None else [])
         refused = [h for h in touched if s.first_purged_hour(h, h + HOUR) is not None]
@@ -137,7 +181,19 @@ def persist(storage: Storage, rows: list[MinuteRow]) -> None:
             raise RebuildRefused(
                 f"hour(s) {', '.join(iso_utc(h) for h in refused)} are rolled but their raw evidence"
                 " was already purged; refusing to rebuild them from a new partial write", refused)
-        s.upsert_minutes(rows)
+        s.upsert_minutes([r.canonical for r in rows])
+        topics = capability_topics()
+        for pair in rows:
+            values = {}
+            for member in timeline[pair.ts]:
+                if drift_reason(member.identity, member.expected_topic, member.profile_version,
+                                HISTORY_PROFILES_BY_IDENTITY, topics,
+                                persisted_semantics=series_semantics(member)) is not None:
+                    continue
+                value = pair.optional.values.get(member.identity)
+                if value is not None and math.isfinite(value):
+                    values[str(member.id)] = value
+            s.replace_optional_minute(pair.ts, values)
         for hour_ts in touched:
             rebuild_hour(s, hour_ts)
 
@@ -145,8 +201,9 @@ def persist(storage: Storage, rows: list[MinuteRow]) -> None:
 def roll_next_hour(storage: Storage, closed_before: int) -> int | None:
     """Roll the first stored hour at or above ``rolled_until`` if it ends by ``closed_before``."""
     with storage.session() as s:
-        rolled_until = s.rolled_until()
-        first = s.first_minute_at_or_after(0 if rolled_until is None else rolled_until)
+        s.lock_policy_head()
+        rolled_until = s.lock_rolled_until()
+        first = s.lock_first_minute_at_or_after(0 if rolled_until is None else rolled_until)
         if first is None or floor_hour(first) + HOUR > closed_before:
             return None
         rebuild_hour(s, floor_hour(first))
@@ -159,23 +216,50 @@ def purge_step(storage: Storage, now: float, retention_days: int, pending_from: 
 
     Returns ``(cutoff, deleted rows, more to delete)``; ``cutoff`` is ``None``
     when nothing may be purged. Raises ``PurgeRefused`` (deleting nothing)
-    when an affected hour's rollup does not account for all its stored minutes.
+    when either canonical or optional rollup fails its raw-evidence proof.
     """
     with storage.session() as s:
-        cutoff = purge_cutoff(now, s.rolled_until(), retention_days)
+        head_id = s.lock_policy_head()
+        cutoff = purge_cutoff(now, s.lock_rolled_until(), retention_days)
         if cutoff is None:
             return None, 0, False
         if pending_from is not None:
             cutoff = min(cutoff, floor_hour(pending_from))
-        oldest, _ = s.minute_bounds()
+        oldest = s.lock_oldest_minute_ts()
         if oldest is None or oldest >= cutoff:
             return cutoff, 0, False
         first = floor_hour(oldest)
         end = min(cutoff, first + max_hours * HOUR)
-        for hour_ts, stored, rolled in s.hour_counts(first, end, RECORDED):
+        candidates = s.lock_minute_timestamps(first, end)
+        counts: dict[int, int] = {}
+        for ts in candidates:
+            hour = floor_hour(ts)
+            counts[hour] = counts.get(hour, 0) + 1
+        rolled_counts = s.lock_rollup_counts(first, end, RECORDED)
+        for hour_ts, stored in sorted(counts.items()):
+            rolled = rolled_counts.get(hour_ts)
             if rolled != stored:
                 raise PurgeRefused(f"rollup of hour {iso_utc(hour_ts)} accounts for {rolled or 0}"
                                    f" of {stored} stored minutes")
+        try:
+            timeline = locked_timeline(s, head_id, candidates)
+            raw = dict(s.read_optional_minutes(first, end, locking=True))
+            stored = {(h, sid): (selected, known, v_sum, v_min, v_max, v_last)
+                      for h, sid, selected, known, v_sum, v_min, v_max, v_last
+                      in s.read_optional_rollup(first, end, locking=True)}
+            expected = {}
+            for hour_ts in range(first, end, HOUR):
+                hour_minutes = [ts for ts in candidates if hour_ts <= ts < hour_ts + HOUR]
+                hour_raw = {ts: values for ts, values in raw.items()
+                            if hour_ts <= ts < hour_ts + HOUR}
+                folded = fold_optional_minutes(hour_minutes, timeline, hour_raw)
+                for sid, selected, known, v_sum, v_min, v_max, v_last in _optional_rollup_values(folded):
+                    expected[(hour_ts, sid)] = (selected, known, v_sum, v_min, v_max, v_last)
+            if expected != stored:
+                raise PurgeRefused("optional rollup does not match selected/known raw evidence")
+        except OptionalHistoryInconsistent as e:
+            raise PurgeRefused(f"optional raw evidence is inconsistent: {e}") from e
+        s.delete_optional_minutes(first, end)
         return cutoff, s.delete_minutes_before(end), end < cutoff
 
 
@@ -213,11 +297,12 @@ class Recorder:
                  retention_days: int = 365):
         self.ingest = ingest
         self.accumulator = accumulator
+        self.optional_accumulator = OptionalAccumulator(ingest, accumulator.process_start)
         self.storage = storage
         self.buffer_rows = buffer_rows
         self._lock = threading.Lock()
-        self._waiting: deque[MinuteRow] = deque()
-        self._protected: list[MinuteRow] = []
+        self._waiting: deque[RecordedMinute] = deque()
+        self._protected: list[RecordedMinute] = []
         self._flushing = False
         self.dropped_rows = 0   # never-submitted rows lost to waiting-queue overflow
         self.refused_rows = 0   # rows the historical safety guard will never let be written
@@ -313,7 +398,7 @@ class Recorder:
             if not batch:
                 return True
 
-    def _write(self, batch: list[MinuteRow], now: float) -> WriteOutcome:
+    def _write(self, batch: list[RecordedMinute], now: float) -> WriteOutcome:
         """Database I/O, called without the lock. Reports which of the three outcomes happened."""
         outcome = WriteOutcome.SUCCESS
         try:
@@ -338,7 +423,7 @@ class Recorder:
         self.db_last_ok_at = now
         return outcome
 
-    def _refuse(self, batch: list[MinuteRow], error: RebuildRefused, now: float) -> None:
+    def _refuse(self, batch: list[RecordedMinute], error: RebuildRefused, now: float) -> None:
         """Drop exactly the rows of permanently unwritable hours; keep the rest of the batch.
 
         The guard runs before the first upsert and the transaction was rolled
@@ -381,7 +466,7 @@ class Recorder:
         for _ in range(ROLL_HOURS_PER_TICK):
             try:
                 hour_ts = roll_next_hour(self.storage, closed_before)
-            except StorageUnavailable as e:
+            except (StorageUnavailable, OptionalHistoryInconsistent) as e:
                 if self.rollup_error is None:
                     log.warning("rollup failed, retried next tick: %s", e)
                 self.rollup_error, self.rollup_error_at = str(e), now
@@ -470,6 +555,24 @@ class Recorder:
         """Copy immutable physical readings under the MQTT/tick snapshot lock."""
         with self._lock:
             return self.ingest.physical_snapshot()
+
+    def safe_future_minute(self, now: float) -> int:
+        """Stage 4B checkpoint B (§25.2.1): the earliest future whole minute a policy change
+        may affect, as of ``now``.
+
+        Read-only: takes the recorder lock, performs no database I/O, closes
+        no minute and mutates no accumulator state. Only a caller resolving a
+        policy PUT needs this; it must be called and released *before* any
+        database transaction begins, never while holding a database lock.
+
+        The open minute's own cursor can be temporarily ahead of (a queued
+        backlog) or behind (a detected backward clock step, ARCHITECTURE.md
+        §24) the raw wall clock, so the safe boundary is the later of the next
+        whole minute after the raw clock and the minute after the
+        accumulator's currently open one.
+        """
+        with self._lock:
+            return max(floor_minute(now) + MINUTE, self.accumulator.minute_start + MINUTE)
 
     def snapshot(self, clock: Callable[[], float]) -> tuple[float, dict]:
         """Factual in-memory state for ``/api/v1/status``, with its observation instant.
@@ -612,12 +715,14 @@ class Recorder:
                         self._last_wall - t, iso_utc(t))
             self.ingest.clock_stepped_back(t)
             self.accumulator.discard_open()
+            self.optional_accumulator.discard_open()
         self._last_wall = t
         t = max(t, self.accumulator.cursor)
+        optional = {row.ts: row for row in self.optional_accumulator.advance(t)}
         for row in self.accumulator.advance(t):
             self.rows_closed += 1
             self.last_row_minute = row.ts
-            self._waiting.append(row)
+            self._waiting.append(RecordedMinute(row, optional.get(row.ts, OptionalMinute(row.ts, {}))))
             if len(self._waiting) > self.buffer_rows:
                 lost = self._waiting.popleft()
                 self.dropped_rows += 1

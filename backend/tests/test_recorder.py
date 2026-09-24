@@ -3,10 +3,10 @@
 import threading
 from contextlib import contextmanager
 
-from conftest import RUNNING, T0, FakeStorage
+from conftest import RUNNING, T0, FakeStorage, persist_canonical, recorded
 from conftest import row as conf_row
 from pompa.ingest import Ingest
-from pompa.minute import MinuteAccumulator
+from pompa.minute import MINUTE, MinuteAccumulator, floor_minute
 from pompa.recorder import Recorder
 from pompa.storage import StorageUnavailable
 
@@ -354,10 +354,10 @@ H = 3600
 
 def purged_rolled_hour(db, hour_ts):
     """A rolled hour whose raw evidence is gone: exactly what purge leaves behind."""
-    from pompa.recorder import persist, roll_next_hour
+    from pompa.recorder import roll_next_hour
 
     from conftest import minutes
-    persist(db, minutes(hour_ts, 60))
+    persist_canonical(db, minutes(hour_ts, 60))
     while roll_next_hour(db, 2**32 - 1) is not None:
         pass
     with db.session() as s:
@@ -370,7 +370,7 @@ def test_refused_row_is_dropped_instead_of_blocking_the_queue():
     purged_rolled_hour(db, T0)
     rec, _ = make(start=T0 + 600, storage=db)
     rec.schema_ready = True
-    rec._protected = [conf_row(T0 + 600, outside_temp=1.0)]
+    rec._protected = [recorded(conf_row(T0 + 600, outside_temp=1.0))]
 
     rec.tick(T0 + 660)
     snap = rec.snapshot(lambda: T0 + 660)[1]["recorder"]
@@ -384,7 +384,7 @@ def test_refused_row_is_dropped_instead_of_blocking_the_queue():
         assert s.read_minutes(T0, T0 + H) == []  # nothing rebuilt the purged hour
 
     # The recorder keeps working: a later minute in a writable hour is persisted normally.
-    rec._waiting.append(conf_row(T0 + H, outside_temp=2.0))
+    rec._waiting.append(recorded(conf_row(T0 + H, outside_temp=2.0)))
     rec.tick(T0 + H + 120)
     assert sorted(db.rows) == [T0 + H]
     snap = rec.snapshot(lambda: T0 + H + 120)[1]["recorder"]
@@ -416,7 +416,8 @@ def test_refusal_keeps_the_writable_rows_of_a_mixed_batch():
     db = FakeStorage()
     purged_rolled_hour(db, T0)
     rec, _ = make(start=T0 + 600, storage=db)
-    rec._protected = [conf_row(T0 + 600, outside_temp=1.0), conf_row(T0 + H, outside_temp=2.0)]
+    rec._protected = [recorded(conf_row(T0 + 600, outside_temp=1.0)),
+                      recorded(conf_row(T0 + H, outside_temp=2.0))]
     rec.schema_ready = True
 
     rec.tick(T0 + H + 120)
@@ -432,7 +433,7 @@ def test_refusal_does_not_stop_rollup_and_purge():
     purged_rolled_hour(db, T0)
     rec, _ = make(start=T0 + 600, storage=db)
     rec.retention_days = 365
-    rec._protected = [conf_row(T0 + 600, outside_temp=1.0)]
+    rec._protected = [recorded(conf_row(T0 + 600, outside_temp=1.0))]
     rec.schema_ready = True
 
     rec.tick(T0 + 400 * 86400)
@@ -453,3 +454,51 @@ def test_ambiguous_outcome_is_never_treated_as_a_refusal():
     rec.tick(T0 + 121)
     assert sorted(db.rows) == [T0, T0 + 60]
     assert (rec.refused_rows, rec.dropped_rows, rec.rows_written) == (0, 0, 2)
+
+
+# ------------------------------------------------------------------ Recorder.safe_future_minute
+#
+# Stage 4B checkpoint B (docs/ARCHITECTURE.md §25.2.1): the read-only, database-I/O-free fact a
+# policy PUT takes and releases before any transaction. Direct regression tests for the reasoning
+# behind it, not just an inline exercise of unrelated internals.
+
+
+def test_safe_future_minute_ordinary_clock_returns_next_whole_minute():
+    rec, _ = make(start=T0)
+    now = T0 + 30  # within the still-open first minute; nothing has advanced yet
+    assert rec.safe_future_minute(now) == floor_minute(now) + MINUTE == T0 + 60
+
+
+def test_safe_future_minute_follows_the_accumulator_when_it_is_ahead_of_raw_wall_clock():
+    """The accumulator's open minute can be ahead of a caller's ``now`` (a queued backlog, or the
+    post-clock-step gap of ARCHITECTURE.md §24): the boundary must follow it, not the raw clock."""
+    rec, _ = make(start=T0)
+    rec.on_connect(T0)
+    feed(rec, T0, T0 + 181)  # advances the accumulator's open minute well past T0
+    assert rec.accumulator.minute_start > T0  # sanity: the accumulator really did move ahead
+    stale_now = T0 + 30  # a "raw now" that is behind where the accumulator already is
+    got = rec.safe_future_minute(stale_now)
+    assert got == rec.accumulator.minute_start + MINUTE  # follows the accumulator, not raw now
+    assert got > floor_minute(stale_now) + MINUTE
+
+
+def test_safe_future_minute_is_strictly_after_every_waiting_row():
+    rec, _ = make(start=T0)
+    rec.on_connect(T0)
+    feed(rec, T0, T0 + 181)  # closes 3 minutes into _waiting; no tick, so nothing is flushed yet
+    waiting_ts = queued(rec)[1]
+    assert waiting_ts == [T0, T0 + 60, T0 + 120]
+    boundary = rec.safe_future_minute(T0 + 181 + 5)
+    assert all(ts < boundary for ts in waiting_ts)
+
+
+def test_safe_future_minute_is_strictly_after_every_protected_row():
+    rec, db = make(start=T0)
+    db.available = False
+    rec.on_connect(T0)
+    feed(rec, T0, T0 + 181)
+    rec.tick(T0 + 181)  # flush fails (ambiguous outage): rows move into _protected, retained
+    protected_ts, waiting_ts = queued(rec)
+    assert protected_ts == [T0, T0 + 60, T0 + 120] and waiting_ts == []
+    boundary = rec.safe_future_minute(T0 + 181 + 5)
+    assert all(ts < boundary for ts in protected_ts)

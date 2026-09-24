@@ -8,11 +8,12 @@ from contextlib import contextmanager
 import pytest
 
 from conftest import T0, minutes, row
+from conftest import persist_canonical, recorded
 from pompa import recorder as recorder_module
 from pompa.aggregation import SERIES, fold_minutes
 from pompa.ingest import Ingest
 from pompa.minute import MinuteAccumulator
-from pompa.recorder import Recorder, RebuildRefused, persist, rebuild_hour, roll_next_hour
+from pompa.recorder import Recorder, RebuildRefused, rebuild_hour, roll_next_hour
 from pompa.storage import StorageUnavailable
 
 H = 3600
@@ -64,7 +65,7 @@ def until(storage):
 def test_rollup_rows_are_the_ordered_fold(any_storage):
     rows = minutes(H0, 60)
     rows[-1] = row(H0 + 59 * 60, operating_mode=None, outside_temp=None)  # trailing NULLs
-    persist(any_storage, rows)
+    persist_canonical(any_storage, rows)
     assert roll_all(any_storage) == [H0]
     got = rolled(any_storage)
     assert got[(H0, "recorded")] == [60, 60.0, 1.0, 1.0, 1.0]
@@ -78,7 +79,7 @@ def test_rollup_rows_are_the_ordered_fold(any_storage):
 
 
 def test_rebuild_is_idempotent(any_storage):
-    persist(any_storage, minutes(H0, 90))
+    persist_canonical(any_storage, minutes(H0, 90))
     roll_all(any_storage)
     first = rolled(any_storage)
     with any_storage.session() as s:
@@ -89,7 +90,7 @@ def test_rebuild_is_idempotent(any_storage):
 
 
 def test_rolling_is_ascending_contiguous_and_only_closed_hours(any_storage):
-    persist(any_storage, minutes(H0, 30) + minutes(H0 + 3 * H, 30) + minutes(H0 + 5 * H + 600, 10))
+    persist_canonical(any_storage, minutes(H0, 30) + minutes(H0 + 3 * H, 30) + minutes(H0 + 5 * H + 600, 10))
     assert until(any_storage) is None
     assert roll_all(any_storage, closed_before=H0 + 5 * H) == [H0, H0 + 3 * H]  # empty hours need no row
     assert until(any_storage) == H0 + 4 * H
@@ -99,7 +100,7 @@ def test_rolling_is_ascending_contiguous_and_only_closed_hours(any_storage):
 
 
 def test_first_rollup_starts_at_the_oldest_stored_minute(any_storage):
-    persist(any_storage, minutes(H0 + 7 * H + 120, 3))
+    persist_canonical(any_storage, minutes(H0 + 7 * H + 120, 3))
     assert roll_all(any_storage, closed_before=H0 + 9 * H) == [H0 + 7 * H]
 
 
@@ -109,7 +110,7 @@ def test_first_rollup_starts_at_the_oldest_stored_minute(any_storage):
 @pytest.mark.parametrize("hours_old", [1, 5])
 def test_late_minute_into_rolled_hour_is_repaired_in_the_same_write(any_storage, hours_old):
     """A delayed buffered minute entering a rolled recent hour, or one older than two hours."""
-    persist(any_storage, [r for r in minutes(H0, 6 * 60) if r.ts % H != 1800])  # minute :30 missing everywhere
+    persist_canonical(any_storage, [r for r in minutes(H0, 6 * 60) if r.ts % H != 1800])  # minute :30 missing everywhere
     roll_all(any_storage)
     assert until(any_storage) == H0 + 6 * H
     target = H0 + (6 - hours_old) * H
@@ -118,7 +119,7 @@ def test_late_minute_into_rolled_hour_is_repaired_in_the_same_write(any_storage,
 
     late = row(target + 1800, main_outlet_temp=99.0, operating_mode=7.0,
                co_power_consumption=1000.0, co_power_production=5000.0)
-    persist(any_storage, [late])  # nothing else runs: the write itself repairs the hour
+    persist_canonical(any_storage, [late])  # nothing else runs: the write itself repairs the hour
     got = rolled(any_storage)
     assert got[(target, "recorded")][0] == 60
     assert got[(target, "main_outlet_temp")][3] == 99.0  # new maximum
@@ -128,28 +129,28 @@ def test_late_minute_into_rolled_hour_is_repaired_in_the_same_write(any_storage,
 
 def test_late_minute_changes_last_only_when_it_is_the_latest(any_storage):
     rows = minutes(H0, 50)  # minutes :00..:49
-    persist(any_storage, rows)
+    persist_canonical(any_storage, rows)
     roll_all(any_storage, closed_before=H0 + H)
-    persist(any_storage, [row(H0 + 55 * 60, operating_mode=8.0)])  # later than every stored minute
+    persist_canonical(any_storage, [row(H0 + 55 * 60, operating_mode=8.0)])  # later than every stored minute
     assert rolled(any_storage)[(H0, "operating_mode")][4] == 8.0
-    persist(any_storage, [row(H0 + 20 * 60, operating_mode=5.0)])  # replaces minute :20, not the last
+    persist_canonical(any_storage, [row(H0 + 20 * 60, operating_mode=5.0)])  # replaces minute :20, not the last
     assert rolled(any_storage)[(H0, "operating_mode")][4] == 8.0
     assert_exact(any_storage)
 
 
 def test_late_minute_into_unrolled_hour_waits_for_the_roller(any_storage):
-    persist(any_storage, minutes(H0, 60))
+    persist_canonical(any_storage, minutes(H0, 60))
     roll_all(any_storage, closed_before=H0 + H)
-    persist(any_storage, [row(H0 + 2 * H + 60, outside_temp=1.0)])  # hour 2 >= rolled_until
+    persist_canonical(any_storage, [row(H0 + 2 * H + 60, outside_temp=1.0)])  # hour 2 >= rolled_until
     assert (H0 + 2 * H, "recorded") not in rolled(any_storage)
     assert roll_all(any_storage, closed_before=H0 + 3 * H) == [H0 + 2 * H]
     assert_exact(any_storage)
 
 
 def test_batch_touching_rolled_and_unrolled_hours(any_storage):
-    persist(any_storage, minutes(H0, 3 * 60))
+    persist_canonical(any_storage, minutes(H0, 3 * 60))
     roll_all(any_storage, closed_before=H0 + 2 * H)  # hours 0 and 1 rolled, hour 2 not
-    persist(any_storage, [row(H0 + 60, outside_temp=50.0), row(H0 + H + 60, outside_temp=51.0),
+    persist_canonical(any_storage, [row(H0 + 60, outside_temp=50.0), row(H0 + H + 60, outside_temp=51.0),
                           row(H0 + 2 * H + 60, outside_temp=52.0)])
     got = rolled(any_storage)
     assert got[(H0, "outside_temp")][3] == 50.0 and got[(H0 + H, "outside_temp")][3] == 51.0
@@ -162,14 +163,14 @@ def test_batch_touching_rolled_and_unrolled_hours(any_storage):
 
 def test_late_minute_into_a_purged_rolled_hour_is_refused(any_storage):
     """Raw evidence of a rolled hour fully purged, then a late minute lands in it: refuse, don't rebuild."""
-    persist(any_storage, minutes(H0, 60))
+    persist_canonical(any_storage, minutes(H0, 60))
     roll_all(any_storage)
     before = rolled(any_storage)
     with any_storage.session() as s:
         s.delete_minutes_before(H0 + H)  # simulate purge: raw gone, rollup stays
     late = row(H0 + 30 * 60, main_outlet_temp=-40.0)
     with pytest.raises(RebuildRefused) as caught:
-        persist(any_storage, [late])
+        persist_canonical(any_storage, [late])
     assert caught.value.refused_hours == frozenset({H0})  # the recorder needs the exact hours
     assert rolled(any_storage) == before  # existing rollup left byte-for-byte unchanged
     with any_storage.session() as s:
@@ -177,14 +178,14 @@ def test_late_minute_into_a_purged_rolled_hour_is_refused(any_storage):
 
 
 def test_refusal_names_every_purged_hour_the_batch_touches(any_storage):
-    persist(any_storage, minutes(H0, 3 * 60))
+    persist_canonical(any_storage, minutes(H0, 3 * 60))
     roll_all(any_storage)
     with any_storage.session() as s:
         s.delete_minutes_before(H0 + 2 * H)  # hours 0 and 1 purged, hour 2 intact
     batch = [row(H0 + 60, outside_temp=1.0), row(H0 + H + 60, outside_temp=2.0),
              row(H0 + 2 * H + 60, outside_temp=3.0)]
     with pytest.raises(RebuildRefused) as caught:
-        persist(any_storage, batch)
+        persist_canonical(any_storage, batch)
     assert caught.value.refused_hours == frozenset({H0, H0 + H})
     with any_storage.session() as s:  # the writable row was not committed either: one transaction
         (_, values), = s.read_minutes(H0 + 2 * H + 60, H0 + 2 * H + 120, ["outside_temp"])
@@ -193,22 +194,22 @@ def test_refusal_names_every_purged_hour_the_batch_touches(any_storage):
 
 def test_late_minute_into_rolled_hour_with_raw_still_present_is_unaffected(any_storage):
     """The ordinary late-write repair is untouched when the hour's raw evidence still exists."""
-    persist(any_storage, minutes(H0, 60))
+    persist_canonical(any_storage, minutes(H0, 60))
     roll_all(any_storage)
     late = row(H0 + 30 * 60, main_outlet_temp=123.0)
-    persist(any_storage, [late])  # not refused: raw for the hour still exists
+    persist_canonical(any_storage, [late])  # not refused: raw for the hour still exists
     assert rolled(any_storage)[(H0, "main_outlet_temp")][3] == 123.0
     assert_exact(any_storage)
 
 
 def test_never_rolled_empty_hour_is_not_treated_as_purged(any_storage):
     """An hour with no rollup row of its own, inside the rolled range, is not mistaken for purged."""
-    persist(any_storage, minutes(H0, 30) + minutes(H0 + 2 * H, 30))  # hour 1 always empty
+    persist_canonical(any_storage, minutes(H0, 30) + minutes(H0 + 2 * H, 30))  # hour 1 always empty
     roll_all(any_storage, closed_before=H0 + 3 * H)
     assert until(any_storage) == H0 + 3 * H
     assert (H0 + H, "recorded") not in rolled(any_storage)  # never had a rollup row
     late = row(H0 + H + 600, outside_temp=-10.0)
-    persist(any_storage, [late])  # not refused: no rollup ever existed for this hour
+    persist_canonical(any_storage, [late])  # not refused: no rollup ever existed for this hour
     assert rolled(any_storage)[(H0 + H, "outside_temp")] == [1, -10.0, -10.0, -10.0, -10.0]
     assert_exact(any_storage)
 
@@ -231,24 +232,24 @@ def lose_next_ack(storage, monkeypatch):
 
 
 def test_ack_loss_leaves_raw_and_rollup_committed_together_and_retry_is_idempotent(any_storage, monkeypatch):
-    persist(any_storage, minutes(H0, 4 * 60))
+    persist_canonical(any_storage, minutes(H0, 4 * 60))
     roll_all(any_storage)
     late = [row(H0 + 60 * 61, main_outlet_temp=12.0)]
     lose_next_ack(any_storage, monkeypatch)
     with pytest.raises(StorageUnavailable):
-        persist(any_storage, late)
+        persist_canonical(any_storage, late)
     # The ambiguous commit happened: raw and its rollup are both there and consistent.
     after_ack_loss = rolled(any_storage)
     assert after_ack_loss[(H0 + H, "main_outlet_temp")][2] == 12.0
     assert_exact(any_storage)
-    persist(any_storage, late)  # the protected retry
+    persist_canonical(any_storage, late)  # the protected retry
     assert rolled(any_storage) == after_ack_loss
     assert_exact(any_storage)
 
 
 def test_failure_after_rebuild_rolls_back_raw_and_rollup(any_storage, monkeypatch):
     """Nothing is committed when the transaction fails after DELETE+INSERT of the rollup."""
-    persist(any_storage, minutes(H0, 2 * 60))
+    persist_canonical(any_storage, minutes(H0, 2 * 60))
     roll_all(any_storage)
     before_rollup = rolled(any_storage)
     with any_storage.session() as s:
@@ -262,7 +263,7 @@ def test_failure_after_rebuild_rolls_back_raw_and_rollup(any_storage, monkeypatc
 
     monkeypatch.setattr(recorder_module, "rebuild_hour", rebuild_then_fail)
     with pytest.raises(StorageUnavailable):
-        persist(any_storage, [row(H0 + 30 * 60, main_outlet_temp=-40.0)])
+        persist_canonical(any_storage, [row(H0 + 30 * 60, main_outlet_temp=-40.0)])
     monkeypatch.undo()
     assert rolled(any_storage) == before_rollup
     with any_storage.session() as s:
@@ -270,7 +271,7 @@ def test_failure_after_rebuild_rolls_back_raw_and_rollup(any_storage, monkeypatc
 
 
 def test_failed_hour_roll_keeps_the_range_contiguous(any_storage, monkeypatch):
-    persist(any_storage, minutes(H0, 3 * 60))
+    persist_canonical(any_storage, minutes(H0, 3 * 60))
     real_rebuild = recorder_module.rebuild_hour
 
     def fail_on_second_hour(session, hour_ts):
@@ -306,7 +307,7 @@ def recorder_on(storage, start):
 
 
 def test_recorder_rolls_closed_hours_only(any_storage):
-    persist(any_storage, minutes(H0, 3 * 60 - 30))
+    persist_canonical(any_storage, minutes(H0, 3 * 60 - 30))
     rec = recorder_on(any_storage, H0 + 2 * H + 1800)  # process runs inside hour 2
     rec.tick(H0 + 2 * H + 1801)
     assert until(any_storage) == H0 + 2 * H
@@ -318,12 +319,12 @@ def test_recorder_rolls_closed_hours_only(any_storage):
 
 def test_protected_late_minute_ack_loss_then_retry(any_storage, monkeypatch):
     """An old protected minute is committed, its acknowledgement lost, then retried."""
-    persist(any_storage, [r for r in minutes(H0, 6 * 60) if r.ts != H0 + H + 600])
+    persist_canonical(any_storage, [r for r in minutes(H0, 6 * 60) if r.ts != H0 + H + 600])
     roll_all(any_storage)
     now = H0 + 6 * H + 30
     rec = recorder_on(any_storage, now)
     late = row(H0 + H + 600, main_outlet_temp=77.0)  # five hours old, its hour long rolled
-    rec._waiting.append(late)
+    rec._waiting.append(recorded(late))
     lose_next_ack(any_storage, monkeypatch)
     rec.tick(now + 1)
     assert [r.ts for r in rec._protected] == [late.ts] and rec.rows_written == 0
@@ -335,11 +336,12 @@ def test_protected_late_minute_ack_loss_then_retry(any_storage, monkeypatch):
 
 
 def test_ambiguous_commit_then_process_termination(any_storage, monkeypatch):
-    persist(any_storage, minutes(H0, 3 * 60))
+    persist_canonical(any_storage, minutes(H0, 3 * 60))
     roll_all(any_storage)
     now = H0 + 3 * H + 30
     rec = recorder_on(any_storage, now)
-    rec._waiting.extend([row(H0 + 600, outside_temp=-30.0), row(H0 + 3 * H, outside_temp=-31.0)])
+    rec._waiting.extend([recorded(row(H0 + 600, outside_temp=-30.0)),
+                         recorded(row(H0 + 3 * H, outside_temp=-31.0))])
     lose_next_ack(any_storage, monkeypatch)
     rec.tick(now + 1)
     assert len(rec._protected) == 2
@@ -354,12 +356,12 @@ def test_ambiguous_commit_then_process_termination(any_storage, monkeypatch):
 
 
 def test_definite_failure_commits_nothing_and_retry_repairs(any_storage, monkeypatch):
-    persist(any_storage, minutes(H0, 2 * 60))
+    persist_canonical(any_storage, minutes(H0, 2 * 60))
     roll_all(any_storage)
     before = rolled(any_storage)
     now = H0 + 2 * H + 30
     rec = recorder_on(any_storage, now)
-    rec._waiting.append(row(H0 + 30 * 60, outside_temp=40.0))
+    rec._waiting.append(recorded(row(H0 + 30 * 60, outside_temp=40.0)))
     original = any_storage.session
 
     @contextmanager
@@ -379,7 +381,7 @@ def test_definite_failure_commits_nothing_and_retry_repairs(any_storage, monkeyp
 
 def test_rollup_backlog_catches_up_over_ticks(any_storage):
     """A long process gap leaves more closed hours than one tick may roll."""
-    persist(any_storage, [row(H0 + h * H + 60, outside_temp=float(h)) for h in range(40)])
+    persist_canonical(any_storage, [row(H0 + h * H + 60, outside_temp=float(h)) for h in range(40)])
     rec = recorder_on(any_storage, H0 + 40 * H + 30)
     rec.tick(H0 + 40 * H + 31)
     assert until(any_storage) == H0 + 24 * H  # ROLL_HOURS_PER_TICK
@@ -389,7 +391,7 @@ def test_rollup_backlog_catches_up_over_ticks(any_storage):
 
 
 def test_idle_ticks_do_not_query_the_database(any_storage):
-    persist(any_storage, minutes(H0, 2 * 60))
+    persist_canonical(any_storage, minutes(H0, 2 * 60))
     rec = recorder_on(any_storage, H0 + 2 * H + 30)
     rec.tick(H0 + 2 * H + 31)
     assert until(any_storage) == H0 + 2 * H
@@ -404,7 +406,7 @@ def test_idle_ticks_do_not_query_the_database(any_storage):
 def test_killed_connection_mid_transaction_commits_nothing(mariadb):
     """The server itself drops the transaction: raw minute and rollup are lost together."""
     mariadb.ensure_schema()
-    persist(mariadb, [r for r in minutes(H0, 60) if r.ts != H0 + 30 * 60])
+    persist_canonical(mariadb, [r for r in minutes(H0, 60) if r.ts != H0 + 30 * 60])
     roll_all(mariadb)
     before = rolled(mariadb)
     late = row(H0 + 30 * 60, main_outlet_temp=-55.0)  # the minute missing from that hour
@@ -422,7 +424,7 @@ def test_killed_connection_mid_transaction_commits_nothing(mariadb):
     assert rolled(mariadb) == before
     with mariadb.session() as s:
         assert s.read_minutes(H0 + 30 * 60, H0 + 31 * 60) == []
-    persist(mariadb, [late])  # the retry writes both again
+    persist_canonical(mariadb, [late])  # the retry writes both again
     assert rolled(mariadb)[(H0, "main_outlet_temp")][2] == -55.0
     assert rolled(mariadb)[(H0, "recorded")][0] == 60
     assert_exact(mariadb)

@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 from contextlib import contextmanager
@@ -60,12 +61,37 @@ def minutes(start, count, step=60):
     return [sample(start + step * i, i) for i in range(count)]
 
 
+def recorded(canonical_row):
+    """Explicit empty optional fact for a canonical-only test minute."""
+    from pompa.optional_minute import OptionalMinute
+    from pompa.recorder import RecordedMinute
+
+    return RecordedMinute(canonical_row, OptionalMinute(canonical_row.ts, {}))
+
+
+def persist_canonical(storage, canonical_rows):
+    """Canonical-focused tests call production persist with explicit RecordedMinute pairs."""
+    from pompa.recorder import persist
+
+    return persist(storage, [recorded(r) for r in canonical_rows])
+
+
 class FakeSession:
     """Mirrors ``pompa.storage.Session`` over the dictionaries of a FakeStorage transaction."""
 
-    def __init__(self, rows, rollup):
+    def __init__(self, rows, rollup, storage):
         self.rows = rows  # ts -> values
         self.rollup = rollup  # (hour_ts, series) -> (n, sum, min, max, last)
+        # Stage 4B checkpoint B optional-history policy tables (docs/ARCHITECTURE.md §25.2.1):
+        # copied from FakeStorage per session, like rows/rollup, and committed back the same way.
+        self._storage = storage
+        self.optional_series = dict(storage.optional_series)
+        self.optional_series_by_key = dict(storage.optional_series_by_key)
+        self.optional_revisions = dict(storage.optional_revisions)
+        self.optional_members = {k: set(v) for k, v in storage.optional_members.items()}
+        self.optional_head = storage.optional_head
+        self.optional_raw = dict(storage.optional_raw)
+        self.optional_rollup = dict(storage.optional_rollup)
 
     def upsert_minutes(self, rows):
         for r in rows:
@@ -73,7 +99,7 @@ class FakeSession:
                 raise ValueError(f"unaligned minute ts {r.ts}")
             self.rows[r.ts] = dict(r.values)
 
-    def read_minutes(self, start, end, keys=None):
+    def read_minutes(self, start, end, keys=None, *, locking=False):
         from pompa.catalog import RECORDED_KEYS
 
         keys = RECORDED_KEYS if keys is None else keys
@@ -82,17 +108,53 @@ class FakeSession:
     def first_minute_at_or_after(self, ts):
         return min((t for t in self.rows if t >= ts), default=None)
 
+    lock_first_minute_at_or_after = first_minute_at_or_after
+
     def minute_bounds(self):
         return (min(self.rows), max(self.rows)) if self.rows else (None, None)
 
     def delete_minutes_before(self, cutoff):
+        if any(t < cutoff for t in self.optional_raw):
+            raise ValueError("optional raw FK would reject canonical deletion")
         doomed = [t for t in self.rows if t < cutoff]
         for t in doomed:
             del self.rows[t]
         return len(doomed)
 
+    def delete_optional_minutes(self, start, end):
+        doomed = [t for t in self.optional_raw if start <= t < end]
+        for t in doomed:
+            del self.optional_raw[t]
+        return len(doomed)
+
+    def lock_minute_timestamps(self, start, end):
+        return sorted(t for t in self.rows if start <= t < end)
+
+    def lock_oldest_minute_ts(self):
+        return min(self.rows) if self.rows else None
+
+    def lock_rollup_counts(self, start, end, series):
+        return {h: n for (h, s), (n, *_rest) in self.rollup.items()
+                if s == series and start <= h < end}
+
+    def replace_optional_minute(self, ts, values):
+        if values:
+            assert ts in self.rows
+            document = json.dumps(values, sort_keys=True, separators=(",", ":"), allow_nan=False)
+            self.optional_raw[ts] = json.loads(document)
+        else:
+            self.optional_raw.pop(ts, None)
+
+    def read_optional_minutes(self, start, end, *, locking=False):
+        return [(t, dict(v)) for t, v in sorted(self.optional_raw.items()) if start <= t < end]
+
+    def first_optional_minute(self, start, end):
+        return min((t for t in self.optional_raw if start <= t < end), default=None)
+
     def rolled_until(self):
         return max(h for h, _ in self.rollup) + 3600 if self.rollup else None
+
+    lock_rolled_until = rolled_until
 
     def first_purged_hour(self, start, end):
         """Same fact as MariaDB: whole overlapped hours, rollup present, no raw inside."""
@@ -110,6 +172,17 @@ class FakeSession:
             assert n > 0
             self.rollup[(hour_ts, series)] = (n, *stats)
 
+    def replace_optional_rollup_hour(self, hour_ts, values):
+        assert hour_ts % 3600 == 0
+        for key in [k for k in self.optional_rollup if k[0] == hour_ts]:
+            del self.optional_rollup[key]
+        for sid, selected, known, *stats in values:
+            self.optional_rollup[(hour_ts, sid)] = (selected, known, *stats)
+
+    def read_optional_rollup(self, start, end, series_ids=None, *, locking=False):
+        return [(h, sid, *v) for (h, sid), v in sorted(self.optional_rollup.items())
+                if start <= h < end and (series_ids is None or sid in series_ids)]
+
     def read_rollup(self, start, end, series):
         return [(h, s, *v) for (h, s), v in sorted(self.rollup.items()) if start <= h < end and s in series]
 
@@ -120,6 +193,76 @@ class FakeSession:
                 counts[ts - ts % 3600] = counts.get(ts - ts % 3600, 0) + 1
         return [(h, c, self.rollup[(h, series)][0] if (h, series) in self.rollup else None)
                 for h, c in sorted(counts.items())]
+
+    # ---------------------------------------------------------- optional history policy (fake)
+
+    def read_policy_head(self):
+        return self.optional_head
+
+    def list_optional_series(self):
+        return [self.optional_series[sid] for sid in sorted(self.optional_series)]
+
+    def find_optional_series(self, identity, profile_version):
+        return [row for row in self.list_optional_series()
+                if row.identity == identity and row.profile_version == profile_version]
+
+    def lock_policy_head(self):
+        # Single-threaded fake: a plain read already behaves like the real locking/current read.
+        return self.optional_head
+
+    def lock_latest_minute_ts(self):
+        return max(self.rows) if self.rows else None
+
+    def read_revision(self, revision_id):
+        return self.optional_revisions.get(revision_id)
+
+    # Single-threaded fake: no separate snapshot-vs-locking-read distinction to model.
+    lock_revision = read_revision
+
+    def read_revision_members(self, revision_id):
+        ids = sorted(self.optional_members.get(revision_id, set()))
+        return [self.optional_series[i] for i in ids]
+
+    lock_revision_members = read_revision_members
+
+    def get_or_create_series(self, identity, expected_topic, profile_version, label, unit, kind,
+                             semantic_type, sentinels_json, min_value, max_value, energy, created_at):
+        from pompa.storage import SeriesRow
+
+        key = (identity, expected_topic, profile_version)
+        if key in self.optional_series_by_key:
+            return self.optional_series_by_key[key]
+        series_id = self._storage._alloc_optional_series_id()
+        self.optional_series[series_id] = SeriesRow(series_id, identity, expected_topic, profile_version,
+                                                     label, unit, kind, semantic_type, sentinels_json,
+                                                     min_value, max_value, energy)
+        self.optional_series_by_key[key] = series_id
+        return series_id
+
+    def lock_series_by_identity_version(self, identity, profile_version):
+        matches = [row for row in self.optional_series.values()
+                  if row.identity == identity and row.profile_version == profile_version]
+        if not matches:
+            return None
+        if len(matches) > 1:
+            raise RuntimeError(
+                f"corrupted optional_series state: {len(matches)} rows for identity={identity!r}"
+                f" profile_version={profile_version}")
+        return matches[0]
+
+    def insert_revision(self, base_revision_id, effective_from_minute, created_at):
+        if effective_from_minute % 60:
+            raise ValueError(f"unaligned effective_from_minute {effective_from_minute}")
+        revision_id = self._storage._alloc_optional_revision_id()
+        self.optional_revisions[revision_id] = (revision_id, base_revision_id, effective_from_minute,
+                                                created_at)
+        return revision_id
+
+    def insert_revision_members(self, revision_id, series_ids):
+        self.optional_members.setdefault(revision_id, set()).update(series_ids)
+
+    def update_policy_head(self, revision_id):
+        self.optional_head = revision_id
 
 
 class FakeStorage:
@@ -139,6 +282,18 @@ class FakeStorage:
         self.sessions = 0
         self.fail_commit = 0
         self.ack_lost = False
+        # Stage 4B checkpoint B optional-history policy (docs/ARCHITECTURE.md §25.2.1): a genesis
+        # revision (id 1, empty selection, effective from the beginning of time) with the head
+        # already pointing at it, exactly like Storage.ensure_schema seeds real MariaDB.
+        self.optional_series = {}  # id -> storage.SeriesRow
+        self.optional_series_by_key = {}  # (identity, expected_topic, profile_version) -> id
+        self.optional_revisions = {1: (1, None, 0, 0)}  # id -> (id, base_id, effective_from, created_at)
+        self.optional_members = {1: set()}  # revision_id -> {series_id}
+        self.optional_head = 1
+        self.optional_raw = {}
+        self.optional_rollup = {}
+        self._next_optional_series_id = 1
+        self._next_optional_revision_id = 2
 
     def _check(self):
         from pompa.storage import StorageUnavailable
@@ -150,22 +305,40 @@ class FakeStorage:
         self.schema_calls += 1
         self._check()
 
+    def _alloc_optional_series_id(self):
+        series_id = self._next_optional_series_id
+        self._next_optional_series_id += 1
+        return series_id
+
+    def _alloc_optional_revision_id(self):
+        revision_id = self._next_optional_revision_id
+        self._next_optional_revision_id += 1
+        return revision_id
+
+    def _adopt(self, tx):
+        self.rows, self.rollup = tx.rows, tx.rollup
+        self.optional_series, self.optional_series_by_key = tx.optional_series, tx.optional_series_by_key
+        self.optional_revisions, self.optional_members = tx.optional_revisions, tx.optional_members
+        self.optional_head = tx.optional_head
+        self.optional_raw = tx.optional_raw
+        self.optional_rollup = tx.optional_rollup
+
     @contextmanager
     def session(self):
         from pompa.storage import StorageUnavailable
 
         self.sessions += 1
         self._check()
-        tx = FakeSession(dict(self.rows), dict(self.rollup))
+        tx = FakeSession(dict(self.rows), dict(self.rollup), self)
         tx.upsert_minutes = self._counting(tx.upsert_minutes)
         yield tx
         if self.fail_commit:
             self.fail_commit -= 1
             if self.ack_lost:
-                self.rows, self.rollup = tx.rows, tx.rollup
+                self._adopt(tx)
                 raise StorageUnavailable("ack lost")
             raise StorageUnavailable("commit failed")
-        self.rows, self.rollup = tx.rows, tx.rollup
+        self._adopt(tx)
 
     def _counting(self, upsert):
         def wrapped(rows):
@@ -175,7 +348,7 @@ class FakeStorage:
 
     def facts(self):
         self._check()
-        tx = FakeSession(self.rows, self.rollup)
+        tx = FakeSession(self.rows, self.rollup, self)
         return (*tx.minute_bounds(), tx.rolled_until())
 
 
@@ -259,8 +432,16 @@ def mariadb():
         database=os.environ.get("POMPA_TEST_DB_NAME", "pompa_next_test"),
     )
     with storage._connection() as conn, conn.cursor() as cur:
+        # FK-safe drop order: tables that reference another Stage 4B policy table drop first.
+        cur.execute("DROP TABLE IF EXISTS optional_rollup_1h")
+        cur.execute("DROP TABLE IF EXISTS optional_policy_member")
+        cur.execute("DROP TABLE IF EXISTS optional_policy_head")
+        cur.execute("DROP TABLE IF EXISTS optional_policy_revision")
+        cur.execute("DROP TABLE IF EXISTS optional_series")
+        cur.execute("DROP TABLE IF EXISTS optional_sample_1m")
         cur.execute("DROP TABLE IF EXISTS sample_1m")
         cur.execute("DROP TABLE IF EXISTS rollup_1h")
+        conn.commit()
     return storage
 
 

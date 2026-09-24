@@ -1,7 +1,11 @@
 # API contract
 
 The default contract of Pompa Next was frozen at Stage 3. Stage 4A adds the opt-in capability and
-physical-reading forms described below while preserving those default response semantics.
+physical-reading forms described below while preserving those default response semantics. Stage 4B
+checkpoint B adds one opt-in metrics form and one new DB-backed endpoint pair for the
+optional-history policy. Checkpoint C adds internal raw minute recording. Checkpoint D adds
+persisted optional-series discovery and explicit optional history selectors; default responses
+remain canonical. The owner validated these Stage 4B endpoints on CT109.
 
 Domain rules behind it are in [`ARCHITECTURE.md`](ARCHITECTURE.md). This file describes only what
 the HTTP surface promises.
@@ -15,8 +19,11 @@ the HTTP surface promises.
 | `GET /api/v1/live` | Current in-memory metric state | no | no |
 | `GET /api/v1/metrics` | Metric and COP catalog | no | no |
 | `GET /api/v1/history` | All historical charts and summaries | no | yes |
+| `GET /api/v1/optional-history/selection` | Active-vs-pending optional-history selection | no | yes |
+| `PUT /api/v1/optional-history/selection` | Replace the desired optional-history selection | no | yes |
+| `GET /api/v1/optional-history/series` | Discover persisted optional historical meanings | no | yes |
 
-The application contract exposes the five product API endpoints above; FastAPI may additionally
+The application contract exposes the eight product API endpoints above; FastAPI may additionally
 expose its standard documentation/OpenAPI routes (`/docs`, `/redoc`, `/openapi.json`). `/api/v1` is
 a fresh namespace, not inherited legacy versioning.
 
@@ -230,14 +237,14 @@ evidence trail, not because the policy is undecided.
 
 ## `GET /api/v1/history`
 
-All historical charts and summaries. The only endpoint that reads persisted data.
+Historical charts and summaries from persisted data.
 
 | Parameter | Required | Meaning |
 |---|---|---|
 | `from` | yes | Start instant, inclusive. ISO 8601 with an explicit offset, or `YYYY-MM-DD` local midnight. Whole minutes only. |
 | `to` | yes | End instant, exclusive. Same forms. Must be later than `from`. |
 | `bucket` | no, default `auto` | `auto`, `1m`, `5m`, `1h`, `1d`, `total`. |
-| `series` | no, default all | Comma-separated metric keys plus `cop_co`, `cop_dhw`, `cop_total`. No duplicates. |
+| `series` | no, default canonical set | Comma-separated canonical metric/COP keys and exact persisted optional selectors such as `optional:TOP21@1`. No duplicates. |
 
 `auto` chooses its base bucket from range length alone: ≤36 h → `1m`, ≤10 days → `5m`, ≤120 days →
 `1h`, longer → `1d`. If that chosen `1m`/`5m` bucket would require the raw minutes of an hour that
@@ -281,6 +288,20 @@ buckets.
   A `null` value alongside `recorded_minutes > 0` means the metric was unknown in the recorded
   minutes, not that the minutes are missing.
 - `kwh` is `Σ W / 60000` over known minutes only, never extrapolated over missing ones.
+- An explicit `optional:IDENTITY@VERSION` selector resolves to one persisted `optional_series`
+  meaning. Mean series return `avg`, `min`, `max`, `selected_minutes`, `known_minutes`; last series
+  return `last`, `min`, `max`, `selected_minutes`, `known_minutes`. Persisted `energy=true` adds
+  `kwh = Σ known minute-average W / 60000`. Metadata comes from the persisted series row:
+  `series_id`, `identity`, `topic`, `profile_version`, `label`, `unit`, `kind`, `semantic_type`,
+  `energy`. A selected unknown minute increments only `selected_minutes`; a missing recorded
+  minute increments neither count. Different versions are separate selectors and never joined.
+  Bare identities, malformed versions, and unknown persisted meanings return 400. No optional
+  selector is included by default. Mixed canonical and optional requests share one database
+  snapshot, bucket calendar, raw/rollup boundary, and 3000-bucket limit.
+- A valid optional bucket may have known values whose binary-float sum cannot be represented.
+  Its selected/known counts and min/max/last remain durable. `kind=last` has no historical sum
+  and remains queryable. A requested mean `avg` or `energy=true` `kwh` that needs an
+  unrepresentable sum returns 422; it is never reported as unknown, zero, infinity, or a 500.
 - `cop` is `Σ paired output / Σ paired input` over minutes where all required power channels are
   known. It is `null` when there are no paired minutes or the paired input sum is 0. Instantaneous
   COP values are never averaged.
@@ -293,8 +314,8 @@ bucket.
 | Status | When |
 |---|---|
 | `400` | Malformed parameters: missing `from`/`to`, unparseable or naive timestamps, non-minute alignment, `from >= to`, unknown bucket, unknown or duplicate series, invalid or repeated `include`. |
-| `422` | Well-formed but unrepresentable: more than 3000 buckets, a range or partial edge hour whose raw minutes were provably purged, instants outside 1970–2100. |
-| `503` | `/api/v1/history` only: the database is unavailable. |
+| `422` | Well-formed but unrepresentable: more than 3000 buckets, a range or partial edge hour whose raw minutes were provably purged, an optional mean/energy bucket whose known-value sum cannot fit in binary DOUBLE, or instants outside 1970–2100. |
+| `503` | The database is unavailable for `/api/v1/history`, `/api/v1/optional-history/selection`, or `/api/v1/optional-history/series`. |
 
 The body is `{"detail": "…"}`. `422` for purged raw means the backend knows the minutes existed and
 were physically deleted — it is never a consequence of a range simply being old. A range that was
@@ -306,10 +327,10 @@ truncated range — the request is refused instead.
 
 ## Subsystem independence
 
-| Condition | `/health` | `/api/v1/live` | `/api/v1/metrics` | `/api/v1/status` | `/api/v1/history` |
-|---|---|---|---|---|---|
-| MariaDB unavailable | 200 | 200 | 200 | 200, `database.available=false` | 503 |
-| MQTT disconnected | 200 | 200, no confirmed metrics, retained only where factual | 200 | 200, `mqtt.connected=false`, `mqtt.alive=false` | 200 from persisted data |
+| Condition | `/health` | `/api/v1/live` | `/api/v1/metrics` | `/api/v1/status` | `/api/v1/history` | `/api/v1/optional-history/selection` |
+|---|---|---|---|---|---|---|
+| MariaDB unavailable | 200 | 200 | 200 | 200, `database.available=false` | 503 | 503 |
+| MQTT disconnected | 200 | 200, no confirmed metrics, retained only where factual | 200 | 200, `mqtt.connected=false`, `mqtt.alive=false` | 200 from persisted data | 200 (selection needs no MQTT) |
 
 One subsystem's failure is never turned into process failure or into a global verdict.
 
@@ -390,10 +411,129 @@ fact only. It does **not** imply Stage 4B optional-history eligibility, selectio
 that identity.
 
 Each endpoint accepts only its one documented `include` value or no `include`; unknown,
-comma-separated, empty, and repeated `include` values return `400`. The five endpoint paths remain
-unchanged. `/status` keeps its Stage 3 shape and `uncatalogued_topics` name, which can still list
-known non-core capability topics. `/history` still accepts only canonical series keys.
+comma-separated, empty, and repeated `include` values return `400`. The five Stage 1–4A endpoint
+paths remain unchanged. `/status` keeps its Stage 3 shape and `uncatalogued_topics` name, which can
+still list known non-core capability topics. Default `/history` remains canonical; explicit
+Stage 4B selectors are documented below.
 
-Optional history, activity/events, reports and commands belong to later Stage 4 checkpoints.
-This document lists no endpoint or response for them until implemented and contract-tested. The
-frontend starts only after the complete product-backend contract is documented.
+Activity/events, reports and commands belong to later Stage 4 checkpoints. This document lists no
+endpoint or response for them until implemented and contract-tested. The frontend starts only
+after the complete product-backend contract is documented.
+
+## Stage 4B optional-history selection
+
+Checkpoint A froze the architecture (`ARCHITECTURE.md` §25.2.1); checkpoint B implements the
+`HistoryProfile` domain model, the production immutable policy timeline, and this API. Checkpoint C
+records selected-known optional values internally in `optional_sample_1m` for canonical minutes.
+Checkpoint D adds durable hourly counts and explicit historical queries. Default `/live`,
+`/metrics`, `/status`, and `/history` response shapes remain unchanged, and raw optional JSON is
+not exposed publicly.
+
+### `GET /api/v1/optional-history/series`
+
+DB-backed and independent of MQTT. Returns `{"series": [...]}` in stable `series_id` order,
+including disabled, old-version, and currently blocked meanings. Each entry has `selector`
+(`optional:IDENTITY@VERSION`), `series_id`, `identity`, `topic`, `profile_version`, `label`,
+`unit`, `kind`, `semantic_type`, and `energy` from the persisted `optional_series` row. Empty
+before the first selection; disabling selection does not remove historical metadata. Returns
+503 when MariaDB is unavailable.
+
+### `GET /api/v1/metrics?include=history_profiles`
+
+Returns the default `/metrics` body (unchanged) plus one top-level `history_profiles` array, one
+entry per code-side `HistoryProfile` (`docs/ARCHITECTURE.md` §25.2.1):
+
+```json
+{
+  "identity": "TOP21",
+  "topic": "main/Outside_Pipe_Temp",
+  "profile_version": 1,
+  "label": "Temperatura rury zewnętrznej",
+  "unit": "°C",
+  "kind": "mean",
+  "semantic_type": "measurement",
+  "energy": false,
+  "selectable": true,
+  "blocked_reason": null
+}
+```
+
+`selectable`/`blocked_reason` here describe the **current code-side profile and current Stage 4A
+capability only** — this form never reads the database, so it never compares against a persisted
+`optional_series` row and never reports `profile_definition_changed`. A stored-policy conflict for
+an already-selected series is database state, reported only by the selection GET/PUT surface below;
+a profile can read `selectable: true` here while a `PUT` for it still fails with `409` if its
+persisted definition has drifted from current code. `selectable` is `true` exactly when
+`blocked_reason` is `null`; a reason here is one of `profile_missing`, `profile_version_changed`,
+`topic_changed` or `capability_topic_changed` (`ARCHITECTURE.md` §25.2.8). Sentinels and min/max
+stay backend-internal and are not exposed here. No database I/O: this form has the same
+MQTT/MariaDB independence as the default `/metrics` response. `include` still accepts exactly one
+of `capabilities` or `history_profiles`, never both.
+
+### `GET /api/v1/optional-history/selection`
+
+DB-backed. Resolves the policy timeline for the current minute and reports active-versus-pending
+selection:
+
+```json
+{
+  "active_revision": {"id": 1, "effective_from": "1970-01-01T00:00:00Z"},
+  "head_revision": {"id": 2, "effective_from": "2027-01-15T09:01:00Z"},
+  "pending": true,
+  "active_members": [],
+  "head_members": [
+    {
+      "identity": "TOP21", "topic": "main/Outside_Pipe_Temp", "profile_version": 1,
+      "label": "Temperatura rury zewnętrznej", "unit": "°C", "kind": "mean",
+      "semantic_type": "measurement", "energy": false, "blocked_reason": null
+    }
+  ]
+}
+```
+
+`active_revision` is the revision governing the current minute; `head_revision` is the latest
+accepted revision regardless of when it takes effect. `pending` is `true` exactly when they differ.
+Each member's `blocked_reason` reflects the *persisted* series snapshot against *current* code and
+capabilities — here a fifth reason, `profile_definition_changed`, can also appear: the same
+`(identity, expected_topic, profile_version)`, but the persisted definition (unit/kind/sentinels/
+min/max/energy) no longer matches current code, a code-definition error rather than a device or
+capability fact. Either way, a member can become blocked long after its revision was created
+without that revision ever being mutated or deleted. `503` when the database is unavailable.
+
+### `PUT /api/v1/optional-history/selection`
+
+DB-backed. Body:
+
+```json
+{"base_revision": 2, "identities": ["TOP21", "XTOP1"]}
+```
+
+Replaces the *whole* desired selection; an empty `identities` list is legal. Success:
+
+```json
+{"revision": {"id": 3, "effective_from": "2027-01-15T09:05:00Z"}, "idempotent_replay": false}
+```
+
+`effective_from` is always a future, minute-aligned instant no earlier than the currently open
+minute, the latest committed canonical minute, or the current head's own `effective_from`
+(`ARCHITECTURE.md` §25.2.1, Part 8); disabling a series never deletes its history, and no revision
+is ever mutated. `idempotent_replay: true` means this exact request (same `base_revision`, same
+resolved series set) already succeeded — an ambiguous retry after a lost acknowledgement is
+answered with the revision it actually produced, not a second one and not a conflict.
+
+| Status | When |
+|---|---|
+| `200` | Applied (or an identical idempotent retry of an already-applied request). |
+| `400` | Duplicate identity, unknown identity, or a currently unselectable (blocked) profile. |
+| `409` | `base_revision` is stale (the head has moved and this is not that head's own retry), **or** a requested identity already has a persisted series whose stored definition no longer matches current code. |
+| `503` | The database is unavailable. |
+
+A `409` for a stale `base_revision` means the caller must `GET` the current selection and decide
+again; the backend never guesses which of two concurrent, genuinely different requests should win.
+A `409` for a stored-definition conflict means an identity's on-disk historical meaning disagrees
+with the running code for the exact same `(identity, expected_topic, profile_version)` — a
+deployment/code error, not a race — and it fails the whole request closed: no revision is created,
+the head does not move, and the old row is never mutated. An *ambiguous retry* (same
+`base_revision`, same resolved identity set) is answered `200`/`idempotent_replay: true` only if
+every one of those already-selected series still matches current code; if the stored definition
+was altered in the meantime, the retry also fails `409` rather than falsely reporting success.

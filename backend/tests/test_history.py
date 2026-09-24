@@ -9,9 +9,10 @@ from datetime import date
 import pytest
 
 from conftest import T0, FakeStorage, minutes, row, sample
+from conftest import persist_canonical
 from pompa import history
 from pompa.aggregation import fold_minutes
-from pompa.recorder import persist, purge_step, roll_next_hour
+from pompa.recorder import purge_step, roll_next_hour
 from pompa.timegrid import Unrepresentable, local_midnight
 
 H = 3600
@@ -84,7 +85,7 @@ SHAPES = [
 
 @pytest.mark.parametrize("bucket,start,end", SHAPES)
 def test_raw_only_and_mixed_reads_are_identical(any_storage, monkeypatch, bucket, start, end):
-    persist(any_storage, gappy(H0, 72))
+    persist_canonical(any_storage, gappy(H0, 72))
     roll_until(any_storage, H0 + 60 * H)  # the last 12 hours stay unrolled
     calls = spy(any_storage, monkeypatch)
     mixed = q(any_storage, start, end, bucket)
@@ -100,7 +101,7 @@ def test_raw_only_and_mixed_reads_are_identical(any_storage, monkeypatch, bucket
 def test_mixed_read_matches_an_independent_flat_fold(monkeypatch):
     storage = FakeStorage()
     rows = gappy(H0, 30)
-    persist(storage, rows)
+    persist_canonical(storage, rows)
     roll_until(storage, H0 + 24 * H)
     start, end = H0 + 25 * 60, H0 + 27 * H + 50 * 60
     body = q(storage, start, end, "total")
@@ -120,7 +121,7 @@ def test_mixed_read_matches_an_independent_flat_fold(monkeypatch):
 def test_dst_days_are_identical_on_raw_and_rollup_paths(any_storage, monkeypatch):
     first = local_midnight(date(2027, 10, 30))
     last = local_midnight(date(2027, 11, 2))
-    persist(any_storage, gappy(first, (last - first) // H))
+    persist_canonical(any_storage, gappy(first, (last - first) // H))
     roll_until(any_storage, last - 5 * H)
     frm, to = local_midnight(date(2027, 10, 30)), local_midnight(date(2027, 11, 2))
     mixed = q(any_storage, frm, to, "1d", now=to + H)
@@ -133,7 +134,7 @@ def test_dst_days_are_identical_on_raw_and_rollup_paths(any_storage, monkeypatch
 
 
 def test_5m_buckets_hand_calculated(any_storage):
-    persist(any_storage, [
+    persist_canonical(any_storage, [
         row(H0, outside_temp=1.0, operating_mode=4.0),
         row(H0 + 60, outside_temp=None, operating_mode=3.0),  # stored NULL
         # H0 + 120: no row
@@ -154,7 +155,7 @@ def test_5m_buckets_hand_calculated(any_storage):
 
 def test_energy_of_an_incomplete_hour_is_not_extrapolated(any_storage):
     # 30 recorded minutes at 1200 W in hour 0, then a stored NULL minute: 0.6 kWh, not 1.2 kWh.
-    persist(any_storage, [row(H0 + 60 * i, co_power_consumption=1200.0) for i in range(30)]
+    persist_canonical(any_storage, [row(H0 + 60 * i, co_power_consumption=1200.0) for i in range(30)]
             + [row(H0 + 30 * 60, co_power_consumption=None)])
     roll_until(any_storage, H0 + H)
     body = q(any_storage, H0, H0 + 2 * H, "1h", ["co_power_consumption"], now=H0 + 2 * H)
@@ -171,7 +172,7 @@ def test_period_cop_hand_calculated(any_storage):
         return row(ts, co_power_consumption=ci, co_power_production=co,
                    dhw_power_consumption=di, dhw_power_production=do)
 
-    persist(any_storage, [
+    persist_canonical(any_storage, [
         p(H0, 1000.0, 4000.0, 0.0, 0.0),
         p(H0 + 60, 500.0, 1000.0, 18.0, 0.0),  # 18 W in / 0 W out lowers DHW and total COP
         p(H0 + 120, 0.0, 0.0, 0.0, 0.0),  # paired, adds no denominator
@@ -199,7 +200,7 @@ def test_empty_buckets_are_structural(any_storage):
 
 
 def test_stored_null_differs_from_missing_row_in_rolled_hours(any_storage):
-    persist(any_storage, [row(H0 + 60 * i, outside_temp=None) for i in range(10)]
+    persist_canonical(any_storage, [row(H0 + 60 * i, outside_temp=None) for i in range(10)]
             + [row(H0 + 600 + 60 * i, outside_temp=2.0) for i in range(5)])
     roll_until(any_storage, H0 + H)
     body = q(any_storage, H0, H0 + H, "1h", ["outside_temp"], now=H0 + H)
@@ -209,7 +210,7 @@ def test_stored_null_differs_from_missing_row_in_rolled_hours(any_storage):
 
 
 def test_partial_edge_hours_read_raw_minutes_only(any_storage, monkeypatch):
-    persist(any_storage, minutes(H0, 5 * 60))
+    persist_canonical(any_storage, minutes(H0, 5 * 60))
     roll_until(any_storage, H0 + 5 * H)
     calls = spy(any_storage, monkeypatch)
     body = q(any_storage, H0 + 10 * 60, H0 + 3 * H + 20 * 60, "1h", ["outside_temp"])
@@ -223,7 +224,7 @@ def test_partial_edge_hours_read_raw_minutes_only(any_storage, monkeypatch):
 
 
 def test_minute_buckets_never_read_rollups(any_storage, monkeypatch):
-    persist(any_storage, minutes(H0, 3 * 60))
+    persist_canonical(any_storage, minutes(H0, 3 * 60))
     roll_until(any_storage, H0 + 3 * H)
     calls = spy(any_storage, monkeypatch)
     for bucket in ("1m", "5m"):
@@ -232,7 +233,7 @@ def test_minute_buckets_never_read_rollups(any_storage, monkeypatch):
 
 
 def test_expected_minutes_are_not_trimmed_to_recording_start(any_storage):
-    persist(any_storage, minutes(H0 + 30 * 60, 30))  # recording starts halfway through the hour
+    persist_canonical(any_storage, minutes(H0 + 30 * 60, 30))  # recording starts halfway through the hour
     body = q(any_storage, H0, H0 + H, "1h", ["outside_temp"], now=H0 + H)
     assert body["buckets"][0] | {} == {"start": "2027-01-15T08:00:00Z", "end": "2027-01-15T09:00:00Z",
                                        "expected_minutes": 60, "recorded_minutes": 30, "coverage_percent": 50.0}
@@ -258,7 +259,7 @@ def purged_history(storage):
     from the database; ``GAP_HOUR`` is a natural hole that was never recorded
     and therefore has no rollup row either.
     """
-    persist(storage, [r for r in minutes(H0, 72 * 60) if not GAP_HOUR <= r.ts < GAP_HOUR + H])
+    persist_canonical(storage, [r for r in minutes(H0, 72 * 60) if not GAP_HOUR <= r.ts < GAP_HOUR + H])
     roll_until(storage, H0 + 72 * H)
     now = H0 + 72 * H
     more = True
@@ -344,7 +345,7 @@ def test_auto_promotes_to_1h_when_the_range_needs_purged_raw(any_storage):
 
 
 def test_without_any_rollup_raw_is_always_servable(any_storage):
-    persist(any_storage, minutes(H0, 60))
+    persist_canonical(any_storage, minutes(H0, 60))
     body = q(any_storage, H0, H0 + H, "1m", ["outside_temp"], now=H0 + 800 * 86400)
     assert body["bucket"] == "1m" and sum(b["recorded_minutes"] for b in body["buckets"]) == 60
 

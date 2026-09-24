@@ -3,10 +3,11 @@
 import pytest
 
 from conftest import T0, minutes, row
+from conftest import persist_canonical
 from pompa import history
 from pompa.ingest import Ingest
 from pompa.minute import MinuteAccumulator
-from pompa.recorder import PURGE_INTERVAL_SECONDS, PurgeRefused, Recorder, persist, purge_step, roll_next_hour
+from pompa.recorder import PURGE_INTERVAL_SECONDS, PurgeRefused, Recorder, purge_step, roll_next_hour
 from pompa.timegrid import Unrepresentable
 
 H = 3600
@@ -38,7 +39,7 @@ def purge_all(storage, now, retention_days, pending_from=None, max_hours=24):
 
 
 def ten_rolled_hours(storage):
-    persist(storage, minutes(H0, 10 * 60))
+    persist_canonical(storage, minutes(H0, 10 * 60))
     roll_all(storage)
     return H0 + 10 * H  # rolled_until
 
@@ -47,7 +48,7 @@ def ten_rolled_hours(storage):
 
 
 def test_no_rollup_means_no_purge(any_storage):
-    persist(any_storage, minutes(H0, 2 * 60))
+    persist_canonical(any_storage, minutes(H0, 2 * 60))
     assert purge_step(any_storage, now=H0 + 400 * DAY, retention_days=1, pending_from=None,
                       max_hours=24) == (None, 0, False)
     assert len(stored(any_storage)) == 120
@@ -62,7 +63,7 @@ def test_two_hour_reprocessing_window_is_preserved(any_storage):
 
 
 def test_retention_boundary_keeps_the_hour_it_lands_on(any_storage):
-    persist(any_storage, minutes(H0, 72 * 60))
+    persist_canonical(any_storage, minutes(H0, 72 * 60))
     roll_all(any_storage)
     now = H0 + 72 * H  # retention 1 day: floor_hour(now - 1 day) = H0 + 48 h
     cutoff, deleted = purge_all(any_storage, now, retention_days=1)
@@ -92,7 +93,7 @@ def test_pending_minute_holds_the_cutoff_above_its_hour(any_storage):
 
 def test_unrolled_hours_below_the_cutoff_refuse_the_purge(any_storage):
     """A rollup that is not contiguous proves nothing about the hours below it."""
-    persist(any_storage, minutes(H0, 10 * 60))
+    persist_canonical(any_storage, minutes(H0, 10 * 60))
     with any_storage.session() as s:  # only hour 5 has a rollup row
         s.replace_rollup_hour(H0 + 5 * H, [("recorded", 60, 60.0, 1.0, 1.0, 1.0)])
     with pytest.raises(PurgeRefused, match="08:00:00Z"):
@@ -104,7 +105,7 @@ MISSING = H0 + 2 * H + 1800  # one minute absent from the recorded history
 
 
 def rolled_history_missing_a_minute(storage):
-    persist(storage, [r for r in minutes(H0, 10 * 60) if r.ts != MISSING])
+    persist_canonical(storage, [r for r in minutes(H0, 10 * 60) if r.ts != MISSING])
     roll_all(storage)
 
 
@@ -125,7 +126,7 @@ def test_refusal_leaves_the_repair_possible(any_storage):
         s.upsert_minutes([late])
     with pytest.raises(PurgeRefused):
         purge_step(any_storage, now=H0 + 400 * DAY, retention_days=365, pending_from=None, max_hours=24)
-    persist(any_storage, [late])  # rewriting it repairs the hour it belongs to
+    persist_canonical(any_storage, [late])  # rewriting it repairs the hour it belongs to
     _, deleted = purge_all(any_storage, now=H0 + 400 * DAY, retention_days=365)
     assert deleted == 8 * 60  # including the repaired minute, which is no longer missing
 
@@ -157,7 +158,7 @@ def test_recorder_purges_hourly_and_reports_facts(any_storage):
     facts = rec.snapshot(lambda: now)[1]["recorder"]["purge"]
     assert facts["last_deleted_rows"] == 8 * 60 and facts["deleted_rows"] == 8 * 60
     assert facts["last_cutoff"] == "2027-01-15T16:00:00Z" and facts["error"] is None
-    persist(any_storage, minutes(H0 + 10 * H, 60))
+    persist_canonical(any_storage, minutes(H0 + 10 * H, 60))
     rec.tick(now + 1)  # within the hour: no second purge run
     assert rec.last_purge_at == now and rec.purged_rows == 8 * 60
     rec.tick(now + PURGE_INTERVAL_SECONDS + 1)
@@ -165,7 +166,7 @@ def test_recorder_purges_hourly_and_reports_facts(any_storage):
 
 
 def test_recorder_records_a_refusal_without_deleting(any_storage):
-    persist(any_storage, minutes(H0, 10 * 60))
+    persist_canonical(any_storage, minutes(H0, 10 * 60))
     with any_storage.session() as s:
         s.replace_rollup_hour(H0 + 5 * H, [("recorded", 60, 60.0, 1.0, 1.0, 1.0)])
     rec = recorder_on(any_storage)
@@ -195,7 +196,7 @@ def test_recorder_purge_bounded_steps_continue_on_the_next_tick(any_storage, mon
 
 
 def test_purged_hours_remain_readable_as_rollups_but_not_as_minutes(any_storage):
-    persist(any_storage, minutes(H0, 72 * 60))
+    persist_canonical(any_storage, minutes(H0, 72 * 60))
     roll_all(any_storage)
     now = H0 + 72 * H
     purge_all(any_storage, now, retention_days=1)
