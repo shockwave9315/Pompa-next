@@ -2,9 +2,9 @@
 
 ## Current stage
 
-**Stage 4B — Checkpoints A–D DONE; Checkpoint E IN PROGRESS.** Repository-side optional history
-is implemented and Checkpoint D is adversarially verified. Owner CT109 deployment and runtime
-validation are pending; Stage 4B is not yet done. Frontend work starts after Stage 4.
+**Stage 4B — DONE (Checkpoints A–E).** The owner accepted CT109 runtime validation of optional
+history. Stage 4C — operational state, activity, cycles, defrost and durable events — is next.
+Frontend work starts after Stage 4.
 
 Stage 4A — DONE and merged to `main` (PR #6, merge commit
 `a34aaead89fae3359769cf2737aab42fd274d145`).
@@ -72,8 +72,8 @@ expected unrecorded partial minute. No optional capability was persisted.
 
 ## Stage 4B
 
-**Checkpoints A (architecture/contract), B (policy foundation), C (raw recording), and D
-(durable optional history) — DONE.**
+**Checkpoints A (architecture/contract), B (policy foundation), C (raw recording), D
+(durable optional history), and E (runtime validation) — DONE.**
 Branch `stage-4b-optional-history`, draft PR #7, not merged.
 
 ### Implemented
@@ -142,14 +142,35 @@ Branch `stage-4b-optional-history`, draft PR #7, not merged.
   422, while valid unrequested optional series cannot poison another query. Loaded raw JSON still
   receives full consistency validation. Canonical `Stats` and minute arithmetic are unchanged.
 
-### Deferred
+### Checkpoint E — accepted CT109 evidence
 
-See `docs/ARCHITECTURE.md` §25.2.8: the complete eligible profile list, optional-power energy
-beyond `XTOP1`/`XTOP4`, and a max-selection-count remain open questions. Remaining checkpoints:
+- The owner's independent read-only MQTT collector ran **22.57 h** (81,253.2 s) without a
+  disconnect. All 15 profiles published; no non-retained gap exceeded 600 s. TOP52 and TOP55
+  each published 269 sentinel values on this K-series unit; their selected-but-unknown minutes
+  remained selected. Retained startup deliveries were excluded from history evidence.
+- All 15 profiles were selected simultaneously. Optional raw reached **1,436** canonical minutes;
+  the first 61-row integrity check found 793 series keys, 366 numeric zeros and no orphan minute.
+  The natural rollup contained **24 hours × 15 series = 360 rows**, including TOP52/TOP55 with
+  `known_minutes=0`. API and database counts/values matched. A Force-DHW smoke showed real
+  profile changes and preserved valid zero and unknown facts; TOP93 remains unit `duty`.
+- Final recorder status: 1,439 minutes closed and written; protected, waiting, dropped and
+  refused rows all zero; database, rollup and purge errors absent; MQTT connected and alive with
+  zero parse rejects and clock steps. Canonical `rolled_until` advanced to
+  `2026-09-24T16:00:00Z`.
+- Exact table counts included 7,408 canonical raw, 3,472 canonical rollup, 1,436 optional raw
+  and 360 optional rollup rows. Optional raw averaged 13 JSON keys and 122.688 bytes (max 154
+  bytes). Database allocated 2,375,680 bytes, including 81,920 index bytes; measured query
+  paths used existing indexes, so none were added. Compressed logical backup grew from 106,793
+  to 164,473 bytes while canonical history also grew; that difference is not solely Stage 4B.
+- The external owner-run helper's global `umask 077` made newly checked-out Python source
+  unreadable to the non-root Docker user on the first deployment attempt. The owner restored
+  readable source modes and rebuilt/restarted the backend. Recovery passed post-deployment
+  checks without any product-code or deployed-SHA change; the helper is corrected on CT112.
 
-- **Checkpoint E:** full tests/docs; owner CT109 runtime validation; publication-gap evidence;
-  storage/table/index/backup measurements; eligible-list and max-selection decisions if evidence
-  supports them. Repository preparation is complete; owner CT109 evidence is pending.
+Owner decisions: keep all current 15 profiles globally eligible, including TOP52/TOP55/TOP63/
+TOP66. Their sentinel/zero observations on one K-series unit do not establish global support
+rules. No selection cap below 15 is justified. Keep shared `STALE_AFTER_SECONDS=600` and
+`RETENTION_1M_DAYS=365`; future list growth or retention changes need new evidence.
 
 ## Out of scope
 
@@ -160,6 +181,4 @@ beyond `XTOP1`/`XTOP4`, and a max-selection-count remain open questions. Remaini
 
 ## Next
 
-Owner CT109 validation for Checkpoint E: collect publication-gap and actual raw/rollup,
-storage/index/backup evidence, then decide the eligible list and max-selection policy from those
-facts. See `docs/ROADMAP.md` for later stages.
+Stage 4C — operational state, activity, cycles, defrost and durable events.

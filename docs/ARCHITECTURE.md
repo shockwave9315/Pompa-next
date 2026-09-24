@@ -582,11 +582,15 @@ must not automatically become a valid optional-history power value. Stage 4B mus
 eligibility, semantic type, sentinels and aggregation policy explicitly, per selection. Stage 4A's
 `available` is a live-surface fact only; it does not by itself define minute-history validity.
 
-**Candidate:** core-wide minutes plus separate dynamic optional history. Compare a participation
-pseudo-series, an eligible count in a rollup row, compact metadata, or a simpler factual source.
-Prove atomic retries and late-hour correction with the existing recorder invariants. Keep
-`RETENTION_1M_DAYS=365` during early Stage 4. Choose any later default only after CT109
-table/index/bytes-per-day and backup measurements plus Stage 4C durability proof.
+**Settled Stage 4B direction:** core-wide minutes plus separate dynamic optional history with
+persisted policy selection and selected/known counts in hourly rollups. The initial eligible set
+remains all 15 explicit `HistoryProfile` definitions (§25.2.8). All 15 were selected together in
+accepted runtime validation; no lower max-selection cap is justified for this set. Keep the shared
+`STALE_AFTER_SECONDS=600` and `RETENTION_1M_DAYS=365`. Revisit the list or retention only with
+new semantic or durability evidence; Stage 4C still owns durable events. Sentinel-only or numeric
+zero readings on one device model do not automatically define global eligibility or support.
+A numeric known zero is a transport/history fact, not proof that a measurement is physically
+useful on every device model.
 
 #### 25.2.1 Checkpoint A — architecture and contract freeze (DONE)
 

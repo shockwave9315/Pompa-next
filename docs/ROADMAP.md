@@ -49,14 +49,14 @@ history and database behavior. Use one feature branch and one DRAFT PR with chec
 reference foundation, typed normalization, full in-memory readings, additive API, then tests/docs
 and CT109 validation. These are implementation checkpoints, not roadmap stages.
 
-### 4B — Configurable optional history and long-term aggregation
+### 4B — Configurable optional history and long-term aggregation (DONE)
 
 Keep the 21-metric core history path; decide history eligibility, dynamic optional storage,
 selected-versus-unknown semantics, hourly aggregation, and purge interaction from evidence. Measure
 actual MariaDB growth on CT109. Keep `RETENTION_1M_DAYS=365` during early Stage 4; choose any later
 retention change only after durable events and storage/backup measurements.
 
-### 4C — Operational state, activity, cycles, defrost and durable events
+### 4C — Operational state, activity, cycles, defrost and durable events (NEXT)
 
 Derive one operational interpretation from canonical minutes and expose factual runtime, starts,
 cycle durations/intervals and individual defrosts. Preserve missing evidence. Compare direct

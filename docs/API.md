@@ -5,7 +5,7 @@ physical-reading forms described below while preserving those default response s
 checkpoint B adds one opt-in metrics form and one new DB-backed endpoint pair for the
 optional-history policy. Checkpoint C adds internal raw minute recording. Checkpoint D adds
 persisted optional-series discovery and explicit optional history selectors; default responses
-remain canonical. There is no CT109 change.
+remain canonical. The owner validated these Stage 4B endpoints on CT109.
 
 Domain rules behind it are in [`ARCHITECTURE.md`](ARCHITECTURE.md). This file describes only what
 the HTTP surface promises.
