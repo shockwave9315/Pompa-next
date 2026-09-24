@@ -56,11 +56,12 @@ selected-versus-unknown semantics, hourly aggregation, and purge interaction fro
 actual MariaDB growth on CT109. Keep `RETENTION_1M_DAYS=365` during early Stage 4; choose any later
 retention change only after durable events and storage/backup measurements.
 
-### 4C — Operational state, activity, cycles, defrost and durable events (NEXT)
+### 4C — Operational state, activity, cycles, defrost and durable events (IN PROGRESS)
 
 Derive one operational interpretation from canonical minutes and expose factual runtime, starts,
-cycle durations/intervals and individual defrosts. Preserve missing evidence. Compare direct
-durable events with hourly segments and any simpler correct design before choosing storage.
+cycle durations/intervals and individual defrosts. Preserve missing evidence. The owner chose
+durable per-hour activity segments; events and runs are derived on read. Checkpoints: A pure
+domain truth (DONE), B durable segments, C API resources, D closure and CT109 validation.
 
 ### 4D — Reports and product analytics projections
 

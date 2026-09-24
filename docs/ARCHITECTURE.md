@@ -36,6 +36,7 @@ The intended backend boundaries are conceptual, not a mandate for speculative ab
 | Recorder | Close minutes, buffer writes, flush storage, roll up closed hours, and purge safely. |
 | Storage | Own DDL and parameterized MariaDB queries; contain no domain calculations. |
 | Aggregation | Own `Stats`, buckets, derived series, energy, COP, coverage, and read-path composition. |
+| Activity | Interpret canonical minutes into activity, compressor runs and defrosts (Stage 4C, §25.3); pure. |
 | API | Validate requests and serialize domain results; contain no independent mathematics. |
 
 Dependencies flow inward toward the catalog and domain functions. Circular dependencies are not allowed. Live and history share the proven canonical metric definitions, not a generic storage abstraction. Stage 4A adds a reference-backed capability layer around them (§25).
@@ -243,7 +244,7 @@ A single pure derivation function expands each `MinuteRow` before folding:
 - `pair_total_in` and `pair_total_out` exist only when all four power channels are known; their values are the respective CO+DHW sums.
 
 The identical derivation runs when building `rollup_1h` and when querying raw minutes.
-Flags remain measurable facts. For a 0/1 mean flag, `sum` is the number of minutes in state 1. Operational activity classification is not part of the core history engine.
+Flags remain measurable facts. For a 0/1 mean flag, `sum` is the number of minutes in state 1. Operational activity classification is not part of the core history engine; it is the separate Stage 4C activity domain (§25.3.1), which reuses this derivation for its energy ingredients.
 
 ## 11. Energy and COP
 
@@ -1102,10 +1103,89 @@ distribution are factual outputs, not good/bad/fault verdicts. Missing rows rema
 remains unknown. Do not smooth across gaps or add per-second machinery without real evidence.
 Keep the device operations counter distinct from observed compressor starts until verified.
 
-Useful event facts must survive raw purge. **Deferred to 4C:** compare direct durable events,
-hourly segments and any demonstrably simpler correct representation against late writes, database
-outages, cross-hour/midnight spans, restart, idempotency and purge. Raw-only recomputation cannot
-meet durability. No event table, segment stitching scheme or materialization marker is frozen now.
+Useful event facts must survive raw purge; raw-only recomputation cannot meet durability. **Owner
+decision:** durable per-hour activity segments. Checkpoint B materializes each UTC hour's ordered
+segments through the existing `persist()` → `rebuild_hour()` path, together with the rule version.
+Events, compressor runs, starts, intervals, continuation and range projections are derived on read
+by stitching segments; no cross-hour state machine is persisted. The segment table, its purge
+proof and the API resources are frozen in checkpoints B and C, not here.
+
+#### 25.3.1 Checkpoint A — activity domain truth (DONE)
+
+`pompa/activity.py` is pure and storage-free. It reads only canonical `MinuteRow` values
+(`ACTIVITY_COLUMNS`); a column that was not read is an error, never an unknown metric. The
+interpretation is versioned: `ACTIVITY_RULE_VERSION = 1`. Changing any classification or segment
+content needs a new version, because 4C-B stores it as historical meaning; a golden test pins
+version 1.
+
+**Classification of one recorded minute.** Compressor state comes from `compressor_freq` alone:
+`NULL` → unknown, exactly `0` → off, `> 0` → on. It is not `NULL`-as-off. Activity precedence:
+
+1. `defrosting_state` `NULL` → `unknown` (a defrost cannot be excluded).
+2. `defrosting_state > 0` → `defrost`, over valve, power and compressor evidence.
+3. Compressor unknown → `unknown`.
+4. Compressor off → `off` if `heatpump_state == 0`, `unknown` if it is `NULL`, otherwise `idle`.
+   Valve position and power tails never create CO/CWU activity with a stopped compressor.
+5. Compressor on, known valve → `0` `co`, `1` `dhw`, fractional `transition`. A fractional value is
+   the time-integrated minute mean, never a reconstructed intra-minute switch order.
+6. Compressor on, valve `NULL` → the legacy-proven `> 100 W` power evidence. A side (CO or DHW)
+   is active if any of its consumption/production channels exceeds 100 W, and inactive only if
+   both are known and at most 100 W. CO only → `co`, DHW only → `dhw`, both → `transition`; any
+   other combination, including an unknown side, → `unknown`.
+
+`operations_counter` and `operating_mode` never classify. The device counter is not observed start
+truth.
+
+**Segments.** An `ActivitySegment` is consecutive recorded minutes within one UTC hour with the same
+activity, compressor state and exact `defrosting_state` value. A fractional defrost boundary minute
+is therefore never merged with full minutes, and every segment can be clipped at any minute
+exactly. Each segment carries the canonical energy ingredients: the `fold_minutes` `Stats` of the
+four power channels and six paired series (`ENERGY_SERIES`) over exactly its minutes. Energy
+(`ΣW/60000`, `minutes = n`) and period COP (`Σ paired out / Σ paired in`, `paired_minutes`) come
+from the existing `energy_kwh`/`cop`; there is no second formula and no COP averaging.
+Chronological `combine` of segment ingredients reproduces the history fold's minute counts and
+pairing exactly. Its sums are equal up to binary floating-point association, and exactly equal
+whenever the sums are representable. A piece clipped out of a segment carries no ingredients; a
+sub-segment energy edge needs raw minutes, as in §15. Building hours separately and concatenating
+their segments gives the same result as building a whole range.
+
+**Timeline and gaps.** A `Timeline` places segments on an evidence window with explicit `Gap`s for
+closed minutes without a row. A gap is missing evidence, never `unknown`. Minutes at or after
+`closed_until`, the first unclosed minute, are neither gaps nor unknown. No row is manufactured.
+
+**Spans.** Activity events, observed compressor runs ("cycles" = observed compressor runs),
+compressor-off intervals and individual defrosts are maximal consecutive recorded minutes in one
+state. They are never bridged across a gap or an unknown minute, and nothing is smoothed. `CO → idle
+→ CO`, `CO → gap → CO`, `CO → unknown → CO` and `CO → defrost → CO` all remain separate pieces. A
+compressor run may span CO, DHW, transition and defrost activity. Each edge carries a `Boundary`
+describing the adjacent minute:
+
+| Boundary | Adjacent minute |
+|---|---|
+| `observed` | recorded, consecutive, in a different known state (for a run: compressor off) |
+| `unknown` | recorded, consecutive, state unknown |
+| `gap` | closed without a row |
+| `open` | not yet closed (right edge only): a current run or event has no fabricated end |
+| `outside_evidence` | outside the examined window |
+
+`start_observed`/`end_observed` are true only for `observed`. An observed start therefore needs
+the immediately preceding consecutive minute recorded with the compressor off. Missing → on and
+unknown → on are not starts, and nothing searches backwards across a gap. A short stop inside
+minute means cannot produce a zero minute and is not claimed. An off interval is exact only when
+both of its edges are observed runs.
+
+**Defrost duration.** `observed_defrost_seconds = Σ defrosting_state × 60` over valid defrost
+minutes. It is exact relative to Next's time-integrated observations, not a physical transition
+second. Example: `0.583333, 1, 1, 0.166667` → 165 s. Separate defrosts stay separate.
+
+**Range projection.** Chronology is UTC; local-day ranges come from the existing Europe/Warsaw
+helpers, so 23 h and 25 h days need no special case. A projected span has
+`starts_before_range`/`ends_after_range` true only when recorded minutes of the same span exist
+outside the range. A query edge alone is never evidence, and a span ending exactly at midnight does
+not continue. A summary counts a start in the range holding the run's first minute and a stop in
+the range holding its last minute, because a zero minute proves the compressor off for that whole
+minute. Complete runs and exact off intervals are attributed by their first minute. Summaries
+report minutes, counts and durations only, with no verdicts.
 
 ### 25.4 Stage 4D — report projections
 

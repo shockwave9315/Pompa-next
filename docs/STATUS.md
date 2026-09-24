@@ -2,9 +2,13 @@
 
 ## Current stage
 
-**Stage 4B — DONE (Checkpoints A–E).** The owner accepted CT109 runtime validation of optional
-history. Stage 4C — operational state, activity, cycles, defrost and durable events — is next.
-Frontend work starts after Stage 4.
+**Stage 4C — operational state, activity, cycles, defrost and durable events — IN PROGRESS.**
+Checkpoint A (domain truth) is complete; checkpoint B (durable hourly activity segments) is next.
+Branch `stage-4c-activity-cycles`, one DRAFT PR for checkpoints A–D. Frontend work starts after
+Stage 4.
+
+Stage 4B — DONE and merged to `main` (PR #7, merge commit
+`dfd225d2a8fe35563cd1f684efb81cf91b532a2f`).
 
 Stage 4A — DONE and merged to `main` (PR #6, merge commit
 `a34aaead89fae3359769cf2737aab42fd274d145`).
@@ -73,8 +77,7 @@ expected unrecorded partial minute. No optional capability was persisted.
 ## Stage 4B
 
 **Checkpoints A (architecture/contract), B (policy foundation), C (raw recording), D
-(durable optional history), and E (runtime validation) — DONE.**
-Branch `stage-4b-optional-history`, draft PR #7, not merged.
+(durable optional history), and E (runtime validation) — DONE.** Merged to `main` (PR #7).
 
 ### Implemented
 
@@ -172,13 +175,41 @@ TOP66. Their sentinel/zero observations on one K-series unit do not establish gl
 rules. No selection cap below 15 is justified. Keep shared `STALE_AFTER_SECONDS=600` and
 `RETENTION_1M_DAYS=365`; future list growth or retention changes need new evidence.
 
+## Stage 4C
+
+Owner-accepted direction: durable per-hour activity segments (option B), materialized by the
+existing `persist()` → `rebuild_hour()` path in checkpoint B; events, compressor runs, starts,
+intervals, continuation and range projections are derived on read. Legacy smoothing, NULL-as-off
+compressor behavior and its asymmetric midnight continuation are deliberately not preserved.
+
+### Checkpoint A — domain truth (DONE)
+
+- Pure `pompa/activity.py` (no storage) implements `docs/ARCHITECTURE.md` §25.3.1:
+  per-minute classification, hour-local `ActivitySegment`s, explicit `Gap`s, activity events,
+  observed compressor runs, off intervals, individual defrosts, evidence-based range projection
+  and a factual summary, under `ACTIVITY_RULE_VERSION = 1`.
+- `backend/tests/test_activity.py` covers the classification matrix and golden version-1
+  meaning, no smoothing around former legacy thresholds, start/end evidence against
+  off/unknown/gap/window/open neighbours, cross-hour runs built from separately built hours,
+  midnight continuation/stop/gap/unknown/restart/defrost, Warsaw 23 h and 25 h days, fractional
+  defrost from the real ingest/accumulator (165 s) with every minute clip exact, an unobservable
+  short stop across a minute boundary, the power tail after a CO run, energy/paired-COP
+  ingredients against the canonical history fold, and a minute-by-minute brute-force reference.
+
+### Remaining checkpoints
+
+- B: persist hour segments with their rule version through `persist()`/`rebuild_hour()`, with
+  purge proof, before any raw retention change.
+- C: activity/timeline/cycles API resources.
+- D: tests/docs closure and CT109 runtime validation.
+
 ## Out of scope
 
-- Events/activity/cycles, reports, SET publishing and frontend.
+- Stage 4C checkpoints B–D until their turn; reports, SET publishing and frontend.
 - Frontend and legacy compatibility or historical migration.
 - Changing the 21 canonical metric semantics, Stage 1–4A history invariants, or the 365-day
   default raw retention.
 
 ## Next
 
-Stage 4C — operational state, activity, cycles, defrost and durable events.
+Stage 4C checkpoint B — durable hourly activity segments.

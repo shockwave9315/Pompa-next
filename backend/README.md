@@ -14,6 +14,7 @@ Domain rules are in [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 | `pompa/ingest.py` | Connection epochs, LWT, retained vs live, `seen_live`, freshness, source selection. |
 | `pompa/minute.py` | `MinuteAccumulator` → `MinuteRow` (full-minute source life, time-weighted means). |
 | `pompa/aggregation.py` | `Stats` algebra, derived series, energy, paired COP, coverage. |
+| `pompa/activity.py` | Stage 4C activity domain: minute classification, hour segments, gaps, runs, defrosts, projections. Pure. |
 | `pompa/timegrid.py` | UTC/Europe/Warsaw alignment, buckets, `auto` length, prospective purge cutoff. |
 | `pompa/recorder.py` | Serialises events, closes minutes, write buffer, flush, rollup, purge, status facts. |
 | `pompa/storage.py` | `sample_1m`/`rollup_1h` DDL and parameterized PyMySQL queries, one transaction per session. |
