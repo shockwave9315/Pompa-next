@@ -4,6 +4,7 @@ Pure; no database. Expected values are hand-derived constants or equality with
 the existing canonical history algebra.
 """
 
+import dataclasses
 import math
 import random
 from datetime import date, datetime, timedelta, timezone
@@ -138,21 +139,177 @@ def test_operations_counter_and_mode_never_classify():
                 assert classify(values) == base
 
 
-# Golden meaning of rule version 1. Once 4C-B persists segments, a changed classification
-# silently rewrites stored history: bump ACTIVITY_RULE_VERSION and add a new table instead.
-GOLDEN_V1 = {c[0]: (c[2].value, c[3].value) for c in CLASSIFICATION}
+# ------------------------------------------------------------------ version-1 golden
+
+# Independent, literal meaning of ACTIVITY_RULE_VERSION = 1. Nothing below is derived from the
+# implementation or from the tests above. 4C-B persists segments under this version, so a
+# failure here means stored history would silently change meaning: restore the old behaviour,
+# or bump ACTIVITY_RULE_VERSION and add a new golden next to this one. Never edit it in place.
+N = None
+GOLDEN_V1_COLUMNS = ("compressor_freq", "defrosting_state", "heatpump_state", "three_way_valve",
+                     "co_power_consumption", "co_power_production",
+                     "dhw_power_consumption", "dhw_power_production")
+GOLDEN_V1_CLASSIFICATION = (
+    ((40.0, 1.0, 1.0, 1.0, N, N, N, N), ("defrost", "on")),
+    ((40.0, 0.25, 1.0, N, 0.0, 0.0, 1500.0, 4500.0), ("defrost", "on")),
+    ((N, 1.0, 1.0, 0.0, N, N, N, N), ("defrost", "unknown")),
+    ((0.0, 0.5, 1.0, 0.0, N, N, N, N), ("defrost", "off")),
+    ((40.0, N, 1.0, 0.0, 900.0, 3600.0, 0.0, 0.0), ("unknown", "on")),
+    ((0.0, N, 0.0, 0.0, N, N, N, N), ("unknown", "off")),
+    ((N, 0.0, 1.0, 0.0, 900.0, 3600.0, 0.0, 0.0), ("unknown", "unknown")),
+    ((N, 0.0, 0.0, 0.0, N, N, N, N), ("unknown", "unknown")),
+    ((0.0, 0.0, 0.0, 0.0, 900.0, 3600.0, 0.0, 0.0), ("off", "off")),
+    ((0.0, 0.0, 0.0, 1.0, N, N, N, N), ("off", "off")),
+    ((0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1500.0, 4500.0), ("idle", "off")),
+    ((0.0, 0.0, 0.5, 0.0, N, N, N, N), ("idle", "off")),
+    ((0.0, 0.0, N, 0.0, N, N, N, N), ("unknown", "off")),
+    ((40.0, 0.0, 1.0, 0.0, N, N, N, N), ("co", "on")),
+    ((40.0, 0.0, 0.0, 0.0, N, N, N, N), ("co", "on")),
+    ((0.000001, 0.0, 1.0, 0.0, N, N, N, N), ("co", "on")),
+    ((40.0, 0.0, 1.0, 1.0, 900.0, 3600.0, 0.0, 0.0), ("dhw", "on")),
+    ((40.0, 0.0, 1.0, 0.5, N, N, N, N), ("transition", "on")),
+    ((40.0, 0.0, 1.0, 0.999999, N, N, N, N), ("transition", "on")),
+    ((40.0, 0.0, 1.0, N, 900.0, 3600.0, 0.0, 0.0), ("co", "on")),
+    ((40.0, 0.0, 1.0, N, 100.01, N, 0.0, 0.0), ("co", "on")),
+    ((40.0, 0.0, 1.0, N, 0.0, 0.0, 1500.0, 4500.0), ("dhw", "on")),
+    ((40.0, 0.0, 1.0, N, 400.0, 1200.0, 600.0, 1800.0), ("transition", "on")),
+    ((40.0, 0.0, 1.0, N, 400.0, N, 600.0, N), ("transition", "on")),
+    ((40.0, 0.0, 1.0, N, 100.0, 18.0, 0.0, 100.0), ("unknown", "on")),
+    ((40.0, 0.0, 1.0, N, 900.0, 3600.0, N, 0.0), ("unknown", "on")),
+    ((40.0, 0.0, 1.0, N, 0.0, N, 1500.0, 4500.0), ("unknown", "on")),
+    ((40.0, 0.0, 1.0, N, N, N, N, N), ("unknown", "on")),
+)
+# Consecutive minutes from one hour's last 5 minutes; (minute, values, operations_counter), and
+# the minute-8 gap. Minutes may share a segment only with equal activity, compressor state and
+# exact defrost fraction, and never across a UTC hour or a missing minute.
+GOLDEN_V1_SEGMENT_INPUT = (
+    (0, (40.0, 0.0, 1.0, 0.0, 900.0, 3600.0, 0.0, 0.0), 10.0),
+    (1, (30.0, 0.0, 0.5, 0.0, 800.0, 3000.0, N, 0.0), 11.0),  # frequency/state/power/counter differ
+    (2, (40.0, 0.0, 1.0, 0.0, 700.0, 2800.0, 10.0, 0.0), 12.0),
+    (3, (40.0, 0.0, 1.0, 1.0, N, N, N, N), 12.0),
+    (4, (40.0, 0.0, 1.0, 1.0, N, N, N, N), 12.0),
+    (5, (40.0, 0.0, 1.0, 1.0, N, N, N, N), 12.0),  # next UTC hour
+    (6, (40.0, 0.5, 1.0, 0.0, N, N, N, N), 12.0),
+    (7, (40.0, 0.5, 1.0, 1.0, N, N, N, N), 12.0),  # equal fraction, different valve
+    (9, (40.0, 1.0, 1.0, 0.0, N, N, N, N), 12.0),
+    (10, (40.0, 0.583333, 1.0, 0.0, N, N, N, N), 12.0),  # only the fraction differs
+    (11, (0.0, 0.583333, 1.0, 0.0, N, N, N, N), 12.0),  # only the compressor differs
+    (12, (0.0, 0.0, 1.0, 0.0, N, N, N, N), 12.0),
+    (13, (0.0, 0.0, 0.25, 1.0, N, N, N, N), 12.0),
+    (14, (0.0, 0.0, 0.0, 1.0, N, N, N, N), 12.0),
+    (15, (N, 0.0, 1.0, 0.0, N, N, N, N), 12.0),
+    (16, (40.0, N, 1.0, 0.0, N, N, N, N), 12.0),
+    (17, (40.0, 0.0, 1.0, N, N, N, N, N), 12.0),  # unknown/on again; only the fraction differs
+)
+GOLDEN_V1 = {
+    "activity_rule_version": 1,
+    "power_active_threshold_w": 100.0,
+    "activity_values": frozenset({"off", "idle", "co", "dhw", "transition", "defrost", "unknown"}),
+    "compressor_values": frozenset({"off", "on", "unknown"}),
+    "activity_columns": frozenset(GOLDEN_V1_COLUMNS),
+    "energy_series": ("co_power_consumption", "co_power_production", "dhw_power_consumption",
+                      "dhw_power_production", "pair_co_in", "pair_co_out", "pair_dhw_in",
+                      "pair_dhw_out", "pair_total_in", "pair_total_out"),
+    "segment_fields": ("start", "minutes", "activity", "compressor", "defrost_fraction", "energy"),
+    "classification": tuple(expected for _, expected in GOLDEN_V1_CLASSIFICATION),
+    # (first minute, minutes, activity, compressor, defrost_fraction)
+    "segments": (
+        (0, 3, "co", "on", 0.0),
+        (3, 2, "dhw", "on", 0.0),
+        (5, 1, "dhw", "on", 0.0),
+        (6, 2, "defrost", "on", 0.5),
+        (9, 1, "defrost", "on", 1.0),
+        (10, 1, "defrost", "on", 0.583333),
+        (11, 1, "defrost", "off", 0.583333),
+        (12, 2, "idle", "off", 0.0),
+        (14, 1, "off", "off", 0.0),
+        (15, 1, "unknown", "unknown", 0.0),
+        (16, 1, "unknown", "on", N),
+        (17, 1, "unknown", "on", 0.0),
+    ),
+    # Energy ingredients of the first segment: series -> (n, sum, min, max, last).
+    "first_segment_energy": {
+        "co_power_consumption": (3, 2400.0, 700.0, 900.0, 700.0),
+        "co_power_production": (3, 9400.0, 2800.0, 3600.0, 2800.0),
+        "dhw_power_consumption": (2, 10.0, 0.0, 10.0, 10.0),
+        "dhw_power_production": (3, 0.0, 0.0, 0.0, 0.0),
+        "pair_co_in": (3, 2400.0, 700.0, 900.0, 700.0),
+        "pair_co_out": (3, 9400.0, 2800.0, 3600.0, 2800.0),
+        "pair_dhw_in": (2, 10.0, 0.0, 10.0, 10.0),
+        "pair_dhw_out": (2, 0.0, 0.0, 0.0, 0.0),
+        "pair_total_in": (2, 1610.0, 710.0, 900.0, 710.0),
+        "pair_total_out": (2, 6400.0, 2800.0, 3600.0, 2800.0),
+    },
+}
 
 
-def test_rule_version_is_pinned_to_its_golden_meaning():
-    assert ACTIVITY_RULE_VERSION == 1
-    assert act.POWER_ACTIVE_THRESHOLD_W == 100.0
-    assert [a.value for a in Activity] == ["off", "idle", "co", "dhw", "transition", "defrost",
-                                           "unknown"]
-    assert [c.value for c in Compressor] == ["off", "on", "unknown"]
-    assert [b.value for b in Boundary] == ["observed", "unknown", "gap", "open", "outside_evidence"]
-    observed = {name: tuple(v.value for v in classify(row(T0, **values).values))
-                for name, values, *_ in CLASSIFICATION}
-    assert observed == GOLDEN_V1
+def _golden_values(literal, counter=None):
+    return row(T0, **dict(zip(GOLDEN_V1_COLUMNS, literal)), operations_counter=counter).values
+
+
+def _implemented_v1_meaning():
+    start = T0 + HOUR - 5 * M
+    rows = [(start + minute * M, _golden_values(literal, counter))
+            for minute, literal, counter in GOLDEN_V1_SEGMENT_INPUT]
+    segments = act.build_segments(rows)
+    return {
+        "activity_rule_version": ACTIVITY_RULE_VERSION,
+        "power_active_threshold_w": act.POWER_ACTIVE_THRESHOLD_W,
+        "activity_values": frozenset(a.value for a in Activity),
+        "compressor_values": frozenset(c.value for c in Compressor),
+        "activity_columns": frozenset(act.ACTIVITY_COLUMNS),
+        "energy_series": act.ENERGY_SERIES,
+        "segment_fields": tuple(f.name for f in dataclasses.fields(act.ActivitySegment)),
+        "classification": tuple(tuple(v.value for v in act.classify(_golden_values(literal)))
+                                for literal, _ in GOLDEN_V1_CLASSIFICATION),
+        "segments": tuple(((s.start - start) // M, s.minutes, s.activity.value, s.compressor.value,
+                           s.defrost_fraction) for s in segments),
+        "first_segment_energy": {k: (v.n, v.sum, v.min, v.max, v.last)
+                                 for k, v in segments[0].energy.items()},
+    }
+
+
+def test_version_1_golden_is_pinned():
+    observed = _implemented_v1_meaning()
+    assert observed.keys() == GOLDEN_V1.keys()
+    for key, expected in GOLDEN_V1.items():
+        assert observed[key] == expected, (
+            f"{key!r} changed while ACTIVITY_RULE_VERSION == 1: persisted segments would change "
+            "meaning; bump the version and add a new golden instead")
+
+
+@pytest.mark.parametrize("mutation", ["classification", "energy_series", "segment_key",
+                                      "hour_split", "threshold"])
+def test_version_1_golden_detects_semantic_drift(monkeypatch, mutation):
+    """The golden is not tautological: each kind of unversioned change it guards fails it."""
+    if mutation == "classification":  # e.g. fractional heat-pump state with a stopped compressor
+        original = act.classify
+        monkeypatch.setattr(act, "classify", lambda v: (Activity.OFF, Compressor.OFF)
+                            if v["heatpump_state"] == 0.5 and v["compressor_freq"] == 0
+                            else original(v))
+    elif mutation == "energy_series":
+        monkeypatch.setattr(act, "ENERGY_SERIES", act.ENERGY_SERIES[:-2])
+    elif mutation == "segment_key":  # grouping that ignores the exact defrost fraction
+        original = act.build_segments
+
+        def merged(rows):
+            out = []
+            for seg in original(rows):
+                last = out[-1] if out else None
+                if last and last.end == seg.start and last.start // HOUR == seg.start // HOUR \
+                        and (last.activity, last.compressor) == (seg.activity, seg.compressor):
+                    out[-1] = dataclasses.replace(last, minutes=last.minutes + seg.minutes)
+                else:
+                    out.append(seg)
+            return out
+
+        monkeypatch.setattr(act, "build_segments", merged)
+    elif mutation == "hour_split":
+        monkeypatch.setattr(act, "floor_hour", lambda t: 0)
+    else:
+        monkeypatch.setattr(act, "POWER_ACTIVE_THRESHOLD_W", 50.0)
+    observed = _implemented_v1_meaning()
+    assert [k for k, v in GOLDEN_V1.items() if observed[k] != v]
 
 
 # ------------------------------------------------------------------ segments
@@ -213,14 +370,68 @@ def test_no_smoothing_or_bridging(middle, length):
         assert [r.minutes for r in runs] == [10, 10]
 
 
+DEFROST_UNKNOWN = {**CO, "defrosting_state": None}
+
+
 def test_separate_defrosts_stay_separate():
-    tl = tl_of(rows_of(T0, CO, DEFROST, DEFROST, CO, DEFROST, GAP, DEFROST, UNKNOWN, DEFROST), T0, T0 + 9 * M)
+    shapes = [CO, DEFROST, DEFROST, CO, DEFROST, GAP, DEFROST, DEFROST_UNKNOWN, DEFROST, UNKNOWN, DEFROST]
+    tl = tl_of(rows_of(T0, *shapes), T0, T0 + len(shapes) * M)
     assert [((d.start - T0) // M, d.minutes, d.start_boundary, d.end_boundary) for d in defrosts(tl)] == [
         (1, 2, Boundary.OBSERVED, Boundary.OBSERVED),
         (4, 1, Boundary.OBSERVED, Boundary.GAP),
         (6, 1, Boundary.GAP, Boundary.UNKNOWN),
-        (8, 1, Boundary.UNKNOWN, Boundary.OUTSIDE_EVIDENCE),
+        (8, 1, Boundary.UNKNOWN, Boundary.OBSERVED),  # unknown compressor, known defrost 0
+        (10, 1, Boundary.OBSERVED, Boundary.OUTSIDE_EVIDENCE),
     ]
+
+
+# Neighbours whose overall activity is unknown although the defrost signal is a known 0.
+DEFROST_ZERO_UNKNOWN_ACTIVITY = {
+    "unknown compressor": {**CO, "compressor_freq": None},
+    "unknown valve, no power": {**CO, "three_way_valve": None},
+    "unknown valve, one power side unknown": {**CO, **POWER, "three_way_valve": None,
+                                              "dhw_power_production": None},
+    "stopped compressor, unknown heat pump state": {**IDLE, "heatpump_state": None},
+}
+
+
+@pytest.mark.parametrize("neighbour", DEFROST_ZERO_UNKNOWN_ACTIVITY.values(),
+                         ids=DEFROST_ZERO_UNKNOWN_ACTIVITY.keys())
+def test_defrost_edges_are_proven_by_the_defrost_signal(neighbour):
+    assert classify(row(T0, **neighbour).values)[0] is Activity.UNKNOWN
+    tl = tl_of(rows_of(T0, neighbour, DEFROST, DEFROST, neighbour), T0, T0 + 4 * M)
+    [d] = defrosts(tl)
+    assert (d.start_boundary, d.end_boundary, d.start_observed, d.end_observed) == (
+        Boundary.OBSERVED, Boundary.OBSERVED, True, True)
+    # The activity timeline still reports the change to an unknown activity truthfully.
+    [event] = [e for e in activity_events(tl) if e.state is Activity.DEFROST]
+    assert (event.start_boundary, event.end_boundary) == (Boundary.UNKNOWN, Boundary.UNKNOWN)
+    # Compressor-run edges are untouched: an unknown compressor remains unknown.
+    [run] = compressor_runs(tl)
+    expected = Boundary.UNKNOWN if neighbour["compressor_freq"] is None else (
+        Boundary.OBSERVED if neighbour["compressor_freq"] == 0 else Boundary.OUTSIDE_EVIDENCE)
+    assert run.start_boundary is expected
+
+
+@pytest.mark.parametrize("side", ["before", "after"])
+@pytest.mark.parametrize("neighbour, boundary", [
+    (DEFROST_UNKNOWN, Boundary.UNKNOWN), ({**UNKNOWN, "defrosting_state": None}, Boundary.UNKNOWN),
+    (GAP, Boundary.GAP), (CO, Boundary.OBSERVED), (OFF, Boundary.OBSERVED),
+])
+def test_defrost_edge_evidence_on_each_side(side, neighbour, boundary):
+    shapes = [neighbour, DEFROST, CO] if side == "before" else [CO, DEFROST, neighbour]
+    tl = tl_of(rows_of(T0, *shapes), T0, T0 + 3 * M)
+    [d] = defrosts(tl)
+    assert (d.start_boundary if side == "before" else d.end_boundary) is boundary
+    assert (d.end_boundary if side == "before" else d.start_boundary) is Boundary.OBSERVED
+
+
+def test_defrost_right_edge_open_and_outside_evidence():
+    open_tl = tl_of(rows_of(T0, CO, DEFROST), T0, T0 + HOUR, closed_until=T0 + 2 * M)
+    assert defrosts(open_tl)[0].end_boundary is Boundary.OPEN
+    window_tl = tl_of(rows_of(T0, DEFROST, DEFROST), T0, T0 + 2 * M)
+    assert (defrosts(window_tl)[0].start_boundary, defrosts(window_tl)[0].end_boundary) == (
+        Boundary.OUTSIDE_EVIDENCE, Boundary.OUTSIDE_EVIDENCE)
 
 
 # ------------------------------------------------------------------ runs, starts, ends
@@ -264,7 +475,7 @@ def test_evidence_window_edges_are_not_starts_or_stops():
     [run] = compressor_runs(tl)
     assert (run.start_boundary, run.end_boundary) == (Boundary.OUTSIDE_EVIDENCE, Boundary.OUTSIDE_EVIDENCE)
     s = summarize(tl, T0, T0 + 3 * M)
-    assert (s.observed_starts, s.observed_stops, s.compressor_runs, s.complete_run_minutes) == (0, 0, 1, ())
+    assert (s.observed_starts, s.observed_stops, s.compressor_runs_overlapping, s.complete_run_minutes) == (0, 0, 1, ())
 
 
 def test_run_spans_activity_and_defrost_but_events_do_not():
@@ -391,9 +602,13 @@ def test_midnight_continuous_run():
     [p1], [p2] = project([run], *DAY1), project([run], *DAY2)
     assert (p1.minutes, p1.starts_before_range, p1.ends_after_range) == (2, False, True)
     assert (p2.minutes, p2.starts_before_range, p2.ends_after_range) == (6, True, False)
-    assert (d1.observed_starts, d1.observed_stops, d1.compressor_runs, d1.complete_run_minutes) == (1, 0, 1, (8,))
-    assert (d2.observed_starts, d2.observed_stops, d2.compressor_runs, d2.complete_run_minutes) == (0, 1, 1, ())
+    assert (d1.observed_starts, d1.observed_stops, d1.compressor_runs_overlapping, d1.complete_run_minutes) == (1, 0, 1, (8,))
+    assert (d2.observed_starts, d2.observed_stops, d2.compressor_runs_overlapping, d2.complete_run_minutes) == (0, 1, 1, ())
     assert (d1.compressor_minutes["on"], d2.compressor_minutes["on"]) == (2, 6)
+    both = summarize(tl, DAY1[0], DAY2[1])  # overlap counts are not additive across ranges
+    assert (both.compressor_runs_overlapping, both.observed_starts, both.observed_stops) == (1, 1, 1)
+    assert both.observed_starts == d1.observed_starts + d2.observed_starts
+    assert both.observed_stops == d1.observed_stops + d2.observed_stops
 
 
 def test_midnight_actual_stop_claims_no_continuation():
@@ -436,8 +651,11 @@ def test_midnight_defrost_crossing_midnight():
     [p1], [p2] = project([d], *DAY1), project([d], *DAY2)
     assert (p1.observed_defrost_seconds, p1.ends_after_range) == (30.0, True)
     assert (p2.observed_defrost_seconds, p2.starts_before_range) == (195.0, True)
-    assert (d1.defrosts, d1.observed_defrost_seconds, d2.defrosts, d2.observed_defrost_seconds) == (
-        1, 30.0, 1, 195.0)
+    assert (d1.defrosts_overlapping, d1.observed_defrost_seconds,
+            d2.defrosts_overlapping, d2.observed_defrost_seconds) == (1, 30.0, 1, 195.0)
+    both = summarize(tl, DAY1[0], DAY2[1])
+    assert (both.defrosts_overlapping, both.observed_defrost_seconds) == (1, 225.0)
+    assert both.compressor_runs_overlapping == 1
 
 
 def test_next_day_window_does_not_search_backwards():
@@ -688,7 +906,7 @@ def test_spans_and_summary_match_a_minute_by_minute_reference():
                 if comp.get(t) is ON and (comp.get(t - M) is not ON or t == start)]
         run_ends = {t: next(u for u in range(t, window_end + M, M) if comp.get(u) is not ON or u == window_end)
                     for t in runs}
-        assert s.compressor_runs == sum(1 for t in runs if max(t, a) < min(run_ends[t], b))
+        assert s.compressor_runs_overlapping == sum(1 for t in runs if max(t, a) < min(run_ends[t], b))
         complete = tuple((run_ends[t] - t) // M for t in runs
                          if a <= t < b and comp.get(t - M) is OFF_ and comp.get(run_ends[t]) is OFF_)
         assert s.complete_run_minutes == complete
@@ -699,3 +917,76 @@ def test_spans_and_summary_match_a_minute_by_minute_reference():
         exact = tuple((off_ends[t] - t) // M for t in offs
                       if a <= t < b and comp.get(t - M) is ON and comp.get(off_ends[t]) is ON)
         assert s.exact_off_interval_minutes == exact
+
+
+# ------------------------------------------------------------------ evidence-window dependence
+
+def test_summary_names_its_evidence_window():
+    tl = tl_of(rows_of(T0, OFF, CO, OFF), T0, T0 + 3 * M, closed_until=T0 + HOUR)
+    s = summarize(tl, T0 + M, T0 + 2 * M)
+    assert (s.start, s.end, s.evidence_start, s.evidence_end, s.closed_until) == (
+        T0 + M, T0 + 2 * M, T0, T0 + 3 * M, T0 + HOUR)
+    assert s.segment_rule_version == ACTIVITY_RULE_VERSION == 1
+
+
+def test_adjacent_minutes_fix_observed_starts_and_stops_but_not_complete_runs():
+    a, b = T0 + 10 * M, T0 + 20 * M
+    shapes = [OFF] * 10 + [CO] * 3 + [OFF] * 3 + [CO] * 4 + [CO] * 10 + [OFF] * 3  # run 16..29
+    rows = rows_of(T0, *shapes)
+    exact = summarize(tl_of(rows, a, b), a, b)
+    adjacent = summarize(tl_of(rows, a - M, b + M), a, b)
+    wide = summarize(tl_of(rows, T0, T0 + len(shapes) * M), a, b)
+    # Only the range itself: an edge proves nothing, the start at `a` is not observed.
+    assert (exact.observed_starts, exact.observed_stops) == (1, 1)
+    assert (adjacent.observed_starts, adjacent.observed_stops) == (2, 1)
+    assert (wide.observed_starts, wide.observed_stops) == (2, 1)
+    # The run starting at 16 continues past `b`; only wider evidence proves its duration.
+    assert (exact.complete_run_minutes, adjacent.complete_run_minutes, wide.complete_run_minutes) == (
+        (), (3,), (3, 14))
+    for s in (exact, adjacent, wide):
+        assert (s.activity_minutes, s.compressor_minutes, s.gap_minutes) == (
+            wide.activity_minutes, wide.compressor_minutes, wide.gap_minutes)
+
+
+def test_observed_starts_and_stops_are_invariant_beyond_adjacent_evidence():
+    rng = random.Random(44)
+    shapes = [CO, DHW, IDLE, OFF, UNKNOWN, DEFROST, {**DEFROST, "compressor_freq": 0.0}, GAP]
+    for _ in range(300):
+        count = rng.randrange(3, 120)
+        rows = rows_of(T0, *[rng.choice(shapes) for _ in range(count)])
+        whole_end = T0 + count * M
+        closed_until = T0 + rng.randrange(0, count + 3) * M
+        rows = [r for r in rows if r[0] < closed_until]
+        a = T0 + rng.randrange(1, count - 1) * M
+        b = a + rng.randrange(0, (whole_end - M - a) // M + 1) * M
+        # Every evidence window containing [a - 1m, b + 1m): adjacent, random, widest.
+        lows = {a - M, T0, T0 + rng.randrange(0, (a - T0) // M) * M}
+        highs = {b + M, whole_end, T0 + rng.randrange((b + M - T0) // M, count + 1) * M}
+        results = [summarize(tl_of(rows, lo, hi, closed_until), a, b) for lo in lows for hi in highs]
+        exact = summarize(tl_of(rows, a, b, closed_until), a, b)
+        first = results[0]
+        for s in results:
+            assert (s.observed_starts, s.observed_stops) == (first.observed_starts, first.observed_stops)
+            assert (s.activity_minutes, s.compressor_minutes, s.gap_minutes, s.closed_minutes) == (
+                exact.activity_minutes, exact.compressor_minutes, exact.gap_minutes, exact.closed_minutes)
+            assert s.observed_defrost_seconds == pytest.approx(exact.observed_defrost_seconds, abs=1e-9)
+
+
+# ------------------------------------------------------------------ fractional TOP0 through ingest
+
+def test_fractional_heatpump_state_from_real_ingest_is_idle():
+    """A valid TOP0 switch inside a minute stays fully known and, compressor off, is idle."""
+    def snapshot(t):
+        return {**IDLE_SNAPSHOT, "main/Heatpump_State": "1" if t < T0 + 90 else "0"}
+
+    rows = Driver(snapshot, end=T0 + 3 * M).pairs()
+    assert [(v["heatpump_state"], v["compressor_freq"], v["defrosting_state"]) for _, v in rows] == [
+        (1.0, 0.0, 0.0), (0.5, 0.0, 0.0), (0.0, 0.0, 0.0)]
+    assert [classify(v) for _, v in rows] == [
+        (Activity.IDLE, Compressor.OFF), (Activity.IDLE, Compressor.OFF), (Activity.OFF, Compressor.OFF)]
+    tl = timeline(build_segments(rows), T0, T0 + 3 * M, T0 + 3 * M)
+    assert [((s.start - T0) // M, s.minutes, s.activity) for s in tl.segments] == [
+        (0, 2, Activity.IDLE), (2, 1, Activity.OFF)]
+    # Minute classifications, not per-state seconds: 90 s of idle are reported as two idle minutes.
+    s = summarize(tl, T0, T0 + 3 * M)
+    assert (s.activity_minutes["idle"], s.activity_minutes["off"]) == (2, 1)

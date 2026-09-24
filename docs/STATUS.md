@@ -188,6 +188,17 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
   per-minute classification, hour-local `ActivitySegment`s, explicit `Gap`s, activity events,
   observed compressor runs, off intervals, individual defrosts, evidence-based range projection
   and a factual summary, under `ACTIVITY_RULE_VERSION = 1`.
+- Review hardening kept the owner-approved classifier:
+  - defrost `NULL`, heat-pump state `NULL` with the compressor off, and an unresolved power side
+    all stay `unknown`
+  - a fractional heat-pump state with the compressor off is `idle`
+- Hardening changes:
+  - an independent literal version-1 golden, with a drift self-test
+  - defrost edges proven by the defrost signal itself
+  - explicit non-additive `*_overlapping` counts
+  - `segment_rule_version` naming
+  - explicit evidence-window fields and contract
+  - a real-ingest fractional TOP0 test
 - `backend/tests/test_activity.py` covers the classification matrix and golden version-1
   meaning, no smoothing around former legacy thresholds, start/end evidence against
   off/unknown/gap/window/open neighbours, cross-hour runs built from separately built hours,

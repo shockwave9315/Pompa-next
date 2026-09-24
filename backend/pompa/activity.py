@@ -25,8 +25,9 @@ from .aggregation import PAIRS, POWER_CHANNELS, Stats, combine_maps, fold_minute
 from .minute import MINUTE
 from .timegrid import floor_hour
 
-# The interpretation below is historical meaning once 4C-B persists it. Any change to what a
-# minute classifies as, or to what a segment carries, needs a new version, never an edit.
+# Version of the persisted minute/segment interpretation: classification, the enum strings,
+# segment grouping and ENERGY_SERIES. Once 4C-B persists segments, any change to them needs a
+# new version, never an edit. Read-time projections and summaries are not versioned by it.
 ACTIVITY_RULE_VERSION = 1
 
 # Legacy-proven power evidence threshold, used only when the valve position is unknown.
@@ -85,6 +86,10 @@ def classify(values: Mapping[str, float | None]) -> tuple[Activity, Compressor]:
     unknown defrost → unknown; defrost > 0 → defrost; unknown compressor →
     unknown; stopped compressor → off/idle from ``heatpump_state``; running
     compressor → valve position, else >100 W CO/DHW power evidence.
+
+    The result is one class per minute, not per-state seconds. A fractional
+    ``heatpump_state`` is fully known and changed within the minute; with the
+    compressor off it is ``idle``.
     """
     missing = [k for k in ACTIVITY_COLUMNS if k not in values]
     if missing:  # an unread column is not an unknown metric
@@ -229,6 +234,11 @@ class Gap:
 class Timeline:
     """Contiguous evidence over ``[start, min(end, closed_until))``.
 
+    ``start``/``end`` describe the evidence actually examined. A span edge at
+    either limit (other than an unclosed right edge, ``open``) is
+    ``outside_evidence``: it proves no start, stop or continuation, so wider
+    evidence can prove more boundary facts.
+
     Minutes at or after ``closed_until`` have not closed yet; they are neither
     gaps nor unknown and hold no items.
     """
@@ -323,16 +333,24 @@ ObservedCompressorRun = ObservedSpan
 CompressorOffInterval = ObservedSpan
 
 
-def _boundary(tl: Timeline, neighbour: ActivitySegment | Gap | None, state_of, edge: int,
+def _boundary(tl: Timeline, neighbour: ActivitySegment | Gap | None, unknown, edge: int,
               after: bool) -> Boundary:
     if neighbour is None:
         return Boundary.OPEN if after and edge >= tl.closed_until else Boundary.OUTSIDE_EVIDENCE
     if isinstance(neighbour, Gap):
         return Boundary.GAP
-    return Boundary.UNKNOWN if state_of(neighbour).value == "unknown" else Boundary.OBSERVED
+    return Boundary.UNKNOWN if unknown(neighbour) else Boundary.OBSERVED
 
 
-def _spans(tl: Timeline, state_of, wanted) -> list[ObservedSpan]:
+def _spans(tl: Timeline, state_of, wanted, unknown=None) -> list[ObservedSpan]:
+    """``unknown(neighbour)``: the adjacent segment cannot prove the span's edge.
+
+    By default that is an unknown value of the span's own state.
+    """
+    if unknown is None:
+        def unknown(segment):
+            return state_of(segment).value == "unknown"
+
     items, out, i = tl.items, [], 0
     while i < len(items):
         item = items[i]
@@ -347,8 +365,8 @@ def _spans(tl: Timeline, state_of, wanted) -> list[ObservedSpan]:
         before = items[i - 1] if i else None
         after = items[j + 1] if j + 1 < len(items) else None
         out.append(ObservedSpan(state, segments[0].start, segments[-1].end,
-                                _boundary(tl, before, state_of, segments[0].start, False),
-                                _boundary(tl, after, state_of, segments[-1].end, True),
+                                _boundary(tl, before, unknown, segments[0].start, False),
+                                _boundary(tl, after, unknown, segments[-1].end, True),
                                 tuple(segments)))
         i = j + 1
     return out
@@ -360,8 +378,16 @@ def activity_events(tl: Timeline) -> list[ActivityEvent]:
 
 
 def defrosts(tl: Timeline) -> list[ActivityEvent]:
-    """Individual defrosts: contiguous defrost activity; separate defrosts stay separate."""
-    return _spans(tl, lambda s: s.activity, frozenset({Activity.DEFROST}))
+    """Individual defrosts: contiguous defrost activity; separate defrosts stay separate.
+
+    Edges are judged by the defrost signal itself: an adjacent known
+    ``defrosting_state == 0`` proves the edge even when that minute's overall
+    activity is unknown (e.g. unknown compressor or valve); only an adjacent
+    ``defrosting_state NULL`` is unknown. ``activity_events`` instead reports
+    the activity change, so its defrost events keep activity-based edges.
+    """
+    return _spans(tl, lambda s: s.activity, frozenset({Activity.DEFROST}),
+                  unknown=lambda s: s.defrost_fraction is None)
 
 
 def compressor_runs(tl: Timeline) -> list[ObservedCompressorRun]:
@@ -428,16 +454,33 @@ def project(spans: Iterable[ObservedSpan], start: int, end: int) -> list[Project
 class ActivitySummary:
     """Counts and durations over ``[start, end)``; facts only, no verdicts or thresholds.
 
+    Minute counts are per-minute classifications, not exact per-state seconds;
+    only defrost keeps an exact time-integrated duration. Compressor minutes are
+    observed minute-resolution evidence, not exact physical runtime.
+
     A zero-valued minute proves the compressor off for that whole minute, so an
     observed start happened within the run's first minute and an observed stop
     within its last one; each is counted in the range holding that minute.
     Complete runs and exact off intervals are attributed to the range holding
-    their first minute.
+    their first minute. ``*_overlapping`` counts every span intersecting the
+    range: a span crossing a range edge counts in both adjacent ranges, so these
+    counts are not additive across ranges; observed starts/stops are.
+
+    Boundary-sensitive facts depend on the examined evidence window
+    ``[evidence_start, evidence_end)``, not only on ``[start, end)``. Observed
+    starts and stops are fixed once it contains the minute before ``start``
+    and the minute at ``end``; complete runs and exact off intervals may need
+    evidence arbitrarily far beyond the range, because a span can continue.
+    ``segment_rule_version`` names the minute/segment interpretation the
+    summary was read from; the summary itself is not versioned.
     """
 
-    rule_version: int
+    segment_rule_version: int
     start: int
     end: int
+    evidence_start: int
+    evidence_end: int
+    closed_until: int
     closed_minutes: int
     recorded_minutes: int
     gap_minutes: int
@@ -445,10 +488,10 @@ class ActivitySummary:
     compressor_minutes: Mapping[str, int]
     observed_starts: int
     observed_stops: int
-    compressor_runs: int
+    compressor_runs_overlapping: int
     complete_run_minutes: tuple[int, ...]
     exact_off_interval_minutes: tuple[int, ...]
-    defrosts: int
+    defrosts_overlapping: int
     observed_defrost_seconds: float
 
 
@@ -475,9 +518,12 @@ def summarize(tl: Timeline, start: int, end: int) -> ActivitySummary:
 
     defrost_pieces = project(defrosts(tl), start, end)
     return ActivitySummary(
-        rule_version=ACTIVITY_RULE_VERSION,
+        segment_rule_version=ACTIVITY_RULE_VERSION,
         start=start,
         end=end,
+        evidence_start=tl.start,
+        evidence_end=tl.end,
+        closed_until=tl.closed_until,
         closed_minutes=closed,
         recorded_minutes=closed - gaps,
         gap_minutes=gaps,
@@ -485,11 +531,11 @@ def summarize(tl: Timeline, start: int, end: int) -> ActivitySummary:
         compressor_minutes=compressor,
         observed_starts=sum(1 for r in runs if r.start_observed and within(r.start)),
         observed_stops=sum(1 for r in runs if r.end_observed and within(r.end - MINUTE)),
-        compressor_runs=len(project(runs, start, end)),
+        compressor_runs_overlapping=len(project(runs, start, end)),
         complete_run_minutes=tuple(r.minutes for r in runs
                                    if r.start_observed and r.end_observed and within(r.start)),
         exact_off_interval_minutes=tuple(i.minutes for i in compressor_off_intervals(tl)
                                          if i.start_observed and i.end_observed and within(i.start)),
-        defrosts=len(defrost_pieces),
+        defrosts_overlapping=len(defrost_pieces),
         observed_defrost_seconds=sum(p.observed_defrost_seconds for p in defrost_pieces),
     )

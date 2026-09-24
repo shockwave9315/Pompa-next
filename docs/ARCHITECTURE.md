@@ -1114,9 +1114,22 @@ proof and the API resources are frozen in checkpoints B and C, not here.
 
 `pompa/activity.py` is pure and storage-free. It reads only canonical `MinuteRow` values
 (`ACTIVITY_COLUMNS`); a column that was not read is an error, never an unknown metric. The
-interpretation is versioned: `ACTIVITY_RULE_VERSION = 1`. Changing any classification or segment
-content needs a new version, because 4C-B stores it as historical meaning; a golden test pins
-version 1.
+minute/segment interpretation is versioned: `ACTIVITY_RULE_VERSION = 1`. 4C-B stores it as historical
+meaning, so its scope is exactly what a stored segment means:
+
+- minute classification
+- the persisted `Activity`/`Compressor` strings
+- the activity columns and the >100 W threshold
+- segment grouping (activity, compressor state and exact defrost fraction; a UTC hour or missing
+  minute always splits)
+- the segment fields
+- `ENERGY_SERIES` with its order and ingredient content
+
+Changing any of them needs a new version and a new golden, never an edit. The version-1 golden
+(`tests/test_activity.py`) is a literal fingerprint independent of the implementation's tables,
+and a self-test proves it fails on each kind of drift. Read-time projections, boundaries and
+summaries are not versioned by it: a summary names the interpretation it read as
+`segment_rule_version`.
 
 **Classification of one recorded minute.** Compressor state comes from `compressor_freq` alone:
 `NULL` → unknown, exactly `0` → off, `> 0` → on. It is not `NULL`-as-off. Activity precedence:
@@ -1174,6 +1187,18 @@ unknown → on are not starts, and nothing searches backwards across a gap. A sh
 minute means cannot produce a zero minute and is not claimed. An off interval is exact only when
 both of its edges are observed runs.
 
+Defrost spans (`defrosts`) judge their edges by the defrost signal itself. An adjacent known
+`defrosting_state == 0` is `observed`, even when that minute's overall activity is `unknown` (for
+example an unknown compressor or valve). Only an adjacent `defrosting_state` `NULL` is `unknown`.
+Gap, open and outside-evidence edges are unchanged. `activity_events` reports activity changes,
+so its defrost events keep activity-based edges, and compressor-run edges stay compressor-based.
+
+**Resolution limits.** Activity minutes are per-minute classifications, not exact per-state
+seconds. A fractional `heatpump_state` is a fully known state that changed within the minute; with
+the compressor off such a minute is `idle`. Only defrost keeps an exact time-integrated fraction
+and duration. Compressor run duration and compressor minutes are observed minute-resolution
+evidence, not exact physical runtime.
+
 **Defrost duration.** `observed_defrost_seconds = Σ defrosting_state × 60` over valid defrost
 minutes. It is exact relative to Next's time-integrated observations, not a physical transition
 second. Example: `0.583333, 1, 1, 0.166667` → 165 s. Separate defrosts stay separate.
@@ -1184,8 +1209,20 @@ helpers, so 23 h and 25 h days need no special case. A projected span has
 outside the range. A query edge alone is never evidence, and a span ending exactly at midnight does
 not continue. A summary counts a start in the range holding the run's first minute and a stop in
 the range holding its last minute, because a zero minute proves the compressor off for that whole
-minute. Complete runs and exact off intervals are attributed by their first minute. Summaries
-report minutes, counts and durations only, with no verdicts.
+minute. Starts and stops are therefore additive across adjacent ranges. Complete runs and exact
+off intervals are attributed by their first minute. `compressor_runs_overlapping` and
+`defrosts_overlapping` count every span intersecting the range. A span crossing midnight counts
+once in each day and once in the combined two-day range, so overlap counts are **not** additive
+across adjacent ranges. Summaries report minutes, counts and durations only, with no verdicts.
+
+**Evidence window.** `Timeline.start`/`end` are the evidence actually examined, and a summary
+carries them as `evidence_start`/`evidence_end` with `closed_until`. A span edge at the window
+limit is `outside_evidence`. The same `[start, end)` can therefore prove different
+boundary-sensitive facts from a narrower or wider window. Observed starts and stops are fixed once
+the window contains the minute before `start` and the minute at `end` (`[start − 1 min, end +
+1 min)`). Complete-run durations and exact off intervals may need evidence arbitrarily far beyond
+the range, because a span can continue. Minute counts, gaps and defrost seconds depend only on
+`[start, end)`. How much evidence an API loads is a checkpoint C policy decision.
 
 ### 25.4 Stage 4D — report projections
 
