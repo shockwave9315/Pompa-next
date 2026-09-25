@@ -20,16 +20,12 @@ from .activity import (ACTIVITY_RULE_VERSION, Activity, ActivitySegment, Boundar
                        compressor_runs, defrosts)
 from .aggregation import PAIRS, POWER_CHANNELS, RECORDED, Stats, combine_maps, cop, coverage_percent, energy_kwh
 from .minute import MINUTE, iso_utc
-from .timegrid import HOUR, LOCAL_TZ_NAME, Unrepresentable, bucket_edges, local_midnight
+from .timegrid import HOUR, LOCAL_TZ_NAME, bucket_edges, local_midnight
 
 HEATING_ACTIVITIES = (Activity.CO, Activity.DHW, Activity.TRANSITION)
 _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
 _CONSUMPTION = ("co_power_consumption", "dhw_power_consumption")
 _PRODUCTION = ("co_power_production", "dhw_power_production")
-_FIRST_DATE = Date(1970, 1, 1)
-_LAST_DATE = Date(2100, 12, 31)
-_LAST_EXCLUSIVE_DATE = Date(2101, 1, 1)
-_EVIDENCE_FLOOR = local_midnight(_FIRST_DATE)
 
 
 class ReportInvariantError(ValueError):
@@ -40,8 +36,8 @@ class ReportActivityUnavailable(ValueError):
     """Recorded history in the requested range lacks Stage 4C activity evidence."""
 
 
-class ReportUnrepresentable(Unrepresentable):
-    """A well-formed report date resolves outside the supported calendar model."""
+class ReportUnrepresentable(ValueError):
+    """A valid calendar period cannot be represented by the Warsaw hour grid."""
 
 
 def _date(value: str) -> Date:
@@ -51,12 +47,6 @@ def _date(value: str) -> Date:
         return Date.fromisoformat(value)
     except ValueError:
         raise ValueError("invalid report calendar date") from None
-
-
-def _require_supported_date(day: Date) -> Date:
-    if not _FIRST_DATE <= day <= _LAST_DATE:
-        raise ReportUnrepresentable("report dates must be within 1970-01-01..2100-12-31")
-    return day
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,32 +69,35 @@ def resolve_period(kind: str, *, date: str | None = None,
         first, last = _date(from_date), _date(to_date)
         if not 0 < (last - first).days <= 31:
             raise ValueError("custom report must span 1..31 local days")
-        _require_supported_date(first)
-        _require_supported_date(last)
     elif kind in ("day", "week", "month"):
         if date is None or from_date is not None or to_date is not None:
             raise ValueError(f"{kind} report requires an anchor date only")
-        anchor = _require_supported_date(_date(date))
-        if kind == "day":
-            first, last = anchor, anchor + timedelta(days=1)
-        elif kind == "week":
-            first = anchor - timedelta(days=anchor.weekday())
-            last = first + timedelta(days=7)
-        else:
-            first = anchor.replace(day=1)
-            last = Date(first.year + (1 if first.month == 12 else 0),
-                        1 if first.month == 12 else first.month + 1, 1)
+        anchor = _date(date)
+        try:
+            if kind == "day":
+                first, last = anchor, anchor + timedelta(days=1)
+            elif kind == "week":
+                first = anchor - timedelta(days=anchor.weekday())
+                last = first + timedelta(days=7)
+            else:
+                first = anchor.replace(day=1)
+                last = Date(first.year + (1 if first.month == 12 else 0),
+                            1 if first.month == 12 else first.month + 1, 1)
+        except (OverflowError, OSError, ValueError) as exc:
+            raise ReportUnrepresentable("report period exceeds the calendar conversion range") from exc
     else:
         raise ValueError(f"unknown report period {kind!r}")
 
-    if first < _FIRST_DATE or last > _LAST_EXCLUSIVE_DATE:
-        raise ReportUnrepresentable("resolved report period exceeds 1970-01-01..2100-12-31")
-
-    start, end = local_midnight(first), local_midnight(last)
     bucket = "1h" if kind == "day" else "1d"
-    edges = tuple(bucket_edges(start, end, bucket))
-    if (not edges or start % HOUR or end % HOUR or edges[0][0] != start
-            or edges[-1][1] != end or any(a >= b or a % HOUR or b % HOUR for a, b in edges)
+    try:
+        start, end = local_midnight(first), local_midnight(last)
+        edges = tuple(bucket_edges(start, end, bucket))
+    except (OverflowError, OSError, ValueError) as exc:
+        raise ReportUnrepresentable("report calendar conversion is unrepresentable") from exc
+    if start % HOUR or end % HOUR or any(a % HOUR or b % HOUR for a, b in edges):
+        raise ReportUnrepresentable("Warsaw report boundaries are not whole UTC hours")
+    if (not edges or edges[0][0] != start
+            or edges[-1][1] != end or any(a >= b for a, b in edges)
             or any(edges[i][1] != edges[i + 1][0] for i in range(len(edges) - 1))):
         raise ReportInvariantError("report calendar buckets are not contiguous whole UTC hours")
     return ReportPeriod(kind, first, last, start, end, bucket, edges)
@@ -375,16 +368,15 @@ def compose_report(source: ReportInput) -> dict:
     defrost_spans = defrosts(source.timeline)
     runs = compressor_runs(source.timeline)
     off_intervals = compressor_off_intervals(source.timeline)
-    # A report edge is not evidence of a span edge. Only the supported calendar floor
-    # can legitimately leave an intersecting span's left boundary undecidable.
+    # A report edge is not evidence of a span edge. Timeline has no proven absolute
+    # left floor, so an intersecting span needs decisive evidence on both sides.
     for spans in (activities, defrost_spans, runs, off_intervals):
         for span in spans:
             if span.start >= limit or span.end <= period.start:
                 continue
             if span.end_boundary is Boundary.OUTSIDE_EVIDENCE:
                 raise ReportInvariantError("intersecting report span ends outside examined evidence")
-            if (span.start_boundary is Boundary.OUTSIDE_EVIDENCE
-                    and source.timeline.start != _EVIDENCE_FLOOR):
+            if span.start_boundary is Boundary.OUTSIDE_EVIDENCE:
                 raise ReportInvariantError("intersecting report span starts outside examined evidence")
     overlap_runs = sum(span.start < limit and span.end > period.start for span in runs)
     overlap_defrosts = sum(span.start < limit and span.end > period.start for span in defrost_spans)

@@ -46,8 +46,7 @@ def input_from_rows(period, rows, *, now=None, closed_until=None,
     closed_until = period.end if closed_until is None else closed_until
     now = closed_until + M if now is None else now
     if evidence_start is None:
-        evidence_start = (max(local_midnight(date(1970, 1, 1)),
-                              min(period.start, rows[0][0]) - HOUR) if rows else period.start)
+        evidence_start = min(period.start, rows[0][0]) - HOUR if rows else period.start
     if evidence_end is None:
         evidence_end = (max(period.end, rows[-1][0] + M) + HOUR if rows else
                         period.start if closed_until <= period.start else period.end)
@@ -140,28 +139,45 @@ def test_custom_and_strict_date_forms():
         resolve_period("year", date="2026-01-01")
 
 
-@pytest.mark.parametrize("value", ("1969-12-31", "2101-01-01", "0001-01-01", "9999-12-31"))
-def test_well_formed_dates_outside_supported_calendar_are_unrepresentable(value):
-    with pytest.raises(ReportUnrepresentable):
-        resolve_period("day", date=value)
+@pytest.mark.parametrize("value", ("1969-12-31", "1970-01-01", "2100-12-31", "2101-01-01"))
+def test_valid_dates_resolve_without_a_report_year_policy(value):
+    period = resolve_period("day", date=value)
+    assert period.from_date == date.fromisoformat(value)
+    assert period.end > period.start
+    assert len(period.edges) == 24
 
 
-@pytest.mark.parametrize("first,last", (
-    ("1969-12-31", "1970-01-01"), ("2101-01-01", "2101-01-02"),
-    ("0001-01-01", "0001-01-02"), ("9999-12-30", "9999-12-31"),
-))
-def test_well_formed_custom_dates_outside_range_are_unrepresentable(first, last):
-    with pytest.raises(ReportUnrepresentable):
-        resolve_period("custom", from_date=first, to_date=last)
+@pytest.mark.parametrize("first,last", (("1969-12-30", "1969-12-31"),
+                                            ("2101-01-01", "2101-01-02")))
+def test_custom_dates_also_have_no_report_year_policy(first, last):
+    period = resolve_period("custom", from_date=first, to_date=last)
+    assert (period.from_date, period.to_date) == (date.fromisoformat(first), date.fromisoformat(last))
+    assert len(period.edges) == 1
 
 
-def test_supported_calendar_boundaries_and_resolved_range():
-    assert resolve_period("day", date="1970-01-01").from_date == date(1970, 1, 1)
-    assert resolve_period("day", date="2100-12-31").to_date == date(2101, 1, 1)
-    assert resolve_period("month", date="2100-12-31").to_date == date(2101, 1, 1)
-    for kind, anchor in (("week", "1970-01-01"), ("week", "2100-12-31")):
-        with pytest.raises(ReportUnrepresentable):
-            resolve_period(kind, date=anchor)
+def test_report_resolution_is_independent_of_imaginary_installation_date():
+    before = resolve_period("month", date="2026-08-15")
+    after = resolve_period("month", date="2026-10-15")
+    assert (before.from_date, before.to_date, before.bucket) == (date(2026, 8, 1),
+                                                                date(2026, 9, 1), "1d")
+    assert (after.from_date, after.to_date, after.bucket) == (date(2026, 10, 1),
+                                                              date(2026, 11, 1), "1d")
+    assert len(before.edges) == len(after.edges) == 31
+
+
+def test_actual_calendar_conversion_failures_are_unrepresentable():
+    # Python cannot construct the exclusive following day of date.max.
+    with pytest.raises(ReportUnrepresentable) as exc:
+        resolve_period("day", date="9999-12-31")
+    assert isinstance(exc.value.__cause__, OverflowError)
+    # Warsaw's historical local midnight here is not a whole UTC hour; the
+    # frozen hourly report grid cannot represent that actual calendar boundary.
+    assert local_midnight(date(1900, 1, 1)) % HOUR != 0
+    with pytest.raises(ReportUnrepresentable, match="whole UTC hours"):
+        resolve_period("day", date="1900-01-01")
+
+
+def test_malformed_calendar_forms_stay_distinct_from_unrepresentable():
     for malformed in ("2026-3-05", "2026-03-05T00:00:00", "2026-02-30"):
         with pytest.raises(ValueError) as exc:
             resolve_period("day", date=malformed)
@@ -169,6 +185,36 @@ def test_supported_calendar_boundaries_and_resolved_range():
     with pytest.raises(ValueError) as exc:
         resolve_period("custom", from_date="9999-12-31", to_date="0001-01-01")
     assert not isinstance(exc.value, ReportUnrepresentable)
+
+
+def test_fully_historical_empty_report_has_gaps_and_unknown_measurements():
+    period = resolve_period("custom", from_date="2026-08-01", to_date="2026-09-01")
+    result = compose_report(input_from_rows(period, [], now=period.end + M))
+    coverage = result["totals"]["coverage"]
+    assert coverage == {"calendar_minutes": 44640, "settled_minutes": 44640,
+                        "unsettled_minutes": 0, "future_minutes": 0,
+                        "recorded_minutes": 0, "gap_minutes": 44640,
+                        "coverage_percent": 0.0}
+    for channel in result["totals"]["energy"]["channels"].values():
+        assert channel == {"kwh": None, "minutes": 0, "unknown_minutes": 0}
+    for name in ("consumption", "production"):
+        assert result["totals"]["energy"][name] == {"observed_kwh": None,
+                                                      "unknown_channel_minutes": 0}
+    assert all(pair["cop"] is None and pair["input_kwh"] is None and pair["output_kwh"] is None
+               for pair in result["totals"]["energy"]["cop"].values())
+    assert result["totals"]["technical"]["outside_temp"] == {
+        "avg": None, "min": None, "max": None, "minutes": 0}
+    assert result["totals"]["technical"]["compressor_freq"] == {
+        "avg": None, "max": None, "minutes": 0, "active_avg": None}
+    events = result["totals"]["events"]
+    assert events["observed_starts"] == events["observed_stops"] == events["defrost_events"] == 0
+    assert all(count == 0 for count in events["activity_events"].values())
+    assert events["observed_defrost_seconds"] == 0
+    for name in ("complete_runs", "exact_off_intervals"):
+        assert events[name]["count"] == events[name]["total_minutes"] == 0
+    assert result["totals"]["compressor_runs_overlapping"] == 0
+    assert result["totals"]["defrosts_overlapping"] == 0
+    assert all(bucket["coverage"]["recorded_minutes"] == 0 for bucket in result["buckets"])
 
 
 @pytest.mark.parametrize("fraction", (0, 0.5, 0.123, 0.123456))
@@ -498,14 +544,18 @@ def test_narrow_right_evidence_is_rejected_and_widened_stop_is_preserved():
     assert wide["totals"]["events"]["complete_runs"]["count"] == 1
 
 
-def test_supported_evidence_floor_legitimately_has_outside_left_boundary():
+def test_old_calendar_date_does_not_excuse_narrow_left_evidence():
     period = resolve_period("day", date="1970-01-01")
     rows = [minute(period.start, "co"), minute(period.start + M, "off")]
-    source = input_from_rows(period, rows, now=period.end + M,
-                             evidence_start=local_midnight(date(1970, 1, 1)))
-    span = next(s for s in report.activity_events(source.timeline) if s.state.value == "co")
+    narrow = input_from_rows(period, rows, now=period.end + M,
+                             evidence_start=period.start)
+    span = next(s for s in report.activity_events(narrow.timeline) if s.state.value == "co")
     assert span.start_boundary is Boundary.OUTSIDE_EVIDENCE
-    events = compose_report(source)["buckets"][0]["events"]
+    with pytest.raises(ReportInvariantError, match="starts outside examined evidence"):
+        compose_report(narrow)
+    widened = input_from_rows(period, rows, now=period.end + M,
+                              evidence_start=period.start - M)
+    events = compose_report(widened)["buckets"][0]["events"]
     assert events["activity_events"]["co"] == 1
     assert events["observed_starts"] == 0
 
