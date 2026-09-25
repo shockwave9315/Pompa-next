@@ -2,9 +2,9 @@
 
 ## Current stage
 
-**Current stage: Stage 4D — Reports and product analytics projections.** Checkpoint 4D-A has
-frozen the architecture and API contract for owner review, before production report code. Stage
-4C is DONE and merged to `main` in PR #8 (merge commit
+**Current stage: Stage 4D — Reports and product analytics projections.** Checkpoint 4D-A's
+contract freeze is owner-accepted. Checkpoint 4D-B's pure report domain is complete and awaits
+owner review. Stage 4C is DONE and merged to `main` in PR #8 (merge commit
 `8c3bccbcf6ba305bbf547c59ef3f6167471442e8`). Its A–D
 checkpoints and whole-PR review are complete. Frontend work starts after Stage 4.
 
@@ -316,7 +316,7 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
 
 ## Out of scope
 
-- Stage 4D-A production report code, SQL, schema, API handlers and frontend.
+- Stage 4D-B SQL, database sessions, storage/schema, API handlers and frontend.
 - Stage 4E SET/control, Stage 5 frontend, cooling/heater/cost/external-meter analytics and year or
   season reports.
 - Legacy compatibility or historical migration.
@@ -325,17 +325,22 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
 
 ## Next
 
-Stage 4E — isolated SET/control and final backend API, after Stage 4D. Within Stage 4D, 4D-B
-follows owner review of the 4D-A contract freeze, then 4D-C and 4D-D (§25.4).
+Stage 4E — isolated SET/control and final backend API, after Stage 4D. Within Stage 4D, 4D-C
+follows owner review of the completed 4D-B pure domain; 4D-D follows (§25.4).
 
 ## Stage 4D checkpoints
 
-- **4D-A — contract freeze (complete; awaiting owner review):** architecture, API, knownness,
-  storage, time, error and snapshot contracts; stale Stage 4C docs. Documentation only. Gate:
-  owner review of this contract before 4D-B.
-- **4D-B — pure report domain:** period/calendar resolution, bucket edges, H*, coverage, energy,
-  paired COP, class grouping and one-pass span attribution; no SQL or HTTP. Gate: hand-calculated
-  and independent brute-force fixtures for knownness, partitions, DST and one-pass equivalence.
+- **4D-A — contract freeze (accepted/closed):** architecture, API, knownness, storage, time, error
+  and snapshot contracts; stale Stage 4C docs. Documentation only.
+- **4D-B — pure report domain (complete; awaiting owner review):** `pompa/report.py` resolves
+  Warsaw calendar periods and bucket edges, clamps the settled extraction endpoint, composes
+  coverage, observed-channel energy, paired COP, H* and class energy, technical facts and
+  Stage 4C spans. One timeline extraction per span family and indexed bucket attribution avoid
+  per-bucket whole-timeline summaries. It performs no SQL, storage or HTTP work. Forty-one report
+  tests include literal and deterministic randomized minute oracles, knownness, DST,
+  cross-boundary events, F2-style tails and invariant failures. Focused report/activity/
+  aggregation/timegrid suites: 235 passed. Full no-DB backend: 966 passed, 278 skipped
+  (MariaDB-gated), one dependency deprecation warning. Gate: owner review before 4D-C.
 - **4D-C — read model + API:** first, an independently reviewable behavior-preserving extraction
   refactor; then one-snapshot loading, report-local current edge, consistency guard and
   `/api/v1/report`. Gate: byte-identical `/history` and `/activity`, report API and MariaDB tests,
