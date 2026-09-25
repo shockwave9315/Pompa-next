@@ -5,8 +5,12 @@
 **Stage 4C — operational state, activity, cycles, defrost and durable events — DONE.**
 Checkpoints A (domain truth), B (durable hourly activity segments), C (activity read model and
 API resources) and D (closure and CT109 runtime validation) are complete. Branch
-`stage-4c-activity-cycles` remains in DRAFT PR #8 for the owner's independent whole-PR final
-adversarial review. Frontend work starts after Stage 4.
+`stage-4c-activity-cycles` remains in DRAFT PR #8. The owner's whole-PR adversarial review is
+complete; its F2 correction awaits targeted final review. Frontend work starts after Stage 4.
+
+The owner-approved F2 merge hardening makes `/activity` hold the unacknowledged recorder tail
+`open` until its historical outcome settles, preventing transient false gaps before a tick or
+during a write backlog.
 
 Stage 4B — DONE and merged to `main` (PR #7, merge commit
 `dfd225d2a8fe35563cd1f684efb81cf91b532a2f`).

@@ -97,7 +97,7 @@ def test_corrupt_durable_rows_fail_closed_without_raw_fallback(any_storage):
         s.replace_activity_hour(T0, [(*records[0][:2], 2, *records[0][3:]), *records[1:]])
     with pytest.raises(ActivityRecordInvalid):
         q(any_storage, T0, T0 + 10 * M)
-    api = Api(storage=any_storage)
+    api = Api(storage=any_storage, start=NOW)
     r = api.get("/api/v1/activity", t=NOW, **{"from": z(T0), "to": z(T0 + 10 * M)})
     assert r.status_code == 500 and "inconsistent" in r.json()["detail"]
 
@@ -121,7 +121,7 @@ def test_unavailable_inside_the_range_is_refused(any_storage):
     with pytest.raises(ActivityUnavailable) as e:
         q(any_storage, T0 + 30 * M, T0 + H + 10 * M)
     assert e.value.hour_ts == T0
-    r = Api(storage=any_storage).get("/api/v1/activity", t=NOW,
+    r = Api(storage=any_storage, start=NOW).get("/api/v1/activity", t=NOW,
                                      **{"from": z(T0 + 59 * M), "to": z(T0 + H + M)})
     assert r.status_code == 422
     assert "purged before durable activity existed" in r.json()["detail"]
@@ -303,7 +303,7 @@ def test_run_and_defrost_across_warsaw_midnight_through_the_api(any_storage):
     midnight = local_midnight(date(2027, 1, 16))
     start = midnight - 5 * M
     put(any_storage, start, [OFF, OFF, CO, defrost(1.0), defrost(0.5), CO, CO, OFF] + [OFF] * 60)
-    api = Api(storage=any_storage)
+    api = Api(storage=any_storage, start=NOW)
     day1 = api.body("/api/v1/activity", t=NOW, **{"from": "2027-01-15", "to": "2027-01-16"})
     day2 = api.body("/api/v1/activity", t=NOW, **{"from": "2027-01-16", "to": "2027-01-17"})
     both = api.body("/api/v1/activity", t=NOW, **{"from": "2027-01-15", "to": "2027-01-17"})
@@ -329,7 +329,7 @@ def test_dst_days_through_the_api(any_storage, day, minutes):
     count = minutes + 60
     put(any_storage, start, [CO if switch - 30 * M <= start + i * M < switch + 30 * M else OFF
                              for i in range(count)])
-    body = Api(storage=any_storage).body("/api/v1/activity", t=NOW,
+    body = Api(storage=any_storage, start=NOW).body("/api/v1/activity", t=NOW,
                                          **{"from": day.isoformat(), "to": date.fromordinal(day.toordinal() + 1).isoformat()})
     s = body["summary"]
     assert (s["closed_minutes"], s["recorded_minutes"], s["gap_minutes"]) == (minutes, minutes, 0)
@@ -342,7 +342,8 @@ def test_dst_days_through_the_api(any_storage, day, minutes):
 
 def test_literal_response_contract(any_storage):
     put(any_storage, T0, [OFF, CO, CO, OFF])
-    body = Api(storage=any_storage).body("/api/v1/activity", t=T0 + H, **{"from": z(T0), "to": z(T0 + 4 * M)})
+    body = Api(storage=any_storage, start=T0 + H).body(
+        "/api/v1/activity", t=T0 + H, **{"from": z(T0), "to": z(T0 + 4 * M)})
     zero_cop = {"cop": None, "paired_minutes": 1, "input_kwh": 0.0, "output_kwh": 0.0}
     run_energy = {"co_power_consumption": {"kwh": 1801.0 / 60000, "minutes": 2},
                   "co_power_production": {"kwh": 7200.5 / 60000, "minutes": 2},
@@ -596,7 +597,7 @@ def hour_records(storage, hour):
 def assert_fails_closed(storage, a, b):
     with pytest.raises(ActivityRecordInvalid):
         q(storage, a, b)
-    r = Api(storage=storage).get("/api/v1/activity", t=NOW, **{"from": z(a), "to": z(b)})
+    r = Api(storage=storage, start=NOW).get("/api/v1/activity", t=NOW, **{"from": z(a), "to": z(b)})
     assert r.status_code == 500 and "stored activity history is inconsistent" in r.json()["detail"]
 
 

@@ -553,14 +553,14 @@ client. Every state string is one of `off`, `idle`, `co`, `dhw`, `transition`, `
 
 The query is an exact, minute-aligned `[from, to)` of at most 31 days and one hour. `from` and `to`
 use the same instant/date parsing as `/history`. The backend chooses and loads the evidence around
-the range. The same range always gives the same facts.
+the range. At the right edge, `open` minutes become historical facts as the recorder settles them.
 
 Top level:
 
 | Field | Meaning |
 |---|---|
 | `from`, `to`, `now` | The request and the observation instant. |
-| `closed_until` | The first minute that has not closed (`floor_minute(now)`). Minutes at or after it are not closed history. |
+| `closed_until` | The first minute whose historical outcome this process has not settled. It is at most `floor_minute(now)` and also stops at the accumulator's open minute or the oldest waiting/unacknowledged row. Minutes at or after it are not yet safe to classify as historical gaps. |
 | `segment_rule_version` | The persisted minute/segment interpretation read (`1`). |
 | `evidence` | `{from, to}`: whole UTC hours actually examined. Widening follows only spans crossing the range, in exponentially growing hour chunks, so it may extend past the decisive boundary by up to the last chunk. |
 | `summary` | Range facts; see below. |
@@ -568,8 +568,9 @@ Top level:
 | `compressor_runs`, `compressor_off_intervals`, `defrosts` | Every observed span intersecting the range, each with its full observed extent. |
 
 **Summary fields:**
-- Minute counts: `closed_minutes`, `recorded_minutes`, `gap_minutes`, plus `activity_minutes` and
-  `compressor_minutes`, which list every state including zeros.
+- Minute counts: `closed_minutes` counts the settled part of the request (before `closed_until`),
+  with `recorded_minutes` and `gap_minutes`; `activity_minutes` and `compressor_minutes` list every
+  recorded state including zeros.
 - Start/stop counts: `observed_starts`, `observed_stops`.
 - `compressor_runs_overlapping`, `defrosts_overlapping`: these count spans that intersect the
   range. A span crossing a range edge counts in both adjacent ranges, so these are **not
@@ -592,9 +593,9 @@ Top level:
   |---|---|
   | `observed` | The adjacent minute proves the change. |
   | `unknown` | The adjacent minute is recorded but unclassifiable. |
-  | `gap` | The adjacent minute is closed and was not recorded. |
+  | `gap` | The adjacent minute is settled and was not recorded. |
   | `unavailable` | The adjacent minute's activity detail was purged before durable activity existed. |
-  | `open` | The adjacent minute has not closed yet. |
+  | `open` | The adjacent minute is not yet settled historical evidence; it may be current or awaiting persistence acknowledgement. |
   | `outside_evidence` | Not examined; appears only at the start of all history. |
 
 - `start_observed`, `end_observed`.
@@ -617,8 +618,8 @@ Top level:
 | `type` | `activity` | `event` | Meaning |
 |---|---|---|---|
 | `activity` | state string (`unknown` means a recorded but unclassifiable minute) | span object | A maximal same-activity span. |
-| `gap` | `null` | `null` | Closed minutes with no recorded row. |
-| `open` | `null` | `null` | `[max(from, closed_until), to)`: not closed yet, never a gap. |
+| `gap` | `null` | `null` | Settled historical minutes with no recorded row. |
+| `open` | `null` | `null` | `[max(from, closed_until), to)`: unsettled right-edge tail, never a gap. |
 
 Activity-unavailable history is never a timeline item. If the requested range intersects it, the
 request is `422`. The detail names the first unavailable hour and states that canonical minutes

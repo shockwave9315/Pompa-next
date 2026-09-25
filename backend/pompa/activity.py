@@ -255,12 +255,12 @@ class Timeline:
     """Contiguous evidence over ``[start, min(end, closed_until))``.
 
     ``start``/``end`` describe the evidence actually examined. A span edge at
-    either limit (other than an unclosed right edge, ``open``) is
+    either limit (other than an unsettled right edge, ``open``) is
     ``outside_evidence``: it proves no start, stop or continuation, so wider
     evidence can prove more boundary facts.
 
-    Minutes at or after ``closed_until`` have not closed yet; they are neither
-    gaps nor unknown and hold no items.
+    Minutes at or after ``closed_until`` are not yet settled historical evidence;
+    they are neither gaps nor unknown and hold no items.
     """
 
     start: int
@@ -277,9 +277,9 @@ def timeline(segments: Iterable[ActivitySegment], start: int, end: int, closed_u
              unavailable: Iterable[tuple[int, int]] = ()) -> Timeline:
     """Place ascending segments on the evidence window ``[start, end)`` with explicit gaps.
 
-    ``closed_until`` is the first minute that has not closed (for a wall clock
-    ``now``: ``floor_minute(now)``). Segments may extend past the window and are
-    clipped to it; a segment reaching past ``closed_until`` is impossible
+    ``closed_until`` is the first minute whose historical outcome is unsettled;
+    callers without a recorder may use ``floor_minute(now)``. Segments may extend past the window
+    and are clipped to it; a segment reaching past ``closed_until`` is impossible
     evidence and is rejected. Uncovered closed minutes inside an ``unavailable``
     interval become ``Unavailable`` items instead of gaps; such an interval
     must not overlap a segment.

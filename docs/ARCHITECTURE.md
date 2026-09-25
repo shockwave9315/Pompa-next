@@ -1162,8 +1162,10 @@ sub-segment energy edge needs raw minutes, as in §15. Building hours separately
 their segments gives the same result as building a whole range.
 
 **Timeline and gaps.** A `Timeline` places segments on an evidence window with explicit `Gap`s for
-closed minutes without a row. A gap is missing evidence, never `unknown`. Minutes at or after
-`closed_until`, the first unclosed minute, are neither gaps nor unknown. No row is manufactured.
+settled historical minutes without a row. A gap is missing evidence, never `unknown`. Minutes at or after
+`closed_until`, the first minute whose historical outcome is unsettled for this process, are
+neither gaps nor unknown. It is no later than `floor_minute(now)` and stops at the accumulator's
+open minute or the oldest waiting/unacknowledged row. No row is manufactured.
 
 **Spans.** Activity events, observed compressor runs ("cycles" = observed compressor runs),
 compressor-off intervals and individual defrosts are maximal consecutive recorded minutes in one
@@ -1176,8 +1178,8 @@ describing the adjacent minute:
 |---|---|
 | `observed` | recorded, consecutive, in a different known state (for a run: compressor off) |
 | `unknown` | recorded, consecutive, state unknown |
-| `gap` | closed without a row |
-| `open` | not yet closed (right edge only): a current run or event has no fabricated end |
+| `gap` | settled without a row |
+| `open` | not yet settled as historical evidence (right edge only): a current run or event has no fabricated end |
 | `outside_evidence` | outside the examined window |
 
 `start_observed`/`end_observed` are true only for `observed`. An observed start therefore needs
@@ -1358,12 +1360,19 @@ source for each examined hour:
    activity was purged before 4C-B. It becomes an `Unavailable` timeline item.
 4. Otherwise nothing was recorded: ordinary gaps.
 
-Each hour has one source, so mixed durable/raw ranges never duplicate a minute. Segments at or after
-`closed_until = floor_minute(now)` are not closed history and are never gaps.
+Each hour has one source, so mixed durable/raw ranges never duplicate a minute. The activity API
+reads the recorder's settled frontier under its lock before opening the storage snapshot. The
+frontier is the minimum of `floor_minute(now)`, the accumulator's open minute and every waiting or
+unacknowledged row minute. All minutes below it have an acknowledged write or can no longer yield
+a row from this process, including permanently dropped/refused rows and settled no-row minutes.
+At and after `closed_until`, even a temporally closed minute awaiting persistence is `open`, never
+a gap. A committed row still protected pending acknowledgement is conservatively `open`; after
+acknowledgement, the subsequently opened DB snapshot can safely expose it. Restart needs no
+persistent frontier: earlier DB history is settled and an actual restart hole remains a gap.
 
 **Read-time boundary.** `Unavailable` and `Boundary.UNAVAILABLE` are read-time only and outside
 `ACTIVITY_RULE_VERSION`. `unavailable` is never `gap` (not recorded), `unknown` (a recorded,
-unclassifiable minute) or `open` (not yet closed). A request whose closed part intersects an
+unclassifiable minute) or `open` (not yet settled). A request whose settled part intersects an
 unavailable hour is refused with `ActivityUnavailable` (HTTP 422), naming the first such hour;
 nothing partial is returned. Unavailable evidence met only while widening outside the range just
 ends a span with an `unavailable` boundary.

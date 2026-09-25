@@ -124,7 +124,7 @@ def _undecided(tl, a: int, b: int) -> tuple[bool, bool]:
     return left, right
 
 
-def query(storage: Storage, start: int, end: int, now: float) -> dict:
+def query(storage: Storage, start: int, end: int, now: float, settled_before: int | None = None) -> dict:
     """Activity facts for minute-aligned ``start < end``.
 
     Raises ``Unrepresentable`` (range too long), ``ActivityUnavailable`` (422s) and
@@ -133,7 +133,11 @@ def query(storage: Storage, start: int, end: int, now: float) -> dict:
     if end - start > MAX_RANGE_SECONDS:
         raise Unrepresentable(f"an activity range may span at most {MAX_RANGE_SECONDS // DAY} days and one"
                               " hour; the range is not truncated")
-    closed_until = floor_minute(now)
+    wall_closed = floor_minute(now)
+    if settled_before is not None and (type(settled_before) is not int or settled_before % MINUTE
+                                       or settled_before > wall_closed):
+        raise ValueError("settled_before must be a minute-aligned integer no later than floor_minute(now)")
+    closed_until = wall_closed if settled_before is None else settled_before
     cap = ceil_hour(closed_until)  # no closed minute lies at or beyond it
     with storage.session() as s:
         evidence = _Evidence(s, closed_until)

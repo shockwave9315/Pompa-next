@@ -371,8 +371,10 @@ def test_refused_row_is_dropped_instead_of_blocking_the_queue():
     rec, _ = make(start=T0 + 600, storage=db)
     rec.schema_ready = True
     rec._protected = [recorded(conf_row(T0 + 600, outside_temp=1.0))]
+    assert rec.settled_before(lambda: T0 + 660)[1] == T0 + 600
 
     rec.tick(T0 + 660)
+    assert rec.settled_before(lambda: T0 + 660)[1] == T0 + 660
     snap = rec.snapshot(lambda: T0 + 660)[1]["recorder"]
     assert (snap["protected_rows"], snap["waiting_rows"]) == (0, 0)  # nothing stuck
     assert (snap["refused_rows"], snap["rows_written"], snap["dropped_rows"]) == (1, 0, 0)

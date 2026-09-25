@@ -442,6 +442,22 @@ class Recorder:
 
     # ------------------------------------------------------------- recorder tick
 
+    def settled_before(self, clock: Callable[[], float]) -> tuple[float, int]:
+        """Observe now and the first minute whose historical outcome is not settled.
+
+        A minute below this frontier has either been acknowledged as written or can no longer
+        produce a row. The accumulator's open minute and all waiting or unacknowledged rows
+        remain beyond it. Call this before opening a history database snapshot.
+        """
+        with self._lock:
+            now = clock()
+            settled = min(floor_minute(now), self.accumulator.minute_start)
+            for row in self._protected:
+                settled = min(settled, row.ts)
+            for row in self._waiting:
+                settled = min(settled, row.ts)
+            return now, settled
+
     def tick(self, now: float) -> None:
         """Close due minutes, bootstrap the schema if needed, flush, then roll up and purge.
 

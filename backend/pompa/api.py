@@ -140,7 +140,8 @@ def create_app(recorder: Recorder, storage: Storage, clock: Callable[[], float] 
         if start >= end:
             raise _bad("'from' must be earlier than 'to'")
         try:
-            return activity_history.query(storage, start, end, clock())
+            now, settled_before = recorder.settled_before(clock)
+            return activity_history.query(storage, start, end, now, settled_before=settled_before)
         except (Unrepresentable, activity_history.ActivityUnavailable) as e:
             raise HTTPException(status_code=422, detail=str(e)) from None
         except ActivityRecordInvalid as e:
