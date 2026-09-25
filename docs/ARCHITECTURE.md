@@ -36,6 +36,7 @@ The intended backend boundaries are conceptual, not a mandate for speculative ab
 | Recorder | Close minutes, buffer writes, flush storage, roll up closed hours, and purge safely. |
 | Storage | Own DDL and parameterized MariaDB queries; contain no domain calculations. |
 | Aggregation | Own `Stats`, buckets, derived series, energy, COP, coverage, and read-path composition. |
+| Activity | Interpret canonical minutes into activity, compressor runs and defrosts (Stage 4C, §25.3); pure. |
 | API | Validate requests and serialize domain results; contain no independent mathematics. |
 
 Dependencies flow inward toward the catalog and domain functions. Circular dependencies are not allowed. Live and history share the proven canonical metric definitions, not a generic storage abstraction. Stage 4A adds a reference-backed capability layer around them (§25).
@@ -243,7 +244,7 @@ A single pure derivation function expands each `MinuteRow` before folding:
 - `pair_total_in` and `pair_total_out` exist only when all four power channels are known; their values are the respective CO+DHW sums.
 
 The identical derivation runs when building `rollup_1h` and when querying raw minutes.
-Flags remain measurable facts. For a 0/1 mean flag, `sum` is the number of minutes in state 1. Operational activity classification is not part of the core history engine.
+Flags remain measurable facts. For a 0/1 mean flag, `sum` is the number of minutes in state 1. Operational activity classification is not part of the core history engine; it is the separate Stage 4C activity domain (§25.3.1), which reuses this derivation for its energy ingredients.
 
 ## 11. Energy and COP
 
@@ -294,12 +295,11 @@ delete sample_1m where ts < cutoff
 
 If no contiguous rollup exists, `rolled_until` is absent and purge deletes nothing. Purge cannot delete a minute from an unrolled hour, from the two-hour margin below `rolled_until`, or from an hour a pending write can still enter and force a rebuild of.
 Each bounded step additionally proves per hour that the rollup accounts for exactly as many minutes as the hour still stores; any mismatch, missing rollup row or error deletes nothing. That proof is what makes a surviving rollup row conclusive evidence of deletion (§8), which is how reads learn what purge removed; the `cutoff` itself is prospective policy and is never used to answer that question.
-**Current Stage 1–3 limitation:** activity/event timelines and minute-order cycle reconstruction
-are guaranteed only while raw `sample_1m` exists. Hourly flags preserve duration but not order.
-The current reset-aware interpretation of `operations_counter` likewise has only the raw-minute
-window; the counter must not be assumed to equal observed compressor starts. Stage 4C will add
-durable factual activity/events before any retention reduction, after comparing storage designs
-(§25). The default raw retention remains 365 days during early Stage 4.
+**Activity durability.** Hourly flags preserve duration but not order. Since Stage 4C-B, purge also
+proves the hour's durable activity segments (§25.3.2), so activity order, compressor runs,
+defrosts and their energy ingredients survive raw purge. The reset-aware interpretation of
+`operations_counter` still has only the raw-minute window; the counter must not be assumed to equal
+observed compressor starts. The default raw retention remains 365 days during early Stage 4.
 
 ## 14. Query resolution and read paths
 
@@ -440,9 +440,9 @@ Substantive stages deliver a complete vertical outcome and use a feature branch 
 10. Coverage is expressed only as counts and percentages, without arbitrary completeness verdicts.
 11. All query intervals are exact `[from,to)`; 422 without rounding means a needed hour's raw evidence was provably purged, never merely that the range is old or never recorded.
 12. UTC is storage truth; Europe/Warsaw calendar days include correct 23/25-hour DST behavior.
-13. In the current Stage 1–3 implementation, activity/timeline and reset-aware counter analysis
-    are guaranteed only while raw 1-minute data remains. Stage 4C must make useful event facts
-    durable before raw purge can remove their evidence.
+13. Raw purge deletes an hour only after proving its durable Stage 4C activity segments equal
+    the segments of its raw minutes (§25.3.2), so activity facts survive it. Reset-aware counter
+    analysis is still guaranteed only while raw 1-minute data remains.
 14. Backend owns domain truth; frontend only renders backend facts.
 15. Recorder/history remain independent of the later isolated control path.
 16. Legacy history is not migrated or backfilled, and legacy compatibility is not a requirement.
@@ -1102,10 +1102,323 @@ distribution are factual outputs, not good/bad/fault verdicts. Missing rows rema
 remains unknown. Do not smooth across gaps or add per-second machinery without real evidence.
 Keep the device operations counter distinct from observed compressor starts until verified.
 
-Useful event facts must survive raw purge. **Deferred to 4C:** compare direct durable events,
-hourly segments and any demonstrably simpler correct representation against late writes, database
-outages, cross-hour/midnight spans, restart, idempotency and purge. Raw-only recomputation cannot
-meet durability. No event table, segment stitching scheme or materialization marker is frozen now.
+Useful event facts must survive raw purge; raw-only recomputation cannot meet durability. **Owner
+decision:** durable per-hour activity segments. Checkpoint B materializes each UTC hour's ordered
+segments through the existing `persist()` → `rebuild_hour()` path, together with the rule version.
+Events, compressor runs, starts, intervals, continuation and range projections are derived on read
+by stitching segments; no cross-hour state machine is persisted. The segment table and its purge
+proof are frozen in §25.3.2; the read model, evidence loading and API resources in §25.3.3.
+
+#### 25.3.1 Checkpoint A — activity domain truth (DONE)
+
+`pompa/activity.py` is pure and storage-free. It reads only canonical `MinuteRow` values
+(`ACTIVITY_COLUMNS`); a column that was not read is an error, never an unknown metric. The
+minute/segment interpretation is versioned: `ACTIVITY_RULE_VERSION = 1`. 4C-B stores it as historical
+meaning, so its scope is exactly what a stored segment means:
+
+- minute classification
+- the persisted `Activity`/`Compressor` strings
+- the activity columns and the >100 W threshold
+- segment grouping (activity, compressor state and exact defrost fraction; a UTC hour or missing
+  minute always splits)
+- the segment fields
+- `ENERGY_SERIES` with its order and ingredient content
+
+Changing any of them needs a new version and a new golden, never an edit. The version-1 golden
+(`tests/test_activity.py`) is a literal fingerprint independent of the implementation's tables,
+and a self-test proves it fails on each kind of drift. Read-time projections, boundaries and
+summaries are not versioned by it: a summary names the interpretation it read as
+`segment_rule_version`.
+
+**Classification of one recorded minute.** Compressor state comes from `compressor_freq` alone:
+`NULL` → unknown, exactly `0` → off, `> 0` → on. It is not `NULL`-as-off. Activity precedence:
+
+1. `defrosting_state` `NULL` → `unknown` (a defrost cannot be excluded).
+2. `defrosting_state > 0` → `defrost`, over valve, power and compressor evidence.
+3. Compressor unknown → `unknown`.
+4. Compressor off → `off` if `heatpump_state == 0`, `unknown` if it is `NULL`, otherwise `idle`.
+   Valve position and power tails never create CO/CWU activity with a stopped compressor.
+5. Compressor on, known valve → `0` `co`, `1` `dhw`, fractional `transition`. A fractional value is
+   the time-integrated minute mean, never a reconstructed intra-minute switch order.
+6. Compressor on, valve `NULL` → the legacy-proven `> 100 W` power evidence. A side (CO or DHW)
+   is active if any of its consumption/production channels exceeds 100 W, and inactive only if
+   both are known and at most 100 W. CO only → `co`, DHW only → `dhw`, both → `transition`; any
+   other combination, including an unknown side, → `unknown`.
+
+`operations_counter` and `operating_mode` never classify. The device counter is not observed start
+truth.
+
+**Segments.** An `ActivitySegment` is consecutive recorded minutes within one UTC hour with the same
+activity, compressor state and exact `defrosting_state` value. A fractional defrost boundary minute
+is therefore never merged with full minutes, and every segment can be clipped at any minute
+exactly. Each segment carries the canonical energy ingredients: the `fold_minutes` `Stats` of the
+four power channels and six paired series (`ENERGY_SERIES`) over exactly its minutes. Energy
+(`ΣW/60000`, `minutes = n`) and period COP (`Σ paired out / Σ paired in`, `paired_minutes`) come
+from the existing `energy_kwh`/`cop`; there is no second formula and no COP averaging.
+Chronological `combine` of segment ingredients reproduces the history fold's minute counts and
+pairing exactly. Its sums are equal up to binary floating-point association, and exactly equal
+whenever the sums are representable. A piece clipped out of a segment carries no ingredients; a
+sub-segment energy edge needs raw minutes, as in §15. Building hours separately and concatenating
+their segments gives the same result as building a whole range.
+
+**Timeline and gaps.** A `Timeline` places segments on an evidence window with explicit `Gap`s for
+settled historical minutes without a row. A gap is missing evidence, never `unknown`. Minutes at or after
+`closed_until`, the first minute whose historical outcome is unsettled for this process, are
+neither gaps nor unknown. It is no later than `floor_minute(now)` and stops at the accumulator's
+open minute or the oldest waiting/unacknowledged row. No row is manufactured.
+
+**Spans.** Activity events, observed compressor runs ("cycles" = observed compressor runs),
+compressor-off intervals and individual defrosts are maximal consecutive recorded minutes in one
+state. They are never bridged across a gap or an unknown minute, and nothing is smoothed. `CO → idle
+→ CO`, `CO → gap → CO`, `CO → unknown → CO` and `CO → defrost → CO` all remain separate pieces. A
+compressor run may span CO, DHW, transition and defrost activity. Each edge carries a `Boundary`
+describing the adjacent minute:
+
+| Boundary | Adjacent minute |
+|---|---|
+| `observed` | recorded, consecutive, in a different known state (for a run: compressor off) |
+| `unknown` | recorded, consecutive, state unknown |
+| `gap` | settled without a row |
+| `open` | not yet settled as historical evidence (right edge only): a current run or event has no fabricated end |
+| `outside_evidence` | outside the examined window |
+
+`start_observed`/`end_observed` are true only for `observed`. An observed start therefore needs
+the immediately preceding consecutive minute recorded with the compressor off. Missing → on and
+unknown → on are not starts, and nothing searches backwards across a gap. A short stop inside
+minute means cannot produce a zero minute and is not claimed. An off interval is exact only when
+both of its edges are observed runs.
+
+Defrost spans (`defrosts`) judge their edges by the defrost signal itself. An adjacent known
+`defrosting_state == 0` is `observed`, even when that minute's overall activity is `unknown` (for
+example an unknown compressor or valve). Only an adjacent `defrosting_state` `NULL` is `unknown`.
+Gap, open and outside-evidence edges are unchanged. `activity_events` reports activity changes,
+so its defrost events keep activity-based edges, and compressor-run edges stay compressor-based.
+
+**Resolution limits.** Activity minutes are per-minute classifications, not exact per-state
+seconds. A fractional `heatpump_state` is a fully known state that changed within the minute; with
+the compressor off such a minute is `idle`. Only defrost keeps an exact time-integrated fraction
+and duration. Compressor run duration and compressor minutes are observed minute-resolution
+evidence, not exact physical runtime.
+
+**Defrost duration.** `observed_defrost_seconds = Σ defrosting_state × 60` over valid defrost
+minutes. It is exact relative to Next's time-integrated observations, not a physical transition
+second. Example: `0.583333, 1, 1, 0.166667` → 165 s. Separate defrosts stay separate.
+
+**Range projection.** Chronology is UTC; local-day ranges come from the existing Europe/Warsaw
+helpers, so 23 h and 25 h days need no special case. A projected span has
+`starts_before_range`/`ends_after_range` true only when recorded minutes of the same span exist
+outside the range. A query edge alone is never evidence, and a span ending exactly at midnight does
+not continue. A summary counts a start in the range holding the run's first minute and a stop in
+the range holding its last minute, because a zero minute proves the compressor off for that whole
+minute. Starts and stops are therefore additive across adjacent ranges. Complete runs and exact
+off intervals are attributed by their first minute. `compressor_runs_overlapping` and
+`defrosts_overlapping` count every span intersecting the range. A span crossing midnight counts
+once in each day and once in the combined two-day range, so overlap counts are **not** additive
+across adjacent ranges. Summaries report minutes, counts and durations only, with no verdicts.
+
+**Evidence window.** `Timeline.start`/`end` are the evidence actually examined, and a summary
+carries them as `evidence_start`/`evidence_end` with `closed_until`. A span edge at the window
+limit is `outside_evidence`. The same `[start, end)` can therefore prove different
+boundary-sensitive facts from a narrower or wider window. Observed starts and stops are fixed once
+the window contains the minute before `start` and the minute at `end` (`[start − 1 min, end +
+1 min)`). Complete-run durations and exact off intervals may need evidence arbitrarily far beyond
+the range, because a span can continue. Minute counts, gaps and defrost seconds depend only on
+`[start, end)`. How much evidence an API loads is a checkpoint C policy decision.
+
+#### 25.3.2 Checkpoint B — durable hourly activity segments (DONE)
+
+**Table.** One additive table holds one row per `ActivitySegment`:
+
+```sql
+CREATE TABLE activity_segment_1h (
+  start_ts         INT UNSIGNED      NOT NULL PRIMARY KEY,
+  minutes          TINYINT UNSIGNED  NOT NULL,
+  rule_version     SMALLINT UNSIGNED NOT NULL,
+  activity         VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  compressor       VARCHAR(8)  CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  defrost_fraction DOUBLE            NULL,
+  energy_json      JSON              NOT NULL CHECK (JSON_VALID(energy_json)),
+  CHECK (start_ts MOD 60 = 0 AND minutes BETWEEN 1 AND 60 AND start_ts MOD 3600 + minutes * 60 <= 3600),
+  CHECK (defrost_fraction IS NULL OR (defrost_fraction >= 0 AND defrost_fraction <= 1))
+) ENGINE=InnoDB;
+```
+
+- **Hour and order.** A segment never crosses a UTC hour, so its hour is `floor_hour(start_ts)` and
+  `start_ts` alone is the unique, ordered key. A separate hour/sequence column would only duplicate
+  that fact.
+- **Energy.** `energy_json` holds the segment's `ENERGY_SERIES` `Stats` as deterministic JSON
+  (`{series: [n, sum, min, max, last]}`, sorted keys, shortest round-trip float text). A series
+  with no known minute is absent, exactly as in `fold_minutes`. MariaDB JSON is stored as text, so
+  every DOUBLE round-trips bit for bit. One row per segment carries its ten optional series
+  without a child table or fifty columns.
+- **No foreign key.** There is no FK to `sample_1m`: segments must outlive raw purge. An hour with
+  no raw minutes has no rows; no gap row, no empty-hour record and no cross-hour or open-event
+  state is stored. Within a materialized span, missing minutes are the holes between segments,
+  read back as `Gap`s.
+- **Validation.** `pompa.activity` encodes and fail-closed decodes every row. It checks:
+  - the rule version (only 1 exists) and known `Activity`/`Compressor` strings;
+  - activity/compressor/defrost-fraction combinations version 1 can produce;
+  - alignment inside one UTC hour, and ascending non-overlapping rows;
+  - energy structure: known series; `1 ≤ n ≤ minutes`; finite, non-negative values that are
+    never `-0.0` (the application never writes one), with `min ≤ last ≤ max`;
+  - canonical pairing invariants: paired input and output together with equal `n`; a pair never
+    exceeds its channels; the total pair never exceeds the CO or DHW pair.
+
+  Nothing malformed is coerced. The database CHECKs are a second structural guard.
+
+**Materialization.**
+- **Forward roll and repair.** `rebuild_hour(H)` reads the locked canonical minutes of `H` once and,
+  in the caller's transaction, replaces `rollup_1h(H)`, `optional_rollup_1h(H)` and the complete
+  segment set of `H` (`build_segments` of those minutes). It deletes the whole hour and inserts
+  the deterministic new set, so a repeated rebuild or a lost-acknowledgement retry is idempotent.
+  A failure anywhere rolls back all three with the raw write. `roll_next_hour` and late-write
+  repair in `persist()` therefore materialize activity with no new pipeline and no new watermark;
+  `rolled_until` remains the one roll frontier.
+- **Purged hours.** A late write into an already-purged hour is still refused
+  (`first_purged_hour`). Segments are a read representation, never a rebuild source.
+
+**Upgrade backfill.** Hours rolled before this checkpoint have rollups but no segments, and
+forward rolling never revisits them. `backfill_activity_step` derives them from the tables:
+rolled hours (a `rollup_1h` row) at or above an in-memory scan hint that store raw minutes but no
+segment row.
+- **Scope and bounds.** Each step rebuilds at most 24 such hours through `rebuild_hour`. It
+  examines at most seven days of raw (a bounded, primary-key range anti-join) and starts from a
+  current read of the next raw minute, so long empty stretches cost nothing.
+- **Order.** The recorder runs one step per maintenance pass after rolling. It purges only once
+  a pass has found nothing left: roll, then backfill, then purge.
+- **No watermark.** The scan hint and the completion flag are process memory, recomputed after
+  every restart by one scan. No new watermark exists, because no Stage 4C-B path can create an
+  unmaterialized rolled raw hour.
+- **Anomalies stay visible.** A raw hour below `rolled_until` without a rollup row is a canonical
+  anomaly, not backfill work, and the purge proof keeps reporting it.
+- **History purged before 4C-B.** Hours whose raw was purged before this checkpoint have a rollup
+  but no raw and no segments. They are never backfilled, and nothing is inferred from hourly
+  averages or `operations_counter`. `first_purged_hour` keeps its single meaning.
+
+**Activity evidence per UTC hour.** Stored facts give four distinct cases:
+
+| Segments | Raw | Canonical rollup | Activity evidence |
+|---|---|---|---|
+| present | any | present | durable |
+| absent | present | any | derivable from raw (not yet rolled, or awaiting backfill) |
+| absent | absent | present | **unavailable**: canonical minutes were recorded, but their activity detail was purged before 4C-B |
+| absent | absent | absent | not recorded |
+
+An unavailable hour is not an ordinary gap. Checkpoint C reads keep "activity unavailable"
+distinct from "not recorded" (§25.3.3).
+
+**Purge proof.** After the canonical count proof and the optional proof, purge decodes the
+candidate hours' segment rows through a locking read. It requires them to equal, hour by hour and
+field by field, `build_segments` of the same locked raw minutes. The compared fields are start,
+minutes, activity, compressor, exact defrost fraction, rule version and every energy statistic.
+Any missing, extra, split, shifted, changed or invalid row raises `PurgeRefused` and deletes
+nothing. After deletion, canonical and optional rollups and all segments remain. Decoded segments
+rebuild the same `Timeline`, activity events, compressor runs with boundaries, defrosts and their
+seconds, gaps, and per-run energy and paired-COP ingredients as the raw minutes did.
+
+- **Canonical form.** Semantic equality is not enough. Each stored row must also equal
+  `segment_record` of its expected segment exactly, including the `energy_json` text. JSON that
+  Python decodes to the same values can still mean something else to another reader. Examples
+  are a duplicate key, other whitespace, key order or number spelling, and `-0.0`. On MariaDB,
+  `JSON_EXTRACT` returns a duplicate key's first occurrence, while Python keeps the last.
+- **Why byte equality is safe.** MariaDB stores and returns the `utf8mb4_bin` text byte for byte,
+  and a DOUBLE collapses `-0.0` to `0.0`. Exact record equality is therefore reliable, and
+  application-written rows always pass it.
+
+**Locking.** Every writer (persist, roll, backfill, purge, policy PUT) takes the policy-head lock
+first, so they serialize. After it come the rolled frontier, canonical raw and the derived tables.
+A transaction's snapshot predates that lock, so any read that decides a write must be current.
+`persist()` therefore evaluates `first_purged_hour` with current reads (`locking=True`, the same
+fact). A real MariaDB race test showed that the earlier snapshot read let a late minute commit a
+partial rebuild over an hour purged while it waited. Backfill discovery may stay a snapshot read
+because its range starts at a current read of the oldest raw minute and purge deletes only a
+prefix.
+
+#### 25.3.3 Checkpoint C — activity read model and resources (DONE)
+
+`pompa/activity_history.py` answers `GET /api/v1/activity` and `GET /api/v1/activity/live` (contract
+in `docs/API.md`). It is read-only: no backfill, repair or rewrite ever happens on an API thread.
+
+**Source per UTC hour.** One `Storage.session()`, one consistent snapshot, chooses exactly one
+source for each examined hour:
+1. **Durable segments**, when present. These are never recomputed from raw, even while raw
+   exists, because they are what the purge proof guarantees and what survives. A durable hour is
+   accepted only when all of the following hold:
+   - every row decodes under a supported rule version;
+   - every row equals `segment_record` of its decoded segment, the exact canonical persisted
+     form, so a duplicate JSON key, other whitespace, key order or number spelling is refused;
+   - the hour's segment minutes sum to exactly its `rollup_1h` `recorded` count. `rebuild_hour`
+     writes both from the same locked minutes, so a missing, extra or forged segment is
+     corruption, never a gap.
+
+   Otherwise the read raises `ActivityRecordInvalid` (HTTP 500), even when the corrupt hour was
+   loaded only as widened evidence. There is no fallback to raw and no repair. An hour with
+   **no** durable rows is not corruption: it continues to rule 2, 3 or 4.
+2. Otherwise, **raw minutes** through `build_segments`: unrolled hours and rolled hours awaiting
+   backfill.
+3. Otherwise, a `rollup_1h` row makes the hour **unavailable**: canonical minutes existed, but their
+   activity was purged before 4C-B. It becomes an `Unavailable` timeline item.
+4. Otherwise nothing was recorded: ordinary gaps.
+
+Each hour has one source, so mixed durable/raw ranges never duplicate a minute. The activity API
+reads the recorder's settled frontier under its lock before opening the storage snapshot. The
+frontier is the minimum of `floor_minute(now)`, the accumulator's open minute and every waiting or
+unacknowledged row minute. All minutes below it have an acknowledged write or can no longer yield
+a row from this process, including permanently dropped/refused rows and settled no-row minutes.
+At and after `closed_until`, even a temporally closed minute awaiting persistence is `open`, never
+a gap. A committed row still protected pending acknowledgement is conservatively `open`; after
+acknowledgement, the subsequently opened DB snapshot can safely expose it. Restart needs no
+persistent frontier: earlier DB history is settled and an actual restart hole remains a gap.
+
+**Read-time boundary.** `Unavailable` and `Boundary.UNAVAILABLE` are read-time only and outside
+`ACTIVITY_RULE_VERSION`. `unavailable` is never `gap` (not recorded), `unknown` (a recorded,
+unclassifiable minute) or `open` (not yet settled). A request whose settled part intersects an
+unavailable hour is refused with `ActivityUnavailable` (HTTP 422), naming the first such hour;
+nothing partial is returned. Unavailable evidence met only while widening outside the range just
+ends a span with an `unavailable` boundary.
+
+**Evidence loading.**
+- **Initial window.** Loading starts at `[floor_hour(from − 1 min), ceil_hour(to + 1 min))`, capped
+  at `ceil_hour(closed_until)`. That already fixes observed starts and stops at both edges.
+- **Widening.** Widening follows only spans that intersect the request. While any such span
+  (activity event, compressor run, off interval or defrost) still ends at the window's edge as
+  `outside_evidence`, the loader adds whole hours on that side. The added chunks grow
+  exponentially: 1 h, 2 h, 4 h, and so on, up to 7 days. The final window may therefore extend
+  beyond the decisive boundary by up to the size of the last chunk.
+- **Stop conditions.** Widening stops at an observed change, `unknown`, a true gap (an unrecorded
+  neighbouring hour), `unavailable`, `open`, or the start of all history.
+- **Cost.** A run or event that intersects the range is therefore returned whole, however long,
+  across UTC hours, midnight and DST, and never as two cycles. Each loaded chunk costs:
+  - one segment range read;
+  - one rollup range read of the `recorded` series;
+  - one raw range read per contiguous run of hours without segments. Alternating durable and
+    non-durable hours can therefore need several raw reads.
+
+  All of these are indexed primary-key range reads. A small range is not a history scan.
+- **Range limit.** A request is at most 31 days and one hour (the longest local month); longer is
+  a `422`, never truncated.
+
+**Projection.** The response reuses the Stage 4C-A spans and `summarize`; there is no second
+formula.
+- **Spans.** Every span object gives its full observed `start`/`end`/`minutes` and, separately,
+  its `overlap_*` with the request, plus `starts_before_range`/`ends_after_range`, both boundaries
+  and `start_observed`/`end_observed`.
+- **Energy.** Energy and paired COP come from `energy_kwh`/`cop` over the full span's segment
+  `Stats`. They are never prorated to the overlap and are `null` when a piece carries no
+  ingredients.
+- **Defrosts** report full and overlap integrated seconds.
+- **Timeline** items are positional `activity` (a maximal event, with its span), `gap`, or
+  `open` (`[max(from, closed_until), to)`).
+- **Additivity.** `*_overlapping` counts stay non-additive. Starts, stops and minute counts add up
+  over any partition of a range, and each span keeps identical full-span facts in every range
+  that contains it.
+
+**Live.** `/api/v1/activity/live` classifies one `Recorder.live` observation, the same lock and
+freshness/provenance rules as `/api/v1/live`, with the version-1 `classify`. Only `mode="live"`
+values are evidence. Retained, stale, absent and disconnected inputs are `NULL`, and the
+classifier's own `NULL` rules decide. It exposes every input's value, mode, receipt time and use.
+It never reads storage, stays available during a database outage and is never persisted. It is
+the current moment, not the last closed history minute.
 
 ### 25.4 Stage 4D — report projections
 

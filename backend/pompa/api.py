@@ -14,7 +14,9 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from . import activity_history
 from . import history as history_engine
+from .activity import ActivityRecordInvalid
 from . import optional_policy
 from .capabilities import capability_dict, effective_capabilities
 from .history_profile import HISTORY_PROFILES, capability_topics, history_profile_dict
@@ -124,6 +126,29 @@ def create_app(recorder: Recorder, storage: Storage, clock: Callable[[], float] 
         if len(request.query_params.getlist("include")) > 1:
             raise _bad("'include' may appear only once")
         return recorder.live(clock, include_readings=include == "readings")
+
+    @app.get("/api/v1/activity/live")
+    def activity_live() -> dict:
+        """Current activity from the in-memory live observation only: no database read."""
+        return activity_history.live_activity(recorder.live(clock))
+
+    @app.get("/api/v1/activity")
+    def activity(from_: str | None = Query(None, alias="from"), to: str | None = Query(None)) -> dict:
+        """Factual activity, compressor runs, off intervals and defrosts over exact ``[from, to)``."""
+        start = _parse_instant("from", from_)
+        end = _parse_instant("to", to)
+        if start >= end:
+            raise _bad("'from' must be earlier than 'to'")
+        try:
+            now, settled_before = recorder.settled_before(clock)
+            return activity_history.query(storage, start, end, now, settled_before=settled_before)
+        except (Unrepresentable, activity_history.ActivityUnavailable) as e:
+            raise HTTPException(status_code=422, detail=str(e)) from None
+        except ActivityRecordInvalid as e:
+            # Stored durable activity is corrupt: never answered from raw instead, never a 422.
+            raise HTTPException(status_code=500, detail=f"stored activity history is inconsistent: {e}") from None
+        except StorageUnavailable as e:
+            raise HTTPException(status_code=503, detail=f"database unavailable: {e}") from None
 
     @app.get("/api/v1/metrics")
     def metrics(request: Request,

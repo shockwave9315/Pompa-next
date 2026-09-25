@@ -11,13 +11,13 @@ HeishaMon MQTT
   → React frontend
 ```
 
-Stages 1–3 and Stage 4A are complete. **Stage 4B — configurable optional history — is complete**
-and owner-validated on CT109; draft PR #7 awaits final review and merge. The backend records
-canonical and selected optional minutes from MQTT into MariaDB, rolls them up hourly, and serves
-live state, capability and metric catalogs, factual status, and 1m/5m/1h/1d/total history; see
-[backend/README.md](backend/README.md). **Stage 4C — operational state, activity, cycles,
-defrost and durable events — is next.** Frontend work remains Stage 5; see
-[the roadmap](docs/ROADMAP.md).
+Stages 1–3, Stage 4A and **Stage 4B — configurable optional history** are complete,
+owner-validated on CT109 and merged. **Stage 4C — operational state, activity, cycles, defrost
+and durable events** is complete and owner-validated on CT109; its PR #8 remains draft for final
+whole-PR review. The backend records canonical and selected optional minutes from MQTT into
+MariaDB, maintains hourly rollups and durable activity segments, and serves live state, catalogs,
+status, history and activity resources; see [backend/README.md](backend/README.md). Stage 4D
+reports are next. Frontend work remains Stage 5; see [the roadmap](docs/ROADMAP.md).
 
 Planned stack: Python 3.12, FastAPI, paho-mqtt, PyMySQL, MariaDB 11.4, React, Vite, and Docker Compose.
 

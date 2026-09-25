@@ -1,4 +1,4 @@
-"""MariaDB storage: canonical history, optional raw history and policy tables.
+"""MariaDB storage: canonical history, optional history, policy and activity segment tables.
 
 No domain calculations live here; rollup contents are computed by
 ``aggregation`` and passed in as plain tuples.
@@ -147,6 +147,28 @@ OPTIONAL_ROLLUP_DDL = (
     ") ENGINE=InnoDB"
 )
 
+# Stage 4C checkpoint B (docs/ARCHITECTURE.md §25.3.2): durable hour-local activity segments.
+# One row per segment; the UTC hour is floor(start_ts), which the bounds check keeps exact. No FK
+# to sample_1m: segments must outlive raw purge. Contents are encoded/validated by
+# ``pompa.activity``; storage only stores them.
+ACTIVITY_SEGMENT = "activity_segment_1h"
+
+ACTIVITY_SEGMENT_DDL = (
+    f"CREATE TABLE IF NOT EXISTS {ACTIVITY_SEGMENT} (\n"
+    "  start_ts         INT UNSIGNED      NOT NULL PRIMARY KEY,\n"
+    "  minutes          TINYINT UNSIGNED  NOT NULL,\n"
+    "  rule_version     SMALLINT UNSIGNED NOT NULL,\n"
+    "  activity         VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,\n"
+    "  compressor       VARCHAR(8)  CHARACTER SET ascii COLLATE ascii_bin NOT NULL,\n"
+    "  defrost_fraction DOUBLE            NULL,\n"
+    "  energy_json      JSON              NOT NULL CHECK (JSON_VALID(energy_json)),\n"
+    "  CONSTRAINT ck_activity_segment_bounds CHECK (start_ts MOD 60 = 0"
+    " AND minutes BETWEEN 1 AND 60 AND start_ts MOD 3600 + minutes * 60 <= 3600),\n"
+    "  CONSTRAINT ck_activity_segment_defrost CHECK"
+    " (defrost_fraction IS NULL OR (defrost_fraction >= 0 AND defrost_fraction <= 1))\n"
+    ") ENGINE=InnoDB"
+)
+
 GENESIS_REVISION_ID = 1
 POLICY_HEAD_ID = 1
 
@@ -251,12 +273,6 @@ class Session:
         self._cur.execute(f"DELETE FROM {OPTIONAL_RAW} WHERE ts >= %s AND ts < %s", (start, end))
         return self._cur.rowcount
 
-    def lock_minute_timestamps(self, start: int, end: int) -> list[int]:
-        """Current, locked canonical minutes in the exact candidate purge range."""
-        self._cur.execute(f"SELECT ts FROM {TABLE} WHERE ts >= %s AND ts < %s"
-                          " ORDER BY ts FOR UPDATE", (start, end))
-        return [int(row[0]) for row in self._cur.fetchall()]
-
     def lock_oldest_minute_ts(self) -> int | None:
         """Current oldest raw minute after the policy-head lock."""
         self._cur.execute(f"SELECT ts FROM {TABLE} ORDER BY ts LIMIT 1 FOR UPDATE")
@@ -307,7 +323,7 @@ class Session:
         row = self._cur.fetchone()
         return None if row is None else int(row[0]) + HOUR
 
-    def first_purged_hour(self, start: int, end: int) -> int | None:
+    def first_purged_hour(self, start: int, end: int, *, locking: bool = False) -> int | None:
         """Lowest UTC hour overlapping ``[start, end)`` whose raw minutes were purged.
 
         ``purged(H)`` is a rollup row for ``H`` and no ``sample_1m`` row inside
@@ -320,8 +336,22 @@ class Session:
 
         Whole overlapped hours are examined, so a partial edge at ``08:30``
         still sees the purged hour starting at ``08:00``.
+
+        ``locking=True`` evaluates the same fact with current reads, for a
+        writer that already holds the policy-head lock: its transaction
+        snapshot predates that lock and may not yet show a purge that
+        committed while it waited. Meant for a few hours, not for long ranges.
         """
         lo, hi = floor_hour(start), ceil_hour(end)
+        if locking:
+            self._cur.execute(f"SELECT hour_ts FROM {ROLLUP} WHERE hour_ts >= %s AND hour_ts < %s"
+                              " ORDER BY hour_ts FOR UPDATE", (lo, hi))
+            for hour in sorted({int(h) for (h,) in self._cur.fetchall()}):
+                self._cur.execute(f"SELECT ts FROM {TABLE} WHERE ts >= %s AND ts < %s"
+                                  " ORDER BY ts LIMIT 1 FOR UPDATE", (hour, hour + HOUR))
+                if self._cur.fetchone() is None:
+                    return hour
+            return None
         # Anti-join, not a correlated NOT EXISTS: both sides are one indexed range scan of the
         # requested span, so the cost follows the span and never the size of the tables.
         self._cur.execute(
@@ -398,6 +428,53 @@ class Session:
                  None if a is None else float(a), None if b is None else float(b),
                  None if c is None else float(c), None if d is None else float(d))
                 for h, sid, selected, known, a, b, c, d in self._cur.fetchall()]
+
+    # ------------------------------------------------------------- activity segments (4C-B)
+
+    def replace_activity_hour(self, hour_ts: int, records: Iterable[tuple]) -> None:
+        """Replace the complete segment set of one UTC hour (within this session's transaction)."""
+        _check_hour(hour_ts)
+        params = list(records)
+        if any(not hour_ts <= r[0] < hour_ts + HOUR for r in params):
+            raise ValueError(f"activity segment outside hour {hour_ts}")
+        self._cur.execute(f"DELETE FROM {ACTIVITY_SEGMENT} WHERE start_ts >= %s AND start_ts < %s",
+                          (hour_ts, hour_ts + HOUR))
+        if params:
+            self._cur.executemany(
+                f"INSERT INTO {ACTIVITY_SEGMENT} (start_ts, minutes, rule_version, activity,"
+                " compressor, defrost_fraction, energy_json) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                params)
+
+    def read_activity_segments(self, start: int, end: int, *, locking: bool = False) -> list[tuple]:
+        """Persisted rows with ``start <= start_ts < end``, ascending; decoded by ``pompa.activity``."""
+        suffix = " FOR UPDATE" if locking else ""
+        self._cur.execute(
+            f"SELECT start_ts, minutes, rule_version, activity, compressor, defrost_fraction,"
+            f" energy_json FROM {ACTIVITY_SEGMENT} WHERE start_ts >= %s AND start_ts < %s"
+            f" ORDER BY start_ts{suffix}", (start, end))
+        return [(int(ts), int(minutes), int(version), activity, compressor,
+                 None if fraction is None else float(fraction), energy)
+                for ts, minutes, version, activity, compressor, fraction, energy in self._cur.fetchall()]
+
+    def unmaterialized_activity_hours(self, start: int, end: int, limit: int) -> list[int]:
+        """Ascending rolled UTC hours in ``[start, end)`` with raw minutes but no activity segment.
+
+        Rolled means a ``rollup_1h`` row exists; a raw hour without one is a
+        canonical anomaly for the purge proof to report, not backfill work. The
+        same bounded shape as ``first_purged_hour``: every side is one indexed
+        range scan of the requested span.
+        """
+        _check_hour(start)
+        self._cur.execute(
+            f"SELECT m.h FROM (SELECT DISTINCT ts - ts MOD {HOUR} AS h FROM {TABLE}"
+            f" WHERE ts >= %s AND ts < %s) AS m"
+            f" JOIN (SELECT DISTINCT hour_ts AS h FROM {ROLLUP}"
+            f" WHERE hour_ts >= %s AND hour_ts < %s) AS r ON r.h = m.h"
+            f" LEFT JOIN (SELECT DISTINCT start_ts - start_ts MOD {HOUR} AS h FROM {ACTIVITY_SEGMENT}"
+            f" WHERE start_ts >= %s AND start_ts < %s) AS a ON a.h = m.h"
+            " WHERE a.h IS NULL ORDER BY m.h LIMIT %s",
+            (start, end, start, end, start, end, limit))
+        return [int(h) for (h,) in self._cur.fetchall()]
 
     # ------------------------------------------------------------- optional history policy
 
@@ -621,6 +698,8 @@ class Storage:
         empty selection, effective from the beginning of time, with the
         singleton head already pointing at it. Canonical ``sample_1m``/
         ``rollup_1h`` schema and data are never touched by this addition.
+        Stage 4C-B adds ``activity_segment_1h`` the same additive way; existing
+        rolled hours are materialized by the recorder's bounded backfill.
         """
         with self._connection() as conn, conn.cursor() as cur:
             cur.execute(create_table_sql())
@@ -640,6 +719,7 @@ class Storage:
             cur.execute(OPTIONAL_POLICY_HEAD_DDL)
             cur.execute(OPTIONAL_RAW_DDL)
             cur.execute(OPTIONAL_ROLLUP_DDL)
+            cur.execute(ACTIVITY_SEGMENT_DDL)
             cur.execute(
                 f"INSERT IGNORE INTO {OPTIONAL_POLICY_REVISION}"
                 " (id, base_revision_id, effective_from_minute, created_at)"

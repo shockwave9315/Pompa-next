@@ -2,9 +2,18 @@
 
 ## Current stage
 
-**Stage 4B — DONE (Checkpoints A–E).** The owner accepted CT109 runtime validation of optional
-history. Stage 4C — operational state, activity, cycles, defrost and durable events — is next.
-Frontend work starts after Stage 4.
+**Stage 4C — operational state, activity, cycles, defrost and durable events — DONE.**
+Checkpoints A (domain truth), B (durable hourly activity segments), C (activity read model and
+API resources) and D (closure and CT109 runtime validation) are complete. Branch
+`stage-4c-activity-cycles` remains in DRAFT PR #8. The owner's whole-PR adversarial review is
+complete; its F2 correction awaits targeted final review. Frontend work starts after Stage 4.
+
+The owner-approved F2 merge hardening makes `/activity` hold the unacknowledged recorder tail
+`open` until its historical outcome settles, preventing transient false gaps before a tick or
+during a write backlog.
+
+Stage 4B — DONE and merged to `main` (PR #7, merge commit
+`dfd225d2a8fe35563cd1f684efb81cf91b532a2f`).
 
 Stage 4A — DONE and merged to `main` (PR #6, merge commit
 `a34aaead89fae3359769cf2737aab42fd274d145`).
@@ -73,8 +82,7 @@ expected unrecorded partial minute. No optional capability was persisted.
 ## Stage 4B
 
 **Checkpoints A (architecture/contract), B (policy foundation), C (raw recording), D
-(durable optional history), and E (runtime validation) — DONE.**
-Branch `stage-4b-optional-history`, draft PR #7, not merged.
+(durable optional history), and E (runtime validation) — DONE.** Merged to `main` (PR #7).
 
 ### Implemented
 
@@ -172,13 +180,145 @@ TOP66. Their sentinel/zero observations on one K-series unit do not establish gl
 rules. No selection cap below 15 is justified. Keep shared `STALE_AFTER_SECONDS=600` and
 `RETENTION_1M_DAYS=365`; future list growth or retention changes need new evidence.
 
+## Stage 4C
+
+Owner-accepted direction: durable per-hour activity segments (option B), materialized by the
+existing `persist()` → `rebuild_hour()` path in checkpoint B; events, compressor runs, starts,
+intervals, continuation and range projections are derived on read. Legacy smoothing, NULL-as-off
+compressor behavior and its asymmetric midnight continuation are deliberately not preserved.
+
+### Checkpoint A — domain truth (DONE)
+
+- Pure `pompa/activity.py` (no storage) implements `docs/ARCHITECTURE.md` §25.3.1:
+  per-minute classification, hour-local `ActivitySegment`s, explicit `Gap`s, activity events,
+  observed compressor runs, off intervals, individual defrosts, evidence-based range projection
+  and a factual summary, under `ACTIVITY_RULE_VERSION = 1`.
+- Review hardening kept the owner-approved classifier:
+  - defrost `NULL`, heat-pump state `NULL` with the compressor off, and an unresolved power side
+    all stay `unknown`
+  - a fractional heat-pump state with the compressor off is `idle`
+- Hardening changes:
+  - an independent literal version-1 golden, with a drift self-test
+  - defrost edges proven by the defrost signal itself
+  - explicit non-additive `*_overlapping` counts
+  - `segment_rule_version` naming
+  - explicit evidence-window fields and contract
+  - a real-ingest fractional TOP0 test
+- `backend/tests/test_activity.py` covers the classification matrix and golden version-1
+  meaning, no smoothing around former legacy thresholds, start/end evidence against
+  off/unknown/gap/window/open neighbours, cross-hour runs built from separately built hours,
+  midnight continuation/stop/gap/unknown/restart/defrost, Warsaw 23 h and 25 h days, fractional
+  defrost from the real ingest/accumulator (165 s) with every minute clip exact, an unobservable
+  short stop across a minute boundary, the power tail after a CO run, energy/paired-COP
+  ingredients against the canonical history fold, and a minute-by-minute brute-force reference.
+
+### Checkpoint B — durable hourly activity segments (DONE)
+
+- The additive `activity_segment_1h` table (one row per hour-local segment, rule version, exact
+  defrost fraction, deterministic energy `Stats` JSON; no FK to raw) is created by ordinary
+  `ensure_schema()`. See `docs/ARCHITECTURE.md` §25.3.2.
+- `rebuild_hour()` replaces canonical rollup, optional rollup and activity segments of one hour
+  in one transaction, so forward roll and late-write repair materialize activity atomically.
+- A bounded backfill materializes hours rolled before this checkpoint, with no new watermark.
+  Purge waits for it and proves every candidate hour's segments field by field against the
+  locked raw minutes before deleting anything. Hours purged before 4C-B are never fabricated.
+- A real MariaDB race test found that `persist()` judged "already purged" from a snapshot older
+  than its policy-head lock. A late minute racing a purge could then rebuild a purged hour from
+  itself alone. `persist()` now evaluates `first_purged_hour` with current reads. Production had
+  no concurrent path, because persist and purge share the recorder thread.
+- Final hardening:
+  - Purge also requires every stored row to be exactly the canonical `segment_record`, including
+    the `energy_json` text. A duplicate JSON key had let MariaDB and Python read one row
+    differently while the decoded-values proof passed.
+  - Hours whose raw was purged before 4C-B are documented and tested as "activity unavailable",
+    distinct from never-recorded hours. Checkpoint C must keep that distinction on reads.
+- `backend/tests/test_activity_durable.py` covers:
+  - schema, round trip and fail-closed decoding
+  - rebuild, forward roll, late writes, lost acknowledgement and rollback
+  - backfill, including pre-4C purged history as "unavailable" rather than "not recorded"
+  - every purge-proof corruption class, including non-canonical but equivalent JSON
+  - post-purge equivalence of timeline, runs, defrosts, gaps, energy and paired COP
+  - cross-hour and Warsaw-midnight stitching
+  - four MariaDB concurrency races
+
+### Checkpoint C — activity read model and resources (DONE)
+
+- `GET /api/v1/activity` (exact `[from, to)`, at most 31 days and one hour) and
+  `GET /api/v1/activity/live`. The contract is in `docs/API.md`; semantics are in
+  `docs/ARCHITECTURE.md` §25.3.3.
+- One snapshot and one source per UTC hour: durable segments, else raw, else "unavailable" (a
+  rollup without raw or segments), else not recorded. A range intersecting unavailable history is
+  a `422`. Corrupt durable rows are a `500`, never answered from raw. Reads never write.
+- The backend widens evidence until every span intersecting the range reaches a decisive
+  boundary, so runs, events and defrosts are returned whole with separate overlap facts. The
+  read-time `unavailable` boundary stays distinct from gap, unknown and open.
+- Full-span energy and paired COP for runs and events come from the existing algebra.
+  `*_overlapping` counts stay non-additive.
+- Live activity classifies only `mode="live"` inputs from the `/api/v1/live` observation. It does
+  not read the database.
+- `backend/tests/test_activity_api.py` covers:
+  - source equivalence: raw, mixed, durable, awaiting backfill, after purge
+  - unavailable inside, before and after the range
+  - open and unclosed minutes
+  - evidence widening: a 50-hour run, minimal windows
+  - the cycle and defrost matrices
+  - Warsaw midnight and DST days through the API
+  - a literal response contract, and 400/422/500/503
+  - live classification, including retained, stale and disconnected inputs and a DB outage
+  - a partition property: additive facts add up and spans stay identical
+- The existing frozen-path tests now include the two additive paths. Every earlier response is
+  unchanged.
+- Final hardening from the independent review:
+  - A durable hour is read only when every row is valid and in exact canonical persisted form,
+    and its segment minutes equal the hour's recorded canonical minutes. Otherwise the request
+    returns 500, with no raw fallback.
+  - Before this, a deleted or forged durable segment turned into a fake gap or a fake minute.
+    A duplicate-key `energy_json` row also passed.
+  - Record validation also refuses `-0.0`, which the application never writes and a re-encoding
+    check alone cannot detect.
+  - Documentation of widening overshoot and raw read counts is corrected.
+
+### Checkpoint D — accepted CT109 runtime validation (DONE)
+
+- The owner upgraded CT109 from Stage 4B head `730e0470387f2614efff70bda43dfb978767a807`
+  to Stage 4C head `7d6757028ff56065631263ac765565d30887817d`. The backend image's
+  activity, activity-history, storage, recorder and API source hashes matched that checkout.
+  Health, MQTT and MariaDB recovered; parse rejects, clock steps, recorder queues, rollup/purge
+  errors and the backend log error scan were all zero or clear.
+- Deployment added only `activity_segment_1h`; all existing table definitions matched before and
+  after. Normal bounded backfill reduced 116 rolled/raw hours still missing activity at the first
+  poll to zero. Logs show six batches of 24, 24, 24, 24, 24 and 20 hours: 140 materialized hours.
+  The final audit found 140 rolled/raw and durable hours, 168 durable segments, no minute-count
+  mismatch, missing eligible hour or orphan, and only rule version 1. One raw hour without a
+  rollup was the current unrolled hour. No activity-unavailable hour existed in this retained
+  history, so CT109 did not exercise that 422 path; local tests cover it.
+- An independent fold of real raw minutes for 2026-09-24 08:00–09:00 UTC produced exactly the
+  stored durable segment record (60 raw and 60 recorded minutes). `/activity/live` returned
+  `unknown` activity and compressor with retained classifier inputs; the literal classifier
+  agreed, correctly refusing to treat retained values as current evidence.
+- The recent 11-minute activity query accounted for 10 recorded and one gap minute. A real
+  38-minute observed compressor run crossed 14:00 UTC as one run with a 20-minute query overlap
+  and full-span energy/COP fields. The 24-hour query accounted for 1,439 recorded minutes and one
+  gap, two observed starts/stops, two complete 38-minute runs and one exact 774-minute off
+  interval. No defrost occurred in this window; defrost semantics remain covered by local tests.
+- The closed 2026-09-19 12:00–13:00 UTC `/history` response matched byte for byte before and
+  after deployment (SHA256
+  `12868d5f376a47eb3afadecf7985086c880e18962107dd4041a1f6a92ac91487`); default
+  health/live/metrics/status shapes were unchanged. Deployment left one expected unrecorded
+  08:06 UTC partial minute, preserved earlier rows and resumed recording at 08:07, with no
+  fabricated or duplicate minute.
+- Final local validation at the closure head: Stage 4C tests 307 passed / 94 skipped without
+  MariaDB and 401 passed with MariaDB 11.4; affected suites 450 passed / 197 skipped without
+  MariaDB; full backend 913 passed / 277 skipped without MariaDB and 1,190 passed with MariaDB.
+  The backend Docker image built, and `git diff --check` passed.
+
 ## Out of scope
 
-- Events/activity/cycles, reports, SET publishing and frontend.
+- Stage 4D reports, SET publishing and frontend.
 - Frontend and legacy compatibility or historical migration.
 - Changing the 21 canonical metric semantics, Stage 1–4A history invariants, or the 365-day
   default raw retention.
 
 ## Next
 
-Stage 4C — operational state, activity, cycles, defrost and durable events.
+Stage 4D — reports and product analytics projections, as defined in `docs/ROADMAP.md`.

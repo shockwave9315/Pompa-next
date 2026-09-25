@@ -36,13 +36,19 @@ Rollup and purge (after a tick whose flush fully succeeded):
 * Closed hours are rolled in ascending order, one transaction per hour, so
   ``rolled_until = MAX(hour_ts) + 1 h`` bounds a contiguous rolled range.
   Raw minutes at or above it are simply not rolled yet.
+* Every rebuilt hour also replaces its durable Stage 4C activity segments in
+  the same transaction. Rolled hours recorded before those segments existed are
+  materialized by a bounded backfill through the same ``rebuild_hour``; purge
+  waits for it in this process and in any case proves the segments first.
 * Purge deletes whole hours below ``min(purge_cutoff, oldest pending minute's
-  hour)`` and only after proving, per hour, that the rollup accounts for every
-  stored minute, and that no candidate canonical minute was under optional
-  selection. Any doubt deletes nothing. The raw evidence of an hour that a
-  pending minute can still enter is therefore never purged before its rebuild.
-  That proof is also what lets a surviving rollup row stand as evidence of
-  deletion, which is how ``Session.first_purged_hour`` answers every path.
+  hour)`` and only after proving, per hour, that the canonical rollup accounts
+  for every stored minute, that the optional rollup equals the fold of its raw
+  and policy evidence, and that the stored activity segments equal the segments
+  of the locked raw minutes. Any doubt deletes nothing. The raw evidence of an
+  hour that a pending minute can still enter is therefore never purged before
+  its rebuild. That proof is also what lets a surviving rollup row stand as
+  evidence of deletion, which is how ``Session.first_purged_hour`` answers every
+  path.
 """
 
 from __future__ import annotations
@@ -56,6 +62,7 @@ from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
 
+from .activity import ActivityRecordInvalid, build_segments, decode_segments, segment_record
 from .aggregation import (RECORDED, SERIES, OptionalHistoryInconsistent, OptionalStats,
                           fold_minutes, fold_optional_minutes)
 from .ingest import LWT_OFFLINE, Ingest, PhysicalReading
@@ -69,6 +76,8 @@ from .timegrid import HOUR, floor_hour, purge_cutoff
 log = logging.getLogger(__name__)
 
 ROLL_HOURS_PER_TICK = 24
+ACTIVITY_BACKFILL_HOURS_PER_STEP = 24
+ACTIVITY_BACKFILL_SCAN_SECONDS = 7 * 24 * HOUR  # raw span one backfill discovery query examines
 PURGE_HOURS_PER_STEP = 24  # at most 1440 minute rows deleted per step
 PURGE_INTERVAL_SECONDS = HOUR
 MAINTENANCE_RETRY_SECONDS = 60
@@ -141,10 +150,12 @@ def _fold_optional_hour(session: Session, hour_ts: int, minutes: list[int],
 
 
 def rebuild_hour(session: Session, hour_ts: int) -> None:
-    """Atomically replace canonical and complete optional rollups for a stored hour.
+    """Atomically replace canonical rollup, complete optional rollup and activity segments.
 
-    Only ever called for an hour that stores minutes: replacing a rolled hour
-    with an empty fold would delete evidence instead of correcting it.
+    All three come from the same locked canonical minutes of this one UTC hour,
+    in the caller's transaction, so they commit together or not at all. Only
+    ever called for an hour that stores minutes: replacing a rolled hour with
+    an empty fold would delete evidence instead of correcting it.
     """
     head_id = session.lock_policy_head()
     rows = session.read_minutes(hour_ts, hour_ts + HOUR, locking=True)
@@ -155,6 +166,7 @@ def rebuild_hour(session: Session, hour_ts: int) -> None:
     session.replace_rollup_hour(hour_ts, [(k, s.n, s.sum, s.min, s.max, s.last)
                                           for k in SERIES if (s := folded.get(k)) is not None])
     session.replace_optional_rollup_hour(hour_ts, _optional_rollup_values(optional))
+    session.replace_activity_hour(hour_ts, [segment_record(seg) for seg in build_segments(rows)])
 
 
 def persist(storage: Storage, rows: list[RecordedMinute]) -> None:
@@ -176,7 +188,8 @@ def persist(storage: Storage, rows: list[RecordedMinute]) -> None:
         rolled_until = s.lock_rolled_until()
         touched = (sorted({floor_hour(r.ts) for r in rows if r.ts < rolled_until})
                   if rolled_until is not None else [])
-        refused = [h for h in touched if s.first_purged_hour(h, h + HOUR) is not None]
+        # Current reads: a purge may have committed while this transaction waited for the head lock.
+        refused = [h for h in touched if s.first_purged_hour(h, h + HOUR, locking=True) is not None]
         if refused:
             raise RebuildRefused(
                 f"hour(s) {', '.join(iso_utc(h) for h in refused)} are rolled but their raw evidence"
@@ -210,13 +223,48 @@ def roll_next_hour(storage: Storage, closed_before: int) -> int | None:
         return floor_hour(first)
 
 
+def backfill_activity_step(storage: Storage, scan_from: int, max_hours: int) -> tuple[int, list[int], bool]:
+    """Materialize activity for rolled hours that store raw minutes but no segments yet.
+
+    Such hours exist only where rolling happened before Stage 4C-B, so no
+    watermark records them: ``Session.unmaterialized_activity_hours`` derives
+    them from the tables. Each is rebuilt through ``rebuild_hour``, so its
+    canonical, optional and activity representations stay one atomic result.
+    Hours whose raw was already purged have no raw minutes and are never
+    candidates: activity is never fabricated for them.
+
+    ``scan_from`` is an in-memory scan hint only. Returns ``(next scan_from,
+    rebuilt hours, done)``; ``done`` means no rolled hour at or above
+    ``scan_from`` lacks segments.
+    """
+    with storage.session() as s:
+        s.lock_policy_head()
+        rolled_until = s.lock_rolled_until()
+        first = s.lock_first_minute_at_or_after(scan_from)
+        if rolled_until is None or first is None or first >= rolled_until:
+            return scan_from, [], True
+        start = floor_hour(first)
+        end = min(rolled_until, start + ACTIVITY_BACKFILL_SCAN_SECONDS)
+        # A snapshot read, older than the head lock. Safe: ``start`` is a current read of the
+        # oldest raw minute and purge deletes only a prefix, so nothing purged meanwhile is in
+        # range; an hour materialized meanwhile is only rebuilt again, idempotently.
+        hours = s.unmaterialized_activity_hours(start, end, max_hours)
+        for hour_ts in hours:
+            rebuild_hour(s, hour_ts)
+        if len(hours) == max_hours:
+            return hours[-1] + HOUR, hours, False
+        return end, hours, end >= rolled_until
+
+
 def purge_step(storage: Storage, now: float, retention_days: int, pending_from: int | None,
                max_hours: int) -> tuple[int | None, int, bool]:
     """Delete at most ``max_hours`` whole hours of raw minutes below the safe cutoff.
 
     Returns ``(cutoff, deleted rows, more to delete)``; ``cutoff`` is ``None``
     when nothing may be purged. Raises ``PurgeRefused`` (deleting nothing)
-    when either canonical or optional rollup fails its raw-evidence proof.
+    when the canonical rollup, optional rollup or activity segments fail their
+    raw-evidence proof. Lock order is the one every writer uses: policy head,
+    rolled frontier, canonical raw, then derived tables.
     """
     with storage.session() as s:
         head_id = s.lock_policy_head()
@@ -230,7 +278,8 @@ def purge_step(storage: Storage, now: float, retention_days: int, pending_from: 
             return cutoff, 0, False
         first = floor_hour(oldest)
         end = min(cutoff, first + max_hours * HOUR)
-        candidates = s.lock_minute_timestamps(first, end)
+        locked_rows = s.read_minutes(first, end, locking=True)
+        candidates = [ts for ts, _ in locked_rows]
         counts: dict[int, int] = {}
         for ts in candidates:
             hour = floor_hour(ts)
@@ -259,8 +308,40 @@ def purge_step(storage: Storage, now: float, retention_days: int, pending_from: 
                 raise PurgeRefused("optional rollup does not match selected/known raw evidence")
         except OptionalHistoryInconsistent as e:
             raise PurgeRefused(f"optional raw evidence is inconsistent: {e}") from e
+        _prove_activity(s, locked_rows, first, end)
         s.delete_optional_minutes(first, end)
         return cutoff, s.delete_minutes_before(end), end < cutoff
+
+
+def _prove_activity(session: Session, rows: list, first: int, end: int) -> None:
+    """Stored activity rows must be exactly the canonical rows of the locked raw minutes, per hour.
+
+    Two checks, both required. Every stored row must decode as valid version-1
+    truth equal to ``build_segments`` of the hour's raw minutes (start, minutes,
+    activity, compressor, defrost fraction, every energy statistic). And every
+    stored row must be the exact persisted form ``segment_record`` writes, down
+    to the ``energy_json`` text: JSON that decodes to the same Python values
+    (a duplicate key, other whitespace, key order or number spelling) can mean
+    something else to another reader, e.g. MariaDB's ``JSON_EXTRACT`` takes the
+    first duplicate where Python takes the last. Raw is the only source that
+    could ever repair either, so any difference deletes nothing.
+    """
+    records = session.read_activity_segments(first, end, locking=True)
+    try:
+        stored = decode_segments(records)
+    except ActivityRecordInvalid as e:
+        raise PurgeRefused(f"stored activity segments are invalid: {e}") from e
+    for hour_ts in range(first, end, HOUR):
+        expected = build_segments([r for r in rows if hour_ts <= r[0] < hour_ts + HOUR])
+        actual = [seg for seg in stored if hour_ts <= seg.start < hour_ts + HOUR]
+        if actual != expected:
+            raise PurgeRefused(f"activity segments of hour {iso_utc(hour_ts)} do not match its raw minutes"
+                               f" ({len(actual)} stored, {len(expected)} expected)")
+        # MariaDB returns energy_json byte for byte; a DOUBLE cannot hold a distinct -0.0.
+        if [tuple(r) for r in records if hour_ts <= r[0] < hour_ts + HOUR] != [
+                segment_record(seg) for seg in expected]:
+            raise PurgeRefused(f"activity segments of hour {iso_utc(hour_ts)} are not in their canonical"
+                               " persisted form")
 
 
 def physical_reading_dict(reading: PhysicalReading, *, now: float, connected: bool,
@@ -317,6 +398,12 @@ class Recorder:
         self.db_last_error_at: float | None = None
         self.retention_days = retention_days  # sample_1m; 0 disables purge
         self._roll_done_key: tuple[int, int] | None = None
+        # Stage 4C-B backfill of rolled hours recorded before activity segments existed. In memory
+        # only: derived again from the tables after every process start.
+        self._activity_scan_from = 0
+        self._activity_backfilled = False
+        self._activity_retry_at = float("-inf")
+        self.activity_backfill_error: str | None = None
         self.last_rolled_hour: int | None = None
         self.last_rolled_at: float | None = None
         self.rollup_error: str | None = None
@@ -354,6 +441,22 @@ class Recorder:
             self.ingest.message(topic, payload, retained, t)
 
     # ------------------------------------------------------------- recorder tick
+
+    def settled_before(self, clock: Callable[[], float]) -> tuple[float, int]:
+        """Observe now and the first minute whose historical outcome is not settled.
+
+        A minute below this frontier has either been acknowledged as written or can no longer
+        produce a row. The accumulator's open minute and all waiting or unacknowledged rows
+        remain beyond it. Call this before opening a history database snapshot.
+        """
+        with self._lock:
+            now = clock()
+            settled = min(floor_minute(now), self.accumulator.minute_start)
+            for row in self._protected:
+                settled = min(settled, row.ts)
+            for row in self._waiting:
+                settled = min(settled, row.ts)
+            return now, settled
 
     def tick(self, now: float) -> None:
         """Close due minutes, bootstrap the schema if needed, flush, then roll up and purge.
@@ -456,7 +559,9 @@ class Recorder:
             pending = [r.ts for r in self._protected] + [r.ts for r in self._waiting]
             written = self.rows_written
         self._roll(now, closed_before, written)
-        self._purge(now, min(pending) if pending else None)
+        self._backfill_activity(now)
+        if self._activity_backfilled:  # purge never outruns activity materialization
+            self._purge(now, min(pending) if pending else None)
 
     def _roll(self, now: float, closed_before: int, written: int) -> None:
         """Roll closed hours in ascending order; stop at the first failure (contiguity)."""
@@ -478,6 +583,25 @@ class Recorder:
         if self.rollup_error is not None:
             log.info("rollup succeeded again")
         self.rollup_error = None
+
+    def _backfill_activity(self, now: float) -> None:
+        """One bounded step per tick until no rolled raw hour lacks activity segments."""
+        if self._activity_backfilled or now < self._activity_retry_at:
+            return
+        try:
+            scan_from, hours, done = backfill_activity_step(
+                self.storage, self._activity_scan_from, ACTIVITY_BACKFILL_HOURS_PER_STEP)
+        except (StorageUnavailable, OptionalHistoryInconsistent) as e:
+            if self.activity_backfill_error is None:
+                log.warning("activity backfill failed, retried later: %s", e)
+            self.activity_backfill_error = str(e)
+            self._activity_retry_at = now + MAINTENANCE_RETRY_SECONDS
+            return
+        self.activity_backfill_error = None
+        self._activity_scan_from, self._activity_backfilled = scan_from, done
+        if hours:
+            log.info("materialized activity segments for %d rolled hour(s) up to %s",
+                     len(hours), iso_utc(hours[-1]))
 
     def _purge(self, now: float, pending_from: int | None) -> None:
         """Hourly, bounded, fail-closed deletion of raw minutes past retention."""

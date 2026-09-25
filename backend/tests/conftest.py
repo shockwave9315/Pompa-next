@@ -92,6 +92,7 @@ class FakeSession:
         self.optional_head = storage.optional_head
         self.optional_raw = dict(storage.optional_raw)
         self.optional_rollup = dict(storage.optional_rollup)
+        self.activity = dict(storage.activity)  # start_ts -> persisted activity segment row
 
     def upsert_minutes(self, rows):
         for r in rows:
@@ -127,9 +128,6 @@ class FakeSession:
             del self.optional_raw[t]
         return len(doomed)
 
-    def lock_minute_timestamps(self, start, end):
-        return sorted(t for t in self.rows if start <= t < end)
-
     def lock_oldest_minute_ts(self):
         return min(self.rows) if self.rows else None
 
@@ -156,7 +154,7 @@ class FakeSession:
 
     lock_rolled_until = rolled_until
 
-    def first_purged_hour(self, start, end):
+    def first_purged_hour(self, start, end, *, locking=False):
         """Same fact as MariaDB: whole overlapped hours, rollup present, no raw inside."""
         lo, hi = start - start % 3600, -(-end // 3600) * 3600
         for h in sorted({h for h, _ in self.rollup if lo <= h < hi}):
@@ -182,6 +180,27 @@ class FakeSession:
     def read_optional_rollup(self, start, end, series_ids=None, *, locking=False):
         return [(h, sid, *v) for (h, sid), v in sorted(self.optional_rollup.items())
                 if start <= h < end and (series_ids is None or sid in series_ids)]
+
+    def replace_activity_hour(self, hour_ts, records):
+        assert hour_ts % 3600 == 0
+        records = list(records)
+        if any(not hour_ts <= r[0] < hour_ts + 3600 for r in records):
+            raise ValueError(f"activity segment outside hour {hour_ts}")
+        for key in [k for k in self.activity if hour_ts <= k < hour_ts + 3600]:
+            del self.activity[key]
+        for record in records:
+            assert record[0] not in self.activity
+            self.activity[record[0]] = tuple(record)
+
+    def read_activity_segments(self, start, end, *, locking=False):
+        return [r for t, r in sorted(self.activity.items()) if start <= t < end]
+
+    def unmaterialized_activity_hours(self, start, end, limit):
+        assert start % 3600 == 0
+        rolled = {h for h, _ in self.rollup}
+        raw = sorted({t - t % 3600 for t in self.rows if start <= t < end} & rolled)
+        have = {t - t % 3600 for t in self.activity if start <= t < end}
+        return [h for h in raw if h not in have][:limit]
 
     def read_rollup(self, start, end, series):
         return [(h, s, *v) for (h, s), v in sorted(self.rollup.items()) if start <= h < end and s in series]
@@ -292,6 +311,7 @@ class FakeStorage:
         self.optional_head = 1
         self.optional_raw = {}
         self.optional_rollup = {}
+        self.activity = {}  # start_ts -> persisted activity segment row (Stage 4C-B)
         self._next_optional_series_id = 1
         self._next_optional_revision_id = 2
 
@@ -322,6 +342,7 @@ class FakeStorage:
         self.optional_head = tx.optional_head
         self.optional_raw = tx.optional_raw
         self.optional_rollup = tx.optional_rollup
+        self.activity = tx.activity
 
     @contextmanager
     def session(self):
@@ -433,6 +454,7 @@ def mariadb():
     )
     with storage._connection() as conn, conn.cursor() as cur:
         # FK-safe drop order: tables that reference another Stage 4B policy table drop first.
+        cur.execute("DROP TABLE IF EXISTS activity_segment_1h")
         cur.execute("DROP TABLE IF EXISTS optional_rollup_1h")
         cur.execute("DROP TABLE IF EXISTS optional_policy_member")
         cur.execute("DROP TABLE IF EXISTS optional_policy_head")
