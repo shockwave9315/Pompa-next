@@ -3,8 +3,8 @@
 ## Current stage
 
 **Stage 4C — operational state, activity, cycles, defrost and durable events — IN PROGRESS.**
-Checkpoints A (domain truth) and B (durable hourly activity segments) are complete; checkpoint C
-(activity/timeline/cycles API resources) is next.
+Checkpoints A (domain truth), B (durable hourly activity segments) and C (activity read model and
+API resources) are complete; checkpoint D (closure and CT109 runtime validation) is next.
 Branch `stage-4c-activity-cycles`, one DRAFT PR for checkpoints A–D. Frontend work starts after
 Stage 4.
 
@@ -237,19 +237,45 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
   - cross-hour and Warsaw-midnight stitching
   - four MariaDB concurrency races
 
-### Remaining checkpoints
+### Checkpoint C — activity read model and resources (DONE)
 
-- C: activity/timeline/cycles API resources, their evidence-loading policy, and a read form that
-  keeps "activity unavailable" (pre-4C-B purged hours) distinct from "not recorded".
+- `GET /api/v1/activity` (exact `[from, to)`, at most 31 days and one hour) and
+  `GET /api/v1/activity/live`. The contract is in `docs/API.md`; semantics are in
+  `docs/ARCHITECTURE.md` §25.3.3.
+- One snapshot and one source per UTC hour: durable segments, else raw, else "unavailable" (a
+  rollup without raw or segments), else not recorded. A range intersecting unavailable history is
+  a `422`. Corrupt durable rows are a `500`, never answered from raw. Reads never write.
+- The backend widens evidence until every span intersecting the range reaches a decisive
+  boundary, so runs, events and defrosts are returned whole with separate overlap facts. The
+  read-time `unavailable` boundary stays distinct from gap, unknown and open.
+- Full-span energy and paired COP for runs and events come from the existing algebra.
+  `*_overlapping` counts stay non-additive.
+- Live activity classifies only `mode="live"` inputs from the `/api/v1/live` observation. It does
+  not read the database.
+- `backend/tests/test_activity_api.py` covers:
+  - source equivalence: raw, mixed, durable, awaiting backfill, after purge
+  - unavailable inside, before and after the range
+  - open and unclosed minutes
+  - evidence widening: a 50-hour run, minimal windows
+  - the cycle and defrost matrices
+  - Warsaw midnight and DST days through the API
+  - a literal response contract, and 400/422/500/503
+  - live classification, including retained, stale and disconnected inputs and a DB outage
+  - a partition property: additive facts add up and spans stay identical
+- The existing frozen-path tests now include the two additive paths. Every earlier response is
+  unchanged.
+
+### Remaining checkpoint
+
 - D: tests/docs closure and CT109 runtime validation.
 
 ## Out of scope
 
-- Stage 4C checkpoints C–D until their turn; reports, SET publishing and frontend.
+- Stage 4C checkpoint D until its turn; reports, SET publishing and frontend.
 - Frontend and legacy compatibility or historical migration.
 - Changing the 21 canonical metric semantics, Stage 1–4A history invariants, or the 365-day
   default raw retention.
 
 ## Next
 
-Stage 4C checkpoint C — activity/timeline/cycles API resources.
+Stage 4C checkpoint D — closure and CT109 runtime validation.

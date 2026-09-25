@@ -5,7 +5,8 @@ physical-reading forms described below while preserving those default response s
 checkpoint B adds one opt-in metrics form and one new DB-backed endpoint pair for the
 optional-history policy. Checkpoint C adds internal raw minute recording. Checkpoint D adds
 persisted optional-series discovery and explicit optional history selectors; default responses
-remain canonical. The owner validated these Stage 4B endpoints on CT109.
+remain canonical. The owner validated these Stage 4B endpoints on CT109. Stage 4C checkpoint C adds
+one range activity resource and one current activity resource; every earlier response is unchanged.
 
 Domain rules behind it are in [`ARCHITECTURE.md`](ARCHITECTURE.md). This file describes only what
 the HTTP surface promises.
@@ -22,8 +23,10 @@ the HTTP surface promises.
 | `GET /api/v1/optional-history/selection` | Active-vs-pending optional-history selection | no | yes |
 | `PUT /api/v1/optional-history/selection` | Replace the desired optional-history selection | no | yes |
 | `GET /api/v1/optional-history/series` | Discover persisted optional historical meanings | no | yes |
+| `GET /api/v1/activity` | Activity timeline, compressor runs, off intervals, defrosts and summary over `[from, to)` | no | yes |
+| `GET /api/v1/activity/live` | Current activity from the in-memory live observation | no | no |
 
-The application contract exposes the eight product API endpoints above; FastAPI may additionally
+The application contract exposes the ten product API endpoints above; FastAPI may additionally
 expose its standard documentation/OpenAPI routes (`/docs`, `/redoc`, `/openapi.json`). `/api/v1` is
 a fresh namespace, not inherited legacy versioning.
 
@@ -314,8 +317,9 @@ bucket.
 | Status | When |
 |---|---|
 | `400` | Malformed parameters: missing `from`/`to`, unparseable or naive timestamps, non-minute alignment, `from >= to`, unknown bucket, unknown or duplicate series, invalid or repeated `include`. |
-| `422` | Well-formed but unrepresentable: more than 3000 buckets, a range or partial edge hour whose raw minutes were provably purged, an optional mean/energy bucket whose known-value sum cannot fit in binary DOUBLE, or instants outside 1970–2100. |
-| `503` | The database is unavailable for `/api/v1/history`, `/api/v1/optional-history/selection`, or `/api/v1/optional-history/series`. |
+| `422` | Well-formed but unrepresentable: more than 3000 buckets, a range or partial edge hour whose raw minutes were provably purged, an optional mean/energy bucket whose known-value sum cannot fit in binary DOUBLE, instants outside 1970–2100, an activity range longer than 31 days and one hour, or an activity range that intersects activity-unavailable history. |
+| `500` | `/api/v1/activity` only: stored durable activity rows are inconsistent. They are never answered from raw instead, and this is never a `422`. |
+| `503` | The database is unavailable for `/api/v1/history`, `/api/v1/optional-history/selection`, `/api/v1/optional-history/series` or `/api/v1/activity`. |
 
 The body is `{"detail": "…"}`. `422` for purged raw means the backend knows the minutes existed and
 were physically deleted — it is never a consequence of a range simply being old. A range that was
@@ -327,10 +331,10 @@ truncated range — the request is refused instead.
 
 ## Subsystem independence
 
-| Condition | `/health` | `/api/v1/live` | `/api/v1/metrics` | `/api/v1/status` | `/api/v1/history` | `/api/v1/optional-history/selection` |
-|---|---|---|---|---|---|---|
-| MariaDB unavailable | 200 | 200 | 200 | 200, `database.available=false` | 503 | 503 |
-| MQTT disconnected | 200 | 200, no confirmed metrics, retained only where factual | 200 | 200, `mqtt.connected=false`, `mqtt.alive=false` | 200 from persisted data | 200 (selection needs no MQTT) |
+| Condition | `/health` | `/api/v1/live` | `/api/v1/metrics` | `/api/v1/status` | `/api/v1/history` | `/api/v1/optional-history/selection` | `/api/v1/activity` | `/api/v1/activity/live` |
+|---|---|---|---|---|---|---|---|---|
+| MariaDB unavailable | 200 | 200 | 200 | 200, `database.available=false` | 503 | 503 | 503 | 200, unchanged result |
+| MQTT disconnected | 200 | 200, no confirmed metrics, retained only where factual | 200 | 200, `mqtt.connected=false`, `mqtt.alive=false` | 200 from persisted data | 200 (selection needs no MQTT) | 200 from persisted data | 200, `activity="unknown"` |
 
 One subsystem's failure is never turned into process failure or into a global verdict.
 
@@ -416,9 +420,9 @@ paths remain unchanged. `/status` keeps its Stage 3 shape and `uncatalogued_topi
 still list known non-core capability topics. Default `/history` remains canonical; explicit
 Stage 4B selectors are documented below.
 
-Activity/events, reports and commands belong to later Stage 4 checkpoints. This document lists no
-endpoint or response for them until implemented and contract-tested. The frontend starts only
-after the complete product-backend contract is documented.
+Reports and commands belong to later Stage 4 checkpoints. This document lists no endpoint or
+response for them until implemented and contract-tested. The frontend starts only after the
+complete product-backend contract is documented.
 
 ## Stage 4B optional-history selection
 
@@ -537,3 +541,102 @@ the head does not move, and the old row is never mutated. An *ambiguous retry* (
 `base_revision`, same resolved identity set) is answered `200`/`idempotent_replay: true` only if
 every one of those already-selected series still matches current code; if the stored definition
 was altered in the meantime, the retry also fails `409` rather than falsely reporting success.
+
+## Stage 4C activity
+
+Domain rules are in `ARCHITECTURE.md` §25.3–25.3.3. Both resources expose measured facts only.
+There is no cycle quality, short-cycling verdict or threshold, and none may be invented by a
+client. Every state string is one of `off`, `idle`, `co`, `dhw`, `transition`, `defrost`,
+`unknown`. Compressor strings are `off`, `on`, `unknown`.
+
+### `GET /api/v1/activity?from=…&to=…`
+
+The query is an exact, minute-aligned `[from, to)` of at most 31 days and one hour. `from` and `to`
+use the same instant/date parsing as `/history`. The backend chooses and loads the evidence around
+the range. The same range always gives the same facts.
+
+Top level:
+
+| Field | Meaning |
+|---|---|
+| `from`, `to`, `now` | The request and the observation instant. |
+| `closed_until` | The first minute that has not closed (`floor_minute(now)`). Minutes at or after it are not closed history. |
+| `segment_rule_version` | The persisted minute/segment interpretation read (`1`). |
+| `evidence` | `{from, to}`: whole UTC hours actually examined, widened only as far as spans crossing the range required. |
+| `summary` | Range facts; see below. |
+| `timeline` | Chronological positional items inside the range. |
+| `compressor_runs`, `compressor_off_intervals`, `defrosts` | Every observed span intersecting the range, each with its full observed extent. |
+
+**Summary fields:**
+- Minute counts: `closed_minutes`, `recorded_minutes`, `gap_minutes`, plus `activity_minutes` and
+  `compressor_minutes`, which list every state including zeros.
+- Start/stop counts: `observed_starts`, `observed_stops`.
+- `compressor_runs_overlapping`, `defrosts_overlapping`: these count spans that intersect the
+  range. A span crossing a range edge counts in both adjacent ranges, so these are **not
+  additive**. Starts, stops and minute counts are additive.
+- `complete_runs` (runs with both edges observed, attributed to the range holding their first
+  minute) and `exact_off_intervals` (off intervals between two observed runs). Each is
+  `{count, minutes[], total_minutes, min_minutes, max_minutes, mean_minutes}`, with `null`
+  min/max/mean when the count is 0.
+- `observed_defrost_seconds`.
+
+**Span object.** `compressor_runs`, `compressor_off_intervals`, `defrosts` and each timeline
+`event` use the same span fields:
+- `start`, `end`, `minutes`: the full observed span, never clipped to the query.
+- `overlap_start`, `overlap_end`, `overlap_minutes`: the span's part inside `[from, to)`.
+- `starts_before_range`, `ends_after_range`: true only when recorded minutes of the same span lie
+  outside the range.
+- `start_boundary`, `end_boundary`: each is one of
+
+  | Value | Meaning |
+  |---|---|
+  | `observed` | The adjacent minute proves the change. |
+  | `unknown` | The adjacent minute is recorded but unclassifiable. |
+  | `gap` | The adjacent minute is closed and was not recorded. |
+  | `unavailable` | The adjacent minute's activity detail was purged before durable activity existed. |
+  | `open` | The adjacent minute has not closed yet. |
+  | `outside_evidence` | Not examined; appears only at the start of all history. |
+
+- `start_observed`, `end_observed`.
+
+**Type-specific span fields:**
+- **Runs and timeline events:** `energy` is `{channel: {kwh, minutes}}` for
+  `co_power_consumption`, `co_power_production`, `dhw_power_consumption` and
+  `dhw_power_production`. `cop` is `{co|dhw|total: {cop, paired_minutes, input_kwh, output_kwh}}`,
+  the same COP fields as `/history`. Both cover the **full observed span**, never a prorated query
+  piece; both are `null` if the span's evidence cannot supply them.
+- **Runs** also have `activity_minutes` (their composition) and `observed_defrost_seconds`.
+- **Off intervals** also have `exact` (both edges observed runs).
+- **Defrosts** also have `observed_defrost_seconds` (full span) and
+  `overlap_observed_defrost_seconds`. These are exact relative to the recorded minute fractions,
+  not physical transition seconds.
+
+**Timeline items** are `{type, activity, start, end, minutes, event}`, where
+`start`/`end`/`minutes` are positional inside the range:
+
+| `type` | `activity` | `event` | Meaning |
+|---|---|---|---|
+| `activity` | state string (`unknown` means a recorded but unclassifiable minute) | span object | A maximal same-activity span. |
+| `gap` | `null` | `null` | Closed minutes with no recorded row. |
+| `open` | `null` | `null` | `[max(from, closed_until), to)`: not closed yet, never a gap. |
+
+Activity-unavailable history is never a timeline item. If the requested range intersects it, the
+request is `422`. The detail names the first unavailable hour and states that canonical minutes
+existed. Outside the range, unavailable evidence only appears as an `unavailable` boundary.
+
+### `GET /api/v1/activity/live`
+
+This is the current activity, classified by the same version-1 classifier from one `/api/v1/live`
+observation. Only `mode="live"` values count as current evidence. Retained, stale, absent and
+disconnected values are unknown inputs; the result is never guessed from them. No database is
+read, and no live activity is stored. This resource describes the present moment; it is never the
+last closed history minute.
+
+| Field | Meaning |
+|---|---|
+| `now` | The observation instant. |
+| `rule_version` | Classifier version (`1`). |
+| `activity`, `compressor` | The classified state. |
+| `all_inputs_live` | Every classifier input was a live value. |
+| `mqtt` | `{connected, alive, epoch}` from the same observation. |
+| `inputs` | For each of `compressor_freq`, `defrosting_state`, `heatpump_state`, `three_way_valve` and the four power channels: `{value, mode, received_at, used}`. `used` is true only for a live value. |

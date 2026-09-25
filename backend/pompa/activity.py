@@ -69,6 +69,9 @@ class Boundary(StrEnum):
     GAP = "gap"  # the consecutive minute closed without a recorded row
     OPEN = "open"  # the consecutive minute has not closed yet
     OUTSIDE_EVIDENCE = "outside_evidence"  # the consecutive minute was not examined
+    # Read-time only (Stage 4C-C): the consecutive minute was recorded once, but its activity
+    # detail was purged before durable segments existed. Not a gap, not unknown.
+    UNAVAILABLE = "unavailable"
 
 
 # ------------------------------------------------------------------ classification
@@ -233,6 +236,21 @@ class Gap:
 
 
 @dataclass(frozen=True, slots=True)
+class Unavailable:
+    """Closed minutes whose canonical minutes existed but whose activity detail was purged
+    before Stage 4C-B durability (``rollup_1h`` present, no raw, no segments). Read-time only;
+    never a ``Gap`` (nothing recorded) and never ``unknown`` (a recorded, unclassifiable minute).
+    """
+
+    start: int
+    end: int
+
+    @property
+    def minutes(self) -> int:
+        return (self.end - self.start) // MINUTE
+
+
+@dataclass(frozen=True, slots=True)
 class Timeline:
     """Contiguous evidence over ``[start, min(end, closed_until))``.
 
@@ -248,20 +266,23 @@ class Timeline:
     start: int
     end: int
     closed_until: int
-    items: tuple[ActivitySegment | Gap, ...]
+    items: tuple[ActivitySegment | Gap | Unavailable, ...]
 
     @property
     def segments(self) -> tuple[ActivitySegment, ...]:
         return tuple(i for i in self.items if isinstance(i, ActivitySegment))
 
 
-def timeline(segments: Iterable[ActivitySegment], start: int, end: int, closed_until: int) -> Timeline:
+def timeline(segments: Iterable[ActivitySegment], start: int, end: int, closed_until: int,
+             unavailable: Iterable[tuple[int, int]] = ()) -> Timeline:
     """Place ascending segments on the evidence window ``[start, end)`` with explicit gaps.
 
     ``closed_until`` is the first minute that has not closed (for a wall clock
     ``now``: ``floor_minute(now)``). Segments may extend past the window and are
     clipped to it; a segment reaching past ``closed_until`` is impossible
-    evidence and is rejected.
+    evidence and is rejected. Uncovered closed minutes inside an ``unavailable``
+    interval become ``Unavailable`` items instead of gaps; such an interval
+    must not overlap a segment.
     """
     _check_minute(start, end, closed_until)
     if end < start:
@@ -286,7 +307,32 @@ def timeline(segments: Iterable[ActivitySegment], start: int, end: int, closed_u
         cursor = piece.end
     if cursor < limit:
         items.append(Gap(cursor, limit))
+    lost = sorted((max(a, start), min(b, limit)) for a, b in unavailable if max(a, start) < min(b, limit))
+    if lost:
+        items = _mark_unavailable(items, lost)
     return Timeline(start, end, closed_until, tuple(items))
+
+
+def _mark_unavailable(items: list, lost: list[tuple[int, int]]) -> list:
+    out: list = []
+    for item in items:
+        if not isinstance(item, Gap):
+            if any(a < item.end and item.start < b for a, b in lost):
+                raise ValueError(f"segment at {item.start} lies inside activity-unavailable evidence")
+            out.append(item)
+            continue
+        cursor = item.start
+        for a, b in lost:
+            a, b = max(a, item.start), min(b, item.end)
+            if a >= b:
+                continue
+            if cursor < a:
+                out.append(Gap(cursor, a))
+            out.append(Unavailable(a, b))
+            cursor = b
+        if cursor < item.end:
+            out.append(Gap(cursor, item.end))
+    return out
 
 
 # ------------------------------------------------------------------ spans
@@ -341,6 +387,8 @@ def _boundary(tl: Timeline, neighbour: ActivitySegment | Gap | None, unknown, ed
         return Boundary.OPEN if after and edge >= tl.closed_until else Boundary.OUTSIDE_EVIDENCE
     if isinstance(neighbour, Gap):
         return Boundary.GAP
+    if isinstance(neighbour, Unavailable):
+        return Boundary.UNAVAILABLE
     return Boundary.UNKNOWN if unknown(neighbour) else Boundary.OBSERVED
 
 
@@ -356,7 +404,7 @@ def _spans(tl: Timeline, state_of, wanted, unknown=None) -> list[ObservedSpan]:
     items, out, i = tl.items, [], 0
     while i < len(items):
         item = items[i]
-        if isinstance(item, Gap) or state_of(item) not in wanted:
+        if not isinstance(item, ActivitySegment) or state_of(item) not in wanted:
             i += 1
             continue
         state, j = state_of(item), i
@@ -506,8 +554,13 @@ def summarize(tl: Timeline, start: int, end: int) -> ActivitySummary:
     compressor = {c.value: 0 for c in Compressor}
     gaps = 0
     for item in tl.items:
+        overlap = max(0, min(item.end, end) - max(item.start, start)) // MINUTE
+        if isinstance(item, Unavailable):
+            if overlap:
+                raise ValueError("a summary range cannot contain activity-unavailable evidence")
+            continue
         if isinstance(item, Gap):
-            gaps += max(0, min(item.end, end) - max(item.start, start)) // MINUTE
+            gaps += overlap
             continue
         piece = item.clip(start, end)
         if piece is not None:

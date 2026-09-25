@@ -15,6 +15,7 @@ Domain rules are in [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 | `pompa/minute.py` | `MinuteAccumulator` → `MinuteRow` (full-minute source life, time-weighted means). |
 | `pompa/aggregation.py` | `Stats` algebra, derived series, energy, paired COP, coverage. |
 | `pompa/activity.py` | Stage 4C activity domain: minute classification, hour segments, gaps, runs, defrosts, projections, persisted segment records. Pure. |
+| `pompa/activity_history.py` | Stage 4C activity read model: per-hour source selection, evidence widening, `/activity` and `/activity/live` projections. Read-only. |
 | `pompa/timegrid.py` | UTC/Europe/Warsaw alignment, buckets, `auto` length, prospective purge cutoff. |
 | `pompa/recorder.py` | Serialises events, closes minutes, write buffer, flush, rollup (with activity segments), activity backfill, purge, status facts. |
 | `pompa/storage.py` | History, optional-history and `activity_segment_1h` DDL and parameterized PyMySQL queries, one transaction per session. |
@@ -65,6 +66,9 @@ The Stage 3 default API shapes and the CT109-validated Stage 4A opt-in forms are
 - `GET /api/v1/metrics?include=capabilities` — the unchanged default metric catalog plus all 203
   reference-backed TOP/OPT/SET/XTOP capabilities.
 - `GET /api/v1/history?from=…&to=…[&bucket=…][&series=a,b]` — exact `[from, to)`, never rounded.
+- `GET /api/v1/activity?from=…&to=…` — exact `[from, to)` (≤ 31 days + 1 h): activity timeline, whole
+  compressor runs, off intervals and defrosts with overlap facts, full-span energy/COP, factual summary.
+- `GET /api/v1/activity/live` — current activity from the in-memory live observation; no database.
 
 `from` and `to` are ISO 8601 instants with an explicit offset (`Z`, `+02:00`) or `YYYY-MM-DD`
 calendar dates meaning local midnight in Europe/Warsaw; both must be whole minutes.

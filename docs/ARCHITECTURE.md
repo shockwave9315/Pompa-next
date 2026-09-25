@@ -1107,8 +1107,7 @@ decision:** durable per-hour activity segments. Checkpoint B materializes each U
 segments through the existing `persist()` → `rebuild_hour()` path, together with the rule version.
 Events, compressor runs, starts, intervals, continuation and range projections are derived on read
 by stitching segments; no cross-hour state machine is persisted. The segment table and its purge
-proof are frozen in §25.3.2; the API resources and their evidence-loading policy belong to
-checkpoint C.
+proof are frozen in §25.3.2; the read model, evidence loading and API resources in §25.3.3.
 
 #### 25.3.1 Checkpoint A — activity domain truth (DONE)
 
@@ -1303,9 +1302,8 @@ segment row.
 | absent | absent | present | **unavailable**: canonical minutes were recorded, but their activity detail was purged before 4C-B |
 | absent | absent | absent | not recorded |
 
-An unavailable hour is not an ordinary gap. `timeline()` receives only segments, so it would
-render both of the last two rows as `Gap`. Checkpoint C must consult these storage facts and keep
-"activity unavailable" distinct from "not recorded" on every read.
+An unavailable hour is not an ordinary gap. Checkpoint C reads keep "activity unavailable"
+distinct from "not recorded" (§25.3.3).
 
 **Purge proof.** After the canonical count proof and the optional proof, purge decodes the
 candidate hours' segment rows through a locking read. It requires them to equal, hour by hour and
@@ -1333,6 +1331,70 @@ fact). A real MariaDB race test showed that the earlier snapshot read let a late
 partial rebuild over an hour purged while it waited. Backfill discovery may stay a snapshot read
 because its range starts at a current read of the oldest raw minute and purge deletes only a
 prefix.
+
+#### 25.3.3 Checkpoint C — activity read model and resources (DONE)
+
+`pompa/activity_history.py` answers `GET /api/v1/activity` and `GET /api/v1/activity/live` (contract
+in `docs/API.md`). It is read-only: no backfill, repair or rewrite ever happens on an API thread.
+
+**Source per UTC hour.** One `Storage.session()`, one consistent snapshot, chooses exactly one
+source for each examined hour:
+1. **Durable segments**, when present. These are never recomputed from raw, even while raw
+   exists, because they are what the purge proof guarantees and what survives. Invalid rows raise
+   `ActivityRecordInvalid` (HTTP 500), never a silent fallback to raw.
+2. Otherwise, **raw minutes** through `build_segments`: unrolled hours and rolled hours awaiting
+   backfill.
+3. Otherwise, a `rollup_1h` row makes the hour **unavailable**: canonical minutes existed, but their
+   activity was purged before 4C-B. It becomes an `Unavailable` timeline item.
+4. Otherwise nothing was recorded: ordinary gaps.
+
+Each hour has one source, so mixed durable/raw ranges never duplicate a minute. Segments at or after
+`closed_until = floor_minute(now)` are not closed history and are never gaps.
+
+**Read-time boundary.** `Unavailable` and `Boundary.UNAVAILABLE` are read-time only and outside
+`ACTIVITY_RULE_VERSION`. `unavailable` is never `gap` (not recorded), `unknown` (a recorded,
+unclassifiable minute) or `open` (not yet closed). A request whose closed part intersects an
+unavailable hour is refused with `ActivityUnavailable` (HTTP 422), naming the first such hour;
+nothing partial is returned. Unavailable evidence met only while widening outside the range just
+ends a span with an `unavailable` boundary.
+
+**Evidence loading.**
+- **Initial window.** Loading starts at `[floor_hour(from − 1 min), ceil_hour(to + 1 min))`, capped
+  at `ceil_hour(closed_until)`. That already fixes observed starts and stops at both edges.
+- **Widening.** While any span that intersects the request (activity event, compressor run, off
+  interval or defrost) still ends at the window's edge as `outside_evidence`, the loader adds whole
+  hours on that side. Steps double from 1 h up to 7 days.
+- **Stop conditions.** Widening stops at an observed change, `unknown`, a true gap (an unrecorded
+  neighbouring hour), `unavailable`, `open`, or the start of all history.
+- **Cost.** A run or event that intersects the range is therefore returned whole, however long,
+  across UTC hours, midnight and DST, and never as two cycles. Each loaded chunk costs three
+  indexed range reads: segments, the hour's `recorded` rollup, and raw only for hours without
+  segments. Reads never go beyond what an intersecting span needs, beyond the doubling, so a small
+  range is not a history scan.
+- **Range limit.** A request is at most 31 days and one hour (the longest local month); longer is
+  a `422`, never truncated.
+
+**Projection.** The response reuses the Stage 4C-A spans and `summarize`; there is no second
+formula.
+- **Spans.** Every span object gives its full observed `start`/`end`/`minutes` and, separately,
+  its `overlap_*` with the request, plus `starts_before_range`/`ends_after_range`, both boundaries
+  and `start_observed`/`end_observed`.
+- **Energy.** Energy and paired COP come from `energy_kwh`/`cop` over the full span's segment
+  `Stats`. They are never prorated to the overlap and are `null` when a piece carries no
+  ingredients.
+- **Defrosts** report full and overlap integrated seconds.
+- **Timeline** items are positional `activity` (a maximal event, with its span), `gap`, or
+  `open` (`[max(from, closed_until), to)`).
+- **Additivity.** `*_overlapping` counts stay non-additive. Starts, stops and minute counts add up
+  over any partition of a range, and each span keeps identical full-span facts in every range
+  that contains it.
+
+**Live.** `/api/v1/activity/live` classifies one `Recorder.live` observation, the same lock and
+freshness/provenance rules as `/api/v1/live`, with the version-1 `classify`. Only `mode="live"`
+values are evidence. Retained, stale, absent and disconnected inputs are `NULL`, and the
+classifier's own `NULL` rules decide. It exposes every input's value, mode, receipt time and use.
+It never reads storage, stays available during a database outage and is never persisted. It is
+the current moment, not the last closed history minute.
 
 ### 25.4 Stage 4D — report projections
 
