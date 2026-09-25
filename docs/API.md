@@ -318,7 +318,7 @@ bucket.
 |---|---|
 | `400` | Malformed parameters: missing `from`/`to`, unparseable or naive timestamps, non-minute alignment, `from >= to`, unknown bucket, unknown or duplicate series, invalid or repeated `include`. |
 | `422` | Well-formed but unrepresentable: more than 3000 buckets, a range or partial edge hour whose raw minutes were provably purged, an optional mean/energy bucket whose known-value sum cannot fit in binary DOUBLE, instants outside 1970–2100, an activity range longer than 31 days and one hour, or an activity range that intersects activity-unavailable history. |
-| `500` | `/api/v1/activity` only: stored durable activity rows are inconsistent. They are never answered from raw instead, and this is never a `422`. |
+| `500` | `/api/v1/activity` only: stored durable activity is inconsistent. A row may be invalid or not in its exact canonical persisted form, or an hour's durable segment minutes may differ from its recorded canonical minutes. This applies to any hour the request examines, including widened evidence. It is never answered from raw instead, and it is never a `422`. |
 | `503` | The database is unavailable for `/api/v1/history`, `/api/v1/optional-history/selection`, `/api/v1/optional-history/series` or `/api/v1/activity`. |
 
 The body is `{"detail": "…"}`. `422` for purged raw means the backend knows the minutes existed and
@@ -562,7 +562,7 @@ Top level:
 | `from`, `to`, `now` | The request and the observation instant. |
 | `closed_until` | The first minute that has not closed (`floor_minute(now)`). Minutes at or after it are not closed history. |
 | `segment_rule_version` | The persisted minute/segment interpretation read (`1`). |
-| `evidence` | `{from, to}`: whole UTC hours actually examined, widened only as far as spans crossing the range required. |
+| `evidence` | `{from, to}`: whole UTC hours actually examined. Widening follows only spans crossing the range, in exponentially growing hour chunks, so it may extend past the decisive boundary by up to the last chunk. |
 | `summary` | Range facts; see below. |
 | `timeline` | Chronological positional items inside the range. |
 | `compressor_runs`, `compressor_off_intervals`, `defrosts` | Every observed span intersecting the range, each with its full observed extent. |

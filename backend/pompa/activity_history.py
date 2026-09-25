@@ -4,7 +4,8 @@ Read-only; one storage session per request. ``docs/ARCHITECTURE.md`` §25.3.3 is
 
 Each UTC hour of evidence has exactly one source, chosen from stored facts:
 
-* durable ``activity_segment_1h`` rows, when present (never recomputed from raw);
+* durable ``activity_segment_1h`` rows, when present (never recomputed from raw), accepted only
+  when every row is in canonical persisted form and they cover exactly the hour's recorded minutes;
 * else ``build_segments`` of its raw ``sample_1m`` minutes (unrolled or awaiting backfill);
 * else, when ``rollup_1h`` proves minutes were recorded, activity is *unavailable*
   (raw purged before Stage 4C-B);
@@ -21,7 +22,7 @@ from collections.abc import Iterable, Mapping
 from .activity import (
     ACTIVITY_COLUMNS, ACTIVITY_RULE_VERSION, POWER_CHANNELS, Activity, ActivitySegment, Boundary, Gap,
     ObservedSpan, Unavailable, activity_events, build_segments, classify, compressor_off_intervals,
-    compressor_runs, decode_segments, defrosts, summarize, timeline,
+    ActivityRecordInvalid, compressor_runs, decode_segments, defrosts, segment_record, summarize, timeline,
 )
 from .aggregation import PAIRS, RECORDED, Stats, cop, energy_kwh
 from .minute import MINUTE, floor_minute, iso_utc
@@ -58,10 +59,23 @@ class _Evidence:
         if lo >= hi:
             return
         s = self.session
+        records = s.read_activity_segments(lo, hi)
         durable: dict[int, list[ActivitySegment]] = {}
-        for segment in decode_segments(s.read_activity_segments(lo, hi)):
+        for record, segment in zip(records, decode_segments(records), strict=True):
+            if segment_record(segment) != tuple(record):
+                # Decodes to valid values but is not what the application writes, e.g. a duplicate
+                # JSON key that another reader (MariaDB JSON_EXTRACT) resolves differently.
+                raise ActivityRecordInvalid(
+                    f"activity segment at {iso_utc(segment.start)} is not in its canonical persisted form")
             durable.setdefault(floor_hour(segment.start), []).append(segment)
-        rolled = {hour for hour, *_ in s.read_rollup(lo, hi, [RECORDED])}
+        recorded = {hour: n for hour, _series, n, *_ in s.read_rollup(lo, hi, [RECORDED])}
+        for hour, segments in durable.items():
+            # rebuild_hour writes both from the same locked minutes, so a legitimate durable hour
+            # covers exactly the recorded minutes; anything else is corruption, never a gap.
+            if sum(seg.minutes for seg in segments) != recorded.get(hour):
+                raise ActivityRecordInvalid(
+                    f"activity segments of hour {iso_utc(hour)} cover {sum(seg.minutes for seg in segments)}"
+                    f" minutes but {recorded.get(hour, 0)} canonical minutes were recorded")
         missing = [h for h in range(lo, hi, HOUR) if h not in durable]
         raw: dict[int, list] = {}
         for a, b in _runs(missing):
@@ -72,7 +86,7 @@ class _Evidence:
                 self.segments[hour] = durable[hour]
             elif hour in raw:
                 self.segments[hour] = build_segments(raw[hour])
-            elif hour in rolled:
+            elif hour in recorded:
                 self.unavailable.add(hour)
 
     def timeline(self, lo: int, end: int):

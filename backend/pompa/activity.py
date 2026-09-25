@@ -639,6 +639,8 @@ def _number(value, what: str) -> float:
         raise ActivityRecordInvalid(f"{what} is not finite") from None
     if not math.isfinite(number):
         raise ActivityRecordInvalid(f"{what} is not finite")
+    if number == 0 and math.copysign(1.0, number) < 0:  # never written: sums start at +0.0
+        raise ActivityRecordInvalid(f"{what} is a negative zero")
     return number
 
 

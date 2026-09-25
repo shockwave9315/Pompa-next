@@ -895,12 +895,15 @@ def test_purge_refuses_noncanonical_but_equivalent_energy_json(any_storage, vari
     text = _variants()[variant](record[6])
     assert text != record[6]
     record[6] = text
-    # A decoded-values proof alone would accept it: Python sees exactly the canonical segment.
-    assert decode_segment(tuple(record)) == decode_segment(canonical[1])
+    if variant == "signed zero":  # the application never writes -0.0; decoding itself refuses it
+        with pytest.raises(ActivityRecordInvalid, match="negative zero"):
+            decode_segment(tuple(record))
+    else:  # a decoded-values proof alone would accept it: Python sees exactly the canonical segment
+        assert decode_segment(tuple(record)) == decode_segment(canonical[1])
     with any_storage.session() as s:
         s.replace_activity_hour(T0, [*canonical[:1], tuple(record), *canonical[2:]])
     minutes_before = raw(any_storage)
-    with pytest.raises(PurgeRefused, match="canonical persisted form"):
+    with pytest.raises(PurgeRefused, match="canonical persisted form|negative zero"):
         purge_step(any_storage, NOW, 365, None, 24)
     assert raw(any_storage) == minutes_before
     with any_storage.session() as s:  # repairable from raw

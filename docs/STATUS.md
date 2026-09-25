@@ -264,6 +264,15 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
   - a partition property: additive facts add up and spans stay identical
 - The existing frozen-path tests now include the two additive paths. Every earlier response is
   unchanged.
+- Final hardening from the independent review:
+  - A durable hour is read only when every row is valid and in exact canonical persisted form,
+    and its segment minutes equal the hour's recorded canonical minutes. Otherwise the request
+    returns 500, with no raw fallback.
+  - Before this, a deleted or forged durable segment turned into a fake gap or a fake minute.
+    A duplicate-key `energy_json` row also passed.
+  - Record validation also refuses `-0.0`, which the application never writes and a re-encoding
+    check alone cannot detect.
+  - Documentation of widening overshoot and raw read counts is corrected.
 
 ### Remaining checkpoint
 

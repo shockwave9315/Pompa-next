@@ -11,7 +11,10 @@ import pytest
 import conftest
 from conftest import IDLE as IDLE_SNAPSHOT, RUNNING, T0, Api, persist_canonical
 from pompa import activity_history
-from pompa.activity import ENERGY_SERIES, ActivityRecordInvalid, build_segments, compressor_runs, timeline
+from pompa.activity import (
+    ENERGY_SERIES, ActivityRecordInvalid, build_segments, compressor_runs, decode_segment, segment_record,
+    timeline,
+)
 from pompa.activity_history import ActivityUnavailable
 from pompa.aggregation import cop, energy_kwh, fold_minutes
 from pompa.minute import iso_utc
@@ -19,7 +22,7 @@ from pompa.recorder import backfill_activity_step, roll_next_hour
 from pompa.timegrid import Unrepresentable, local_midnight
 from test_activity_durable import (
     CO, DHW, END, GAP, IDLE, NOW, OFF, SCENARIO, TAIL, UNKNOWN, defrost, delete_activity, purge_all,
-    raw, roll_all, rows_of,
+    _variants, raw, roll_all, rows_of,
 )
 
 M, H, DAY = 60, 3600, 86400
@@ -565,3 +568,121 @@ def test_partitioned_ranges_agree_with_the_whole_range():
         for part in parts:
             for run in part["compressor_runs"]:
                 assert full_span(run) == runs_by_span[(run["start"], run["end"])], trial
+
+
+# ------------------------------------------------------------------ durable read integrity (hardening)
+
+HOUR0 = [CO] * 5 + [OFF] * 5 + [DHW] * 5  # three durable segments, 15 recorded minutes, then a gap
+
+
+def durable_hour(storage, purged):
+    put(storage, T0, HOUR0)
+    put(storage, T0 + H, [OFF] * 180)
+    if purged:
+        assert purge_all(storage) > 0
+        assert raw(storage, T0, T0 + H) == []
+
+
+def replace_hour(storage, hour, records):
+    with storage.session() as s:
+        s.replace_activity_hour(hour, records)
+
+
+def hour_records(storage, hour):
+    with storage.session() as s:
+        return s.read_activity_segments(hour, hour + H)
+
+
+def assert_fails_closed(storage, a, b):
+    with pytest.raises(ActivityRecordInvalid):
+        q(storage, a, b)
+    r = Api(storage=storage).get("/api/v1/activity", t=NOW, **{"from": z(a), "to": z(b)})
+    assert r.status_code == 500 and "stored activity history is inconsistent" in r.json()["detail"]
+
+
+@pytest.mark.parametrize("purged", [False, True], ids=["raw present", "after purge"])
+@pytest.mark.parametrize("index", [0, 1, 2], ids=["first", "middle", "last"])
+def test_deleted_durable_segment_fails_closed_never_a_gap(any_storage, purged, index):
+    durable_hour(any_storage, purged)
+    assert q(any_storage, T0, T0 + H)["summary"]["recorded_minutes"] == 15
+    records = hour_records(any_storage, T0)
+    replace_hour(any_storage, T0, records[:index] + records[index + 1:])
+    assert_fails_closed(any_storage, T0, T0 + H)  # no raw fallback, no 5-minute "gap"
+
+
+@pytest.mark.parametrize("purged", [False, True], ids=["raw present", "after purge"])
+def test_forged_extra_durable_segment_fails_closed(any_storage, purged):
+    durable_hour(any_storage, purged)
+    [forged] = build_segments([(r.ts, r.values) for r in rows_of(T0 + 20 * M, [OFF] * 3)])
+    replace_hour(any_storage, T0, [*hour_records(any_storage, T0), segment_record(forged)])  # inside the gap
+    assert decode_segment(segment_record(forged)) == forged  # structurally valid and canonical
+    assert_fails_closed(any_storage, T0, T0 + H)
+
+
+def test_corruption_in_an_evidence_only_hour_fails_closed(any_storage):
+    put(any_storage, T0, [OFF] * 5 + [DHW] * 5 + [OFF] * 20 + [CO] * 30)
+    put(any_storage, T0 + H, [CO] * 30 + [OFF] * 30)
+    put(any_storage, T0 + 2 * H, [OFF])
+    a, b = T0 + H + 10 * M, T0 + H + 20 * M  # the run started in hour 0: loaded only by widening
+    assert q(any_storage, a, b)["compressor_runs"][0]["start"] == z(T0 + 30 * M)
+    replace_hour(any_storage, T0, hour_records(any_storage, T0)[1:])  # far from the run itself
+    assert_fails_closed(any_storage, a, b)
+
+
+def test_zero_durable_rows_still_mean_raw_then_unavailable(any_storage):
+    """Whole-hour absence keeps its B/C meaning: raw if present, else unavailable (422), not 500."""
+    durable_hour(any_storage, False)
+    reference = q(any_storage, T0, T0 + H)
+    delete_activity(any_storage, T0, T0 + H)
+    assert q(any_storage, T0, T0 + H) == reference  # derived from raw
+    backfill_activity_step(any_storage, 0, 24)
+    purge_all(any_storage)
+    delete_activity(any_storage, T0, T0 + H)
+    with pytest.raises(ActivityUnavailable):
+        q(any_storage, T0, T0 + H)
+
+
+@pytest.mark.parametrize("variant", ["duplicate key", "whitespace", "key order", "exponent spelling",
+                                     "signed zero"])
+def test_noncanonical_durable_rows_fail_closed(any_storage, variant):
+    put(any_storage, T0, SCENARIO + TAIL)
+    records = hour_records(any_storage, T0)
+    changed = list(records[1])  # CO minutes 5-9
+    changed[6] = _variants()[variant](changed[6])
+    assert changed[6] != records[1][6]
+    if variant != "signed zero":  # every other variant decodes to exactly the canonical segment
+        assert decode_segment(tuple(changed)) == decode_segment(records[1])
+    replace_hour(any_storage, T0, [records[0], tuple(changed), *records[2:]])
+    assert_fails_closed(any_storage, T0, T0 + H)
+
+
+def test_duplicate_key_row_is_refused_on_mariadb(mariadb):
+    mariadb.ensure_schema()
+    put(mariadb, T0, SCENARIO + TAIL)
+    records = hour_records(mariadb, T0)
+    changed = list(records[1])
+    changed[6] = _variants()["duplicate key"](changed[6])
+    replace_hour(mariadb, T0, [records[0], tuple(changed), *records[2:]])
+    with mariadb.session() as s:
+        s._cur.execute("SELECT JSON_VALID(energy_json) FROM activity_segment_1h WHERE start_ts = %s",
+                       (changed[0],))
+        assert s._cur.fetchone() == (1,)
+    assert_fails_closed(mariadb, T0, T0 + H)
+
+
+def test_canonical_arbitrary_float_rows_are_accepted(any_storage):
+    import random
+
+    rng = random.Random(21)
+    shapes = []
+    for _ in range(180):
+        shape = dict(rng.choice([CO, DHW, OFF, IDLE, UNKNOWN, defrost(0.583333)]))
+        for key in ("co_power_consumption", "co_power_production", "dhw_power_consumption",
+                    "dhw_power_production"):
+            if shape[key] is not None:
+                shape[key] = rng.choice([0.0, 0.1 + 0.2, 1 / 3, 1e-9, rng.uniform(0, 5000)])
+        shapes.append(shape)
+    put(any_storage, T0, shapes, roll=False)
+    reference = q(any_storage, T0, T0 + 3 * H)  # raw
+    roll_all(any_storage)
+    assert q(any_storage, T0, T0 + 3 * H) == reference  # durable: canonical, complete, accepted

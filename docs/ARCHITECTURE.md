@@ -1257,8 +1257,8 @@ CREATE TABLE activity_segment_1h (
   - the rule version (only 1 exists) and known `Activity`/`Compressor` strings;
   - activity/compressor/defrost-fraction combinations version 1 can produce;
   - alignment inside one UTC hour, and ascending non-overlapping rows;
-  - energy structure: known series; `1 ≤ n ≤ minutes`; finite, non-negative values with
-    `min ≤ last ≤ max`;
+  - energy structure: known series; `1 ≤ n ≤ minutes`; finite, non-negative values that are
+    never `-0.0` (the application never writes one), with `min ≤ last ≤ max`;
   - canonical pairing invariants: paired input and output together with equal `n`; a pair never
     exceeds its channels; the total pair never exceeds the CO or DHW pair.
 
@@ -1340,8 +1340,18 @@ in `docs/API.md`). It is read-only: no backfill, repair or rewrite ever happens 
 **Source per UTC hour.** One `Storage.session()`, one consistent snapshot, chooses exactly one
 source for each examined hour:
 1. **Durable segments**, when present. These are never recomputed from raw, even while raw
-   exists, because they are what the purge proof guarantees and what survives. Invalid rows raise
-   `ActivityRecordInvalid` (HTTP 500), never a silent fallback to raw.
+   exists, because they are what the purge proof guarantees and what survives. A durable hour is
+   accepted only when all of the following hold:
+   - every row decodes under a supported rule version;
+   - every row equals `segment_record` of its decoded segment, the exact canonical persisted
+     form, so a duplicate JSON key, other whitespace, key order or number spelling is refused;
+   - the hour's segment minutes sum to exactly its `rollup_1h` `recorded` count. `rebuild_hour`
+     writes both from the same locked minutes, so a missing, extra or forged segment is
+     corruption, never a gap.
+
+   Otherwise the read raises `ActivityRecordInvalid` (HTTP 500), even when the corrupt hour was
+   loaded only as widened evidence. There is no fallback to raw and no repair. An hour with
+   **no** durable rows is not corruption: it continues to rule 2, 3 or 4.
 2. Otherwise, **raw minutes** through `build_segments`: unrolled hours and rolled hours awaiting
    backfill.
 3. Otherwise, a `rollup_1h` row makes the hour **unavailable**: canonical minutes existed, but their
@@ -1361,16 +1371,21 @@ ends a span with an `unavailable` boundary.
 **Evidence loading.**
 - **Initial window.** Loading starts at `[floor_hour(from − 1 min), ceil_hour(to + 1 min))`, capped
   at `ceil_hour(closed_until)`. That already fixes observed starts and stops at both edges.
-- **Widening.** While any span that intersects the request (activity event, compressor run, off
-  interval or defrost) still ends at the window's edge as `outside_evidence`, the loader adds whole
-  hours on that side. Steps double from 1 h up to 7 days.
+- **Widening.** Widening follows only spans that intersect the request. While any such span
+  (activity event, compressor run, off interval or defrost) still ends at the window's edge as
+  `outside_evidence`, the loader adds whole hours on that side. The added chunks grow
+  exponentially: 1 h, 2 h, 4 h, and so on, up to 7 days. The final window may therefore extend
+  beyond the decisive boundary by up to the size of the last chunk.
 - **Stop conditions.** Widening stops at an observed change, `unknown`, a true gap (an unrecorded
   neighbouring hour), `unavailable`, `open`, or the start of all history.
 - **Cost.** A run or event that intersects the range is therefore returned whole, however long,
-  across UTC hours, midnight and DST, and never as two cycles. Each loaded chunk costs three
-  indexed range reads: segments, the hour's `recorded` rollup, and raw only for hours without
-  segments. Reads never go beyond what an intersecting span needs, beyond the doubling, so a small
-  range is not a history scan.
+  across UTC hours, midnight and DST, and never as two cycles. Each loaded chunk costs:
+  - one segment range read;
+  - one rollup range read of the `recorded` series;
+  - one raw range read per contiguous run of hours without segments. Alternating durable and
+    non-durable hours can therefore need several raw reads.
+
+  All of these are indexed primary-key range reads. A small range is not a history scan.
 - **Range limit.** A request is at most 31 days and one hour (the longest local month); longer is
   a `422`, never truncated.
 
