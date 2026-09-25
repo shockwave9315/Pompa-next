@@ -13,19 +13,23 @@ import re
 from bisect import bisect_right
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date as Date, datetime, timedelta, timezone
+from datetime import date as Date, timedelta
 
-from .activity import (ACTIVITY_RULE_VERSION, Activity, ActivitySegment, Compressor, Timeline,
-                       Unavailable, activity_events, compressor_off_intervals, compressor_runs,
-                       defrosts)
+from .activity import (ACTIVITY_RULE_VERSION, Activity, ActivitySegment, Boundary, Compressor,
+                       Timeline, Unavailable, activity_events, compressor_off_intervals,
+                       compressor_runs, defrosts)
 from .aggregation import PAIRS, POWER_CHANNELS, RECORDED, Stats, combine_maps, cop, coverage_percent, energy_kwh
-from .minute import MINUTE
-from .timegrid import HOUR, LOCAL_TZ_NAME, bucket_edges, local_midnight
+from .minute import MINUTE, iso_utc
+from .timegrid import HOUR, LOCAL_TZ_NAME, Unrepresentable, bucket_edges, local_midnight
 
 HEATING_ACTIVITIES = (Activity.CO, Activity.DHW, Activity.TRANSITION)
 _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
 _CONSUMPTION = ("co_power_consumption", "dhw_power_consumption")
 _PRODUCTION = ("co_power_production", "dhw_power_production")
+_FIRST_DATE = Date(1970, 1, 1)
+_LAST_DATE = Date(2100, 12, 31)
+_LAST_EXCLUSIVE_DATE = Date(2101, 1, 1)
+_EVIDENCE_FLOOR = local_midnight(_FIRST_DATE)
 
 
 class ReportInvariantError(ValueError):
@@ -36,6 +40,10 @@ class ReportActivityUnavailable(ValueError):
     """Recorded history in the requested range lacks Stage 4C activity evidence."""
 
 
+class ReportUnrepresentable(Unrepresentable):
+    """A well-formed report date resolves outside the supported calendar model."""
+
+
 def _date(value: str) -> Date:
     if not isinstance(value, str) or _DATE.fullmatch(value) is None:
         raise ValueError("report date must be YYYY-MM-DD without a time component")
@@ -43,6 +51,12 @@ def _date(value: str) -> Date:
         return Date.fromisoformat(value)
     except ValueError:
         raise ValueError("invalid report calendar date") from None
+
+
+def _require_supported_date(day: Date) -> Date:
+    if not _FIRST_DATE <= day <= _LAST_DATE:
+        raise ReportUnrepresentable("report dates must be within 1970-01-01..2100-12-31")
+    return day
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,10 +79,12 @@ def resolve_period(kind: str, *, date: str | None = None,
         first, last = _date(from_date), _date(to_date)
         if not 0 < (last - first).days <= 31:
             raise ValueError("custom report must span 1..31 local days")
+        _require_supported_date(first)
+        _require_supported_date(last)
     elif kind in ("day", "week", "month"):
         if date is None or from_date is not None or to_date is not None:
             raise ValueError(f"{kind} report requires an anchor date only")
-        anchor = _date(date)
+        anchor = _require_supported_date(_date(date))
         if kind == "day":
             first, last = anchor, anchor + timedelta(days=1)
         elif kind == "week":
@@ -80,6 +96,9 @@ def resolve_period(kind: str, *, date: str | None = None,
                         1 if first.month == 12 else first.month + 1, 1)
     else:
         raise ValueError(f"unknown report period {kind!r}")
+
+    if first < _FIRST_DATE or last > _LAST_EXCLUSIVE_DATE:
+        raise ReportUnrepresentable("resolved report period exceeds 1970-01-01..2100-12-31")
 
     start, end = local_midnight(first), local_midnight(last)
     bucket = "1h" if kind == "day" else "1d"
@@ -295,10 +314,6 @@ def _facts(start: int, end: int, source: _FactsInput, *, now: float, closed_unti
             "technical": _technical(source.stats, source.compressor_minutes, recorded)}
 
 
-def _iso(instant: float) -> str:
-    return datetime.fromtimestamp(instant, timezone.utc).isoformat().replace("+00:00", "Z")
-
-
 @dataclass(frozen=True, slots=True)
 class ReportInput:
     """Already-loaded canonical bucket partials and one widened Stage 4C timeline."""
@@ -360,6 +375,17 @@ def compose_report(source: ReportInput) -> dict:
     defrost_spans = defrosts(source.timeline)
     runs = compressor_runs(source.timeline)
     off_intervals = compressor_off_intervals(source.timeline)
+    # A report edge is not evidence of a span edge. Only the supported calendar floor
+    # can legitimately leave an intersecting span's left boundary undecidable.
+    for spans in (activities, defrost_spans, runs, off_intervals):
+        for span in spans:
+            if span.start >= limit or span.end <= period.start:
+                continue
+            if span.end_boundary is Boundary.OUTSIDE_EVIDENCE:
+                raise ReportInvariantError("intersecting report span ends outside examined evidence")
+            if (span.start_boundary is Boundary.OUTSIDE_EVIDENCE
+                    and source.timeline.start != _EVIDENCE_FLOOR):
+                raise ReportInvariantError("intersecting report span starts outside examined evidence")
     overlap_runs = sum(span.start < limit and span.end > period.start for span in runs)
     overlap_defrosts = sum(span.start < limit and span.end > period.start for span in defrost_spans)
     for span in activities:
@@ -389,20 +415,20 @@ def compose_report(source: ReportInput) -> dict:
     rendered = []
     for (a, b), source_bucket in zip(period.edges, buckets, strict=True):
         facts = _facts(a, b, source_bucket, now=source.now, closed_until=source.closed_until)
-        rendered.append({"start": _iso(a), "end": _iso(b), **facts})
+        rendered.append({"start": iso_utc(a), "end": iso_utc(b), **facts})
         total.add_bucket(source_bucket)
     totals = _facts(period.start, period.end, total, now=source.now, closed_until=source.closed_until)
     totals["compressor_runs_overlapping"] = overlap_runs
     totals["defrosts_overlapping"] = overlap_defrosts
     return {
         "period": {"kind": period.kind, "from_date": period.from_date.isoformat(),
-                   "to_date": period.to_date.isoformat(), "from": _iso(period.start),
-                   "to": _iso(period.end), "timezone": LOCAL_TZ_NAME, "bucket": period.bucket},
-        "observation": {"now": _iso(source.now), "closed_until": _iso(source.closed_until),
-                        "effective_to": _iso(limit)},
+                   "to_date": period.to_date.isoformat(), "from": iso_utc(period.start),
+                   "to": iso_utc(period.end), "timezone": LOCAL_TZ_NAME, "bucket": period.bucket},
+        "observation": {"now": iso_utc(source.now), "closed_until": iso_utc(source.closed_until),
+                        "effective_to": iso_utc(limit)},
         "segment_rule_version": source.segment_rule_version,
-        "evidence": {"from": _iso(source.timeline.start) if limit > period.start else None,
-                     "to": _iso(source.timeline.end) if limit > period.start else None},
+        "evidence": {"from": iso_utc(source.timeline.start) if limit > period.start else None,
+                     "to": iso_utc(source.timeline.end) if limit > period.start else None},
         "totals": totals,
         "buckets": rendered,
     }

@@ -1424,7 +1424,7 @@ the current moment, not the last closed history minute.
 
 ### 25.4 Stage 4D — report projections
 
-**4D-A contract freeze; no report code yet.** One backend-owned report model composes canonical
+**4D-A contract freeze; pure domain in 4D-B, API in 4D-C.** One backend-owned report model composes canonical
 history, `rollup_1h` and Stage 4C durable activity for day, week, month and custom local-date
 periods. The frontend renders these facts; it does not derive energy, COP, activity, event
 attribution, coverage or bucket alignment. `/history` and `/activity` retain arbitrary instant
@@ -1450,6 +1450,12 @@ report edges are rejected; custom is not an instant-range API. The response emit
 bucket: `1h` for day and `1d` for week, month and custom. A custom range may be empty of data but
 cannot have zero calendar days. No `/daily-report`, `/period-report`, `/statistics-report`,
 `/report-plan` or `/report-matrix` resource is introduced.
+The supported report calendar dates are `1970-01-01` through `2100-12-31`, consistent with the
+existing history time model. A well-formed date outside that range, a period beginning before
+Warsaw midnight `1970-01-01`, or one ending after Warsaw midnight `2101-01-01` is
+unrepresentable (422); malformed date syntax remains 400.
+The exclusive boundary after `2100-12-31` may be `2101-01-01` when the requested date itself is
+supported. The minimum representable report evidence instant is Warsaw midnight of `1970-01-01`.
 
 **One interpretation.** The Stage 4C versioned classes `off`, `idle`, `co`, `dhw`, `transition`,
 `defrost`, `unknown` and compressor states `off`, `on`, `unknown` are the only activity truth.
@@ -1560,6 +1566,10 @@ the bucket with that first observed minute. No separate observed-defrost-start f
 `mean_minutes`; the report carries no `minutes[]` list. The overall
 `compressor_runs_overlapping` and `defrosts_overlapping` are non-additive and never emitted per
 bucket. A run crossing day/week/month boundaries is attributed once.
+For any span intersecting the requested settled range, `outside_evidence` on the right is an
+internal inconsistency, and `outside_evidence` on the left is allowed only when evidence begins at
+the minimum representable report instant. The pure composer fails closed if a caller supplies an
+insufficiently widened timeline; this does not reinterpret Stage 4C boundaries.
 
 **Domain shape.** The response is `{period, observation, segment_rule_version, evidence,
 totals, buckets}`. `period` names kind, resolved local `from_date`/exclusive `to_date`, UTC

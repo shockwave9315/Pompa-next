@@ -3,9 +3,9 @@
 ## Current stage
 
 **Current stage: Stage 4D — Reports and product analytics projections.** Checkpoint 4D-A's
-contract freeze is owner-accepted. Checkpoint 4D-B's pure report domain is complete and awaits
-owner review. Stage 4C is DONE and merged to `main` in PR #8 (merge commit
-`8c3bccbcf6ba305bbf547c59ef3f6167471442e8`). Its A–D
+contract freeze is owner-accepted. Checkpoint 4D-B's pure report domain and owner-approved targeted
+hardening are complete; final owner acceptance is pending. Stage 4C is DONE and merged to `main`
+in PR #8 (merge commit `8c3bccbcf6ba305bbf547c59ef3f6167471442e8`). Its A–D
 checkpoints and whole-PR review are complete. Frontend work starts after Stage 4.
 
 The already-reviewed F2 hardening commit `b81d680eecda67e7d2d80facd4b79ba08472c824` is in
@@ -332,15 +332,21 @@ follows owner review of the completed 4D-B pure domain; 4D-D follows (§25.4).
 
 - **4D-A — contract freeze (accepted/closed):** architecture, API, knownness, storage, time, error
   and snapshot contracts; stale Stage 4C docs. Documentation only.
-- **4D-B — pure report domain (complete; awaiting owner review):** `pompa/report.py` resolves
+- **4D-B — pure report domain (complete; awaiting final owner acceptance):** `pompa/report.py` resolves
   Warsaw calendar periods and bucket edges, clamps the settled extraction endpoint, composes
   coverage, observed-channel energy, paired COP, H* and class energy, technical facts and
   Stage 4C spans. One timeline extraction per span family and indexed bucket attribution avoid
-  per-bucket whole-timeline summaries. It performs no SQL, storage or HTTP work. Forty-one report
-  tests include literal and deterministic randomized minute oracles, knownness, DST,
-  cross-boundary events, F2-style tails and invariant failures. Focused report/activity/
-  aggregation/timegrid suites: 235 passed. Full no-DB backend: 966 passed, 278 skipped
-  (MariaDB-gated), one dependency deprecation warning. Gate: owner review before 4D-C.
+  per-bucket whole-timeline summaries. It performs no SQL, storage or HTTP work. Independent
+  adversarial review of the initial 4D-B head found 0 blockers, 0 important findings and 4 minor
+  findings; the owner approved targeted hardening of all four. The composer now rejects
+  intersecting spans with insufficiently widened evidence (except a true lower-bound left edge),
+  resolves valid but unsupported report dates outside 1970–2100 as a pure unrepresentable request
+  for future HTTP 422, and uses the shared UTC timestamp formatter. Committed regressions cover
+  evidence, calendar bounds, timestamp precision, stop/overlap attribution, unavailable widening,
+  duration means and internal guards alongside the existing literal and deterministic randomized
+  minute oracles. Sixty-three report tests pass; focused report/activity/aggregation/timegrid suites:
+  257 passed. Full no-DB backend: 988 passed, 278 skipped (MariaDB-gated), one dependency
+  deprecation warning. Gate: final owner acceptance before 4D-C.
 - **4D-C — read model + API:** first, an independently reviewable behavior-preserving extraction
   refactor; then one-snapshot loading, report-local current edge, consistency guard and
   `/api/v1/report`. Gate: byte-identical `/history` and `/activity`, report API and MariaDB tests,

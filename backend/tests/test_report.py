@@ -11,7 +11,8 @@ import pytest
 from pompa import report
 from pompa.activity import ACTIVITY_RULE_VERSION, Boundary, build_segments, timeline
 from pompa.aggregation import PAIRS, POWER_CHANNELS, RECORDED, Stats, fold_minutes
-from pompa.report import (ReportActivityUnavailable, ReportInput, ReportInvariantError,
+from pompa.minute import iso_utc
+from pompa.report import (ReportActivityUnavailable, ReportInput, ReportInvariantError, ReportUnrepresentable,
                           compose_report, coverage, effective_to, resolve_period)
 from pompa.timegrid import HOUR, local_midnight
 
@@ -44,11 +45,12 @@ def input_from_rows(period, rows, *, now=None, closed_until=None,
     rows = sorted(rows)
     closed_until = period.end if closed_until is None else closed_until
     now = closed_until + M if now is None else now
-    evidence_start = min(period.start, rows[0][0]) if rows and evidence_start is None else (
-        period.start if evidence_start is None else evidence_start)
-    evidence_end = max(period.end, rows[-1][0] + M) if rows and evidence_end is None else (
-        period.start if evidence_end is None and closed_until <= period.start else
-        period.end if evidence_end is None else evidence_end)
+    if evidence_start is None:
+        evidence_start = (max(local_midnight(date(1970, 1, 1)),
+                              min(period.start, rows[0][0]) - HOUR) if rows else period.start)
+    if evidence_end is None:
+        evidence_end = (max(period.end, rows[-1][0] + M) + HOUR if rows else
+                        period.start if closed_until <= period.start else period.end)
     tl = timeline(build_segments(rows), evidence_start, evidence_end, closed_until)
     partials = tuple(fold_minutes(((ts, values) for ts, values in rows
                                    if a <= ts < b and ts < closed_until), SERIES)
@@ -136,6 +138,53 @@ def test_custom_and_strict_date_forms():
             resolve_period("custom", from_date=first, to_date=last)
     with pytest.raises(ValueError):
         resolve_period("year", date="2026-01-01")
+
+
+@pytest.mark.parametrize("value", ("1969-12-31", "2101-01-01", "0001-01-01", "9999-12-31"))
+def test_well_formed_dates_outside_supported_calendar_are_unrepresentable(value):
+    with pytest.raises(ReportUnrepresentable):
+        resolve_period("day", date=value)
+
+
+@pytest.mark.parametrize("first,last", (
+    ("1969-12-31", "1970-01-01"), ("2101-01-01", "2101-01-02"),
+    ("0001-01-01", "0001-01-02"), ("9999-12-30", "9999-12-31"),
+))
+def test_well_formed_custom_dates_outside_range_are_unrepresentable(first, last):
+    with pytest.raises(ReportUnrepresentable):
+        resolve_period("custom", from_date=first, to_date=last)
+
+
+def test_supported_calendar_boundaries_and_resolved_range():
+    assert resolve_period("day", date="1970-01-01").from_date == date(1970, 1, 1)
+    assert resolve_period("day", date="2100-12-31").to_date == date(2101, 1, 1)
+    assert resolve_period("month", date="2100-12-31").to_date == date(2101, 1, 1)
+    for kind, anchor in (("week", "1970-01-01"), ("week", "2100-12-31")):
+        with pytest.raises(ReportUnrepresentable):
+            resolve_period(kind, date=anchor)
+    for malformed in ("2026-3-05", "2026-03-05T00:00:00", "2026-02-30"):
+        with pytest.raises(ValueError) as exc:
+            resolve_period("day", date=malformed)
+        assert not isinstance(exc.value, ReportUnrepresentable)
+    with pytest.raises(ValueError) as exc:
+        resolve_period("custom", from_date="9999-12-31", to_date="0001-01-01")
+    assert not isinstance(exc.value, ReportUnrepresentable)
+
+
+@pytest.mark.parametrize("fraction", (0, 0.5, 0.123, 0.123456))
+def test_all_report_timestamps_use_canonical_iso_utc(fraction):
+    period = resolve_period("day", date="2026-09-25")
+    source = input_from_rows(period, [], now=period.end + 31 + fraction)
+    result = compose_report(source)
+    assert result["period"]["from"] == iso_utc(period.start)
+    assert result["period"]["to"] == iso_utc(period.end)
+    assert result["observation"] == {
+        "now": iso_utc(source.now), "closed_until": iso_utc(source.closed_until),
+        "effective_to": iso_utc(period.end)}
+    assert result["evidence"] == {"from": iso_utc(source.timeline.start),
+                                  "to": iso_utc(source.timeline.end)}
+    assert result["buckets"][0]["start"] == iso_utc(period.edges[0][0])
+    assert result["buckets"][0]["end"] == iso_utc(period.edges[0][1])
 
 
 def test_effective_and_f2_coverage_partition():
@@ -316,11 +365,11 @@ def test_randomized_literal_energy_classes_heating_and_bucket_additivity(seed):
         assert facts["coverage"]["recorded_minutes"] == len(selected)
 
 
-@pytest.mark.parametrize("boundary", ("observed", "gap", "unknown", "outside_evidence"))
+@pytest.mark.parametrize("boundary", ("observed", "gap", "unknown"))
 def test_generic_event_boundary_and_hour_crossing(boundary):
     period = resolve_period("day", date="2026-09-25")
-    a = period.start + HOUR - M if boundary != "outside_evidence" else period.start
-    length = 3 if boundary != "outside_evidence" else 61
+    a = period.start + HOUR - M
+    length = 3
     rows = [minute(a + i * M, "defrost") for i in range(length)]
     if boundary == "observed":
         rows.insert(0, minute(a - M, "off"))
@@ -336,8 +385,8 @@ def test_generic_event_boundary_and_hour_crossing(boundary):
     assert first["events"]["defrost_events"] == first["events"]["activity_events"]["defrost"] == 1
     assert next_bucket["events"]["defrost_events"] == next_bucket["events"]["activity_events"]["defrost"] == 0
     assert sum(b["events"]["defrost_events"] for b in result["buckets"]) == 1
-    assert first["events"]["observed_defrost_seconds"] == pytest.approx((length - (2 if length == 3 else 1)) * 30)
-    assert next_bucket["events"]["observed_defrost_seconds"] == pytest.approx((2 if length == 3 else 1) * 30)
+    assert first["events"]["observed_defrost_seconds"] == pytest.approx(30)
+    assert next_bucket["events"]["observed_defrost_seconds"] == pytest.approx(60)
     assert result["totals"]["events"]["observed_defrost_seconds"] == pytest.approx(length * 30)
     assert result["totals"]["defrosts_overlapping"] == 1
     assert "defrosts_overlapping" not in first
@@ -411,6 +460,113 @@ def test_exact_off_interval_crosses_warsaw_midnight_once():
     assert intervals[(date(2026, 3, 26) - period.from_date).days]["count"] == 1
 
 
+def test_narrow_left_evidence_is_rejected_and_widened_span_is_attributed_once():
+    period = resolve_period("day", date="2026-09-25")
+    previous = resolve_period("day", date="2026-09-24")
+    a = period.start
+    rows = [minute(a - 3 * M, "off"), minute(a - 2 * M, "co"),
+            minute(a - M, "co"), minute(a, "co"), minute(a + M, "co"),
+            minute(a + 2 * M, "off")]
+    closed = period.end + HOUR
+    narrow = input_from_rows(period, rows, now=closed + M, closed_until=closed,
+                             evidence_start=period.start, evidence_end=period.end + HOUR)
+    co_span = next(s for s in report.activity_events(narrow.timeline) if s.state.value == "co")
+    assert co_span.start_boundary is Boundary.OUTSIDE_EVIDENCE
+    with pytest.raises(ReportInvariantError, match="starts outside examined evidence"):
+        compose_report(narrow)
+    before = compose_report(input_from_rows(previous, rows, now=closed + M,
+                                            closed_until=closed))
+    after = compose_report(input_from_rows(period, rows, now=closed + M,
+                                           closed_until=closed))
+    assert before["totals"]["events"]["activity_events"]["co"] == 1
+    assert after["totals"]["events"]["activity_events"]["co"] == 0
+    assert after["totals"]["events"]["observed_stops"] == 1
+
+
+def test_narrow_right_evidence_is_rejected_and_widened_stop_is_preserved():
+    period = resolve_period("day", date="2026-09-25")
+    b = period.end
+    rows = [minute(b - 2 * M, "off"), minute(b - M, "co"), minute(b, "off")]
+    closed = b + HOUR
+    narrow = input_from_rows(period, rows, now=closed + M, closed_until=closed,
+                             evidence_start=period.start - HOUR, evidence_end=b)
+    assert report.compressor_runs(narrow.timeline)[0].end_boundary is Boundary.OUTSIDE_EVIDENCE
+    with pytest.raises(ReportInvariantError, match="ends outside examined evidence"):
+        compose_report(narrow)
+    wide = compose_report(input_from_rows(period, rows, now=closed + M, closed_until=closed))
+    assert wide["buckets"][-1]["events"]["observed_stops"] == 1
+    assert wide["totals"]["events"]["complete_runs"]["count"] == 1
+
+
+def test_supported_evidence_floor_legitimately_has_outside_left_boundary():
+    period = resolve_period("day", date="1970-01-01")
+    rows = [minute(period.start, "co"), minute(period.start + M, "off")]
+    source = input_from_rows(period, rows, now=period.end + M,
+                             evidence_start=local_midnight(date(1970, 1, 1)))
+    span = next(s for s in report.activity_events(source.timeline) if s.state.value == "co")
+    assert span.start_boundary is Boundary.OUTSIDE_EVIDENCE
+    events = compose_report(source)["buckets"][0]["events"]
+    assert events["activity_events"]["co"] == 1
+    assert events["observed_starts"] == 0
+
+
+def test_stop_at_bucket_edge_belongs_to_last_run_minute():
+    period = resolve_period("day", date="2026-09-25")
+    edge = period.start + HOUR
+    rows = [minute(edge - 2 * M, "off"), minute(edge - M, "co"), minute(edge, "off")]
+    report_data = compose_report(input_from_rows(period, rows, now=period.end + M))
+    first, second = (bucket["events"] for bucket in report_data["buckets"][:2])
+    assert (first["observed_starts"], first["observed_stops"]) == (1, 1)
+    assert (second["observed_starts"], second["observed_stops"]) == (0, 0)
+    assert first["complete_runs"]["count"] == 1
+
+
+def test_incomplete_run_with_only_observed_start_is_not_complete():
+    period = resolve_period("day", date="2026-09-25")
+    a = period.start + HOUR
+    rows = [minute(a, "off"), minute(a + M, "co")]
+    source = input_from_rows(period, rows, now=period.end + M)
+    run = report.compressor_runs(source.timeline)[0]
+    assert run.start_boundary is Boundary.OBSERVED
+    assert run.end_boundary is Boundary.GAP
+    events = compose_report(source)["buckets"][1]["events"]
+    assert events["observed_starts"] == 1
+    assert events["observed_stops"] == 0
+    assert events["complete_runs"]["count"] == 0
+
+
+def test_overlap_requires_true_intersection_and_is_totals_only():
+    period = resolve_period("day", date="2026-09-25")
+    a = period.start
+    touching = [minute(a - 2 * M, "defrost"), minute(a - M, "defrost"),
+                minute(a, "off")]
+    report_touch = compose_report(input_from_rows(period, touching, now=period.end + M))
+    assert report_touch["totals"]["compressor_runs_overlapping"] == 0
+    assert report_touch["totals"]["defrosts_overlapping"] == 0
+    intersecting = touching + [minute(a + M, "defrost"), minute(a + 2 * M, "off")]
+    report_intersection = compose_report(input_from_rows(period, intersecting,
+                                                        now=period.end + M))
+    assert report_intersection["totals"]["compressor_runs_overlapping"] == 1
+    assert report_intersection["totals"]["defrosts_overlapping"] == 1
+    for bucket in report_intersection["buckets"]:
+        assert "compressor_runs_overlapping" not in bucket
+        assert "defrosts_overlapping" not in bucket
+
+
+def test_duration_means_use_true_division():
+    period = resolve_period("day", date="2026-09-25")
+    a = period.start + HOUR
+    states = ["off", "co", "off", "co", "co", "off", "off", "co", "co", "off"]
+    rows = [minute(a + i * M, state) for i, state in enumerate(states)]
+    events = compose_report(input_from_rows(period, rows, now=period.end + M))["totals"]["events"]
+    assert events["complete_runs"] == {"count": 3, "total_minutes": 5,
+                                        "min_minutes": 1, "max_minutes": 2,
+                                        "mean_minutes": pytest.approx(5 / 3)}
+    assert events["exact_off_intervals"] == {"count": 2, "total_minutes": 3,
+                                              "min_minutes": 1, "max_minutes": 2,
+                                              "mean_minutes": 1.5}
+
+
 def test_invariant_failures_and_activity_unavailable():
     period = resolve_period("day", date="2026-09-25")
     rows = [minute(period.start, "co")]
@@ -434,6 +590,58 @@ def test_invariant_failures_and_activity_unavailable():
                     unavailable=[(period.start, period.start + HOUR)])
     with pytest.raises(ReportActivityUnavailable):
         compose_report(replace(empty, timeline=lost))
+
+
+def test_unavailable_widening_outside_settled_range_does_not_refuse_report():
+    period = resolve_period("day", date="2026-09-25")
+    a, b = period.start, period.end
+    source = input_from_rows(period, [minute(a, "co"), minute(a + M, "off")],
+                             now=b + HOUR + M, closed_until=b + HOUR)
+    original = source.timeline
+    left = timeline(original.segments, original.start, original.end, original.closed_until,
+                    unavailable=[(a - HOUR, a)])
+    right = timeline(original.segments, original.start, original.end, original.closed_until,
+                     unavailable=[(b, b + HOUR)])
+    left_events = compose_report(replace(source, timeline=left))["totals"]["events"]
+    right_events = compose_report(replace(source, timeline=right))["totals"]["events"]
+    assert left_events["activity_events"]["co"] == right_events["activity_events"]["co"] == 1
+    inside = timeline(original.segments, original.start, original.end, original.closed_until,
+                      unavailable=[(a + 2 * M, a + 3 * M)])
+    with pytest.raises(ReportActivityUnavailable):
+        compose_report(replace(source, timeline=inside))
+
+
+def test_recorded_minutes_cannot_exceed_settled_minutes():
+    period = resolve_period("day", date="2026-09-25")
+    with pytest.raises(ReportInvariantError, match="coverage counts disagree"):
+        coverage(period.start, period.start + HOUR, now=period.start + HOUR,
+                 closed_until=period.start + M, recorded_minutes=2)
+
+
+def test_pair_channel_class_and_frontier_internal_guards():
+    period = resolve_period("day", date="2026-09-25")
+    a = period.start + HOUR
+    source = input_from_rows(period, [minute(a, "co"), minute(a + M, "co")],
+                             now=period.end + M)
+    with pytest.raises(ReportInvariantError, match="frontiers disagree"):
+        compose_report(replace(source, closed_until=period.end - M))
+
+    partials = list(source.history_buckets)
+    bucket = dict(partials[1])
+    bucket[POWER_CHANNELS[0]] = Stats(1, 900.0, 900.0, 900.0, 900.0)
+    partials[1] = bucket
+    with pytest.raises(ReportInvariantError, match="paired minutes exceed channel known minutes"):
+        compose_report(replace(source, history_buckets=tuple(partials)))
+
+    items = list(source.timeline.items)
+    segment_index = next(i for i, item in enumerate(items) if isinstance(item, report.ActivitySegment))
+    segment = items[segment_index]
+    energy = dict(segment.energy)
+    for key in PAIRS["co"]:
+        del energy[key]
+    items[segment_index] = replace(segment, energy=energy)
+    with pytest.raises(ReportInvariantError, match="class paired-minute partition disagrees"):
+        compose_report(replace(source, timeline=replace(source.timeline, items=tuple(items))))
 
 
 def test_span_functions_are_called_once_for_many_buckets(monkeypatch):

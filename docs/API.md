@@ -667,6 +667,10 @@ ranges remain `/history` and `/activity`. Calendar midnight is converted through
 167/168/169 hours, and month 672/696/720/743/744/745 hours. Day has one bucket per local hour
 (`bucket: "1h"`, so the repeated autumn hour has two distinct UTC buckets); week, month and
 custom have one bucket per local day (`bucket: "1d"`). All calendar buckets are emitted.
+Supported report calendar dates are `1970-01-01` through `2100-12-31`. A valid date outside that
+range, a resolved period beginning before Warsaw midnight `1970-01-01`, or one ending after Warsaw
+midnight `2101-01-01` is unrepresentable (422), while malformed date syntax is 400. The exclusive
+end of a supported final day or month may be `2101-01-01`.
 
 The response shape is:
 
@@ -804,7 +808,7 @@ corruption. The only report-specific errors are:
 | Status | Cause |
 |---|---|
 | `400` | Malformed period/date/custom parameters, any time component, `to <= from`, or custom span over 31 local days. |
-| `422` | Activity-unavailable history or a pathological purged current edge that cannot be represented. |
+| `422` | A valid calendar date outside the supported 1970–2100 report range, a resolved period extending beyond it, activity-unavailable history, or a pathological purged current edge that cannot be represented. |
 | `500` | Invalid/corrupt durable activity, history/activity recorded-count inconsistency, or the technical compressor-frequency identity failing. |
 | `503` | Database unavailable. |
 
