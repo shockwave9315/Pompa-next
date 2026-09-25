@@ -671,6 +671,8 @@ Calendar resolution does not check installation history or impose a report-speci
 A valid settled period with no stored rows is an ordinary empty report: zero recorded minutes,
 settled gaps, zero event counts and `null` unmeasured values. Actual calendar/time conversion
 failure or a Warsaw boundary outside the whole UTC-hour grid is a pure unrepresentable condition.
+Malformed report request forms map to 400; a well-formed but technically unrepresentable
+calendar/time maps to 422. Absence of stored rows never makes a calendar period unrepresentable.
 
 The response shape is:
 
@@ -808,7 +810,7 @@ corruption. The report-specific HTTP errors frozen so far are:
 | Status | Cause |
 |---|---|
 | `400` | Malformed period/date/custom parameters, any time component, `to <= from`, or custom span over 31 local days. |
-| `422` | Activity-unavailable history or a pathological purged current edge that cannot be represented. |
+| `422` | Well-formed but technically unrepresentable Warsaw calendar/time, activity-unavailable history, or a pathological purged current edge that cannot be represented. |
 | `500` | Invalid/corrupt durable activity, history/activity recorded-count inconsistency, or the technical compressor-frequency identity failing. |
 | `503` | Database unavailable. |
 

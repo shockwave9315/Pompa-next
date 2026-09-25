@@ -14,7 +14,7 @@ from pompa.aggregation import PAIRS, POWER_CHANNELS, RECORDED, Stats, fold_minut
 from pompa.minute import iso_utc
 from pompa.report import (ReportActivityUnavailable, ReportInput, ReportInvariantError, ReportUnrepresentable,
                           compose_report, coverage, effective_to, resolve_period)
-from pompa.timegrid import HOUR, local_midnight
+from pompa.timegrid import HOUR, Unrepresentable, local_midnight
 
 M = 60
 SERIES = (RECORDED, *POWER_CHANNELS, *(key for pair in PAIRS.values() for key in pair),
@@ -166,6 +166,7 @@ def test_report_resolution_is_independent_of_imaginary_installation_date():
 
 
 def test_actual_calendar_conversion_failures_are_unrepresentable():
+    assert issubclass(ReportUnrepresentable, Unrepresentable)
     # Python cannot construct the exclusive following day of date.max.
     with pytest.raises(ReportUnrepresentable) as exc:
         resolve_period("day", date="9999-12-31")
@@ -215,6 +216,18 @@ def test_fully_historical_empty_report_has_gaps_and_unknown_measurements():
     assert result["totals"]["compressor_runs_overlapping"] == 0
     assert result["totals"]["defrosts_overlapping"] == 0
     assert all(bucket["coverage"]["recorded_minutes"] == 0 for bucket in result["buckets"])
+
+
+def test_pre_unix_zero_empty_report_requires_full_gap_timeline():
+    period = resolve_period("day", date="1970-01-01")
+    assert period.start < 0 < period.end
+    source = input_from_rows(period, [], now=period.end + M)
+    result = compose_report(source)
+    assert result["totals"]["coverage"]["recorded_minutes"] == 0
+    assert result["totals"]["coverage"]["gap_minutes"] == 1440
+    truncated = timeline([], 0, period.end, period.end)
+    with pytest.raises(ReportInvariantError, match="does not cover the settled report range"):
+        compose_report(replace(source, timeline=truncated))
 
 
 @pytest.mark.parametrize("fraction", (0, 0.5, 0.123, 0.123456))

@@ -1587,7 +1587,11 @@ report purely. No DB I/O under the recorder lock. Do not call the public `/histo
 extractor that owns raw/rollup resolution, purged-raw semantics, series loading and folding to
 caller bucket edges; the existing route wraps the same logic. Refactor `activity_history.py`
 toward a caller-session-aware timeline loader with a report-local `raw_edge` option; the existing
-route keeps its old behavior and bytes. Exact Python names are implementation choices. If `C`
+route keeps its old behavior and bytes. The report-local loader must cover the full settled
+report interval even when `period.start < 0`; it must not inherit `/activity`'s Unix-0 left
+clamp. A pre-Unix-0 interval with no stored evidence is ordinary gap evidence, not an error or
+activity-unavailable history. This requires no new stored rows and does not change `/activity`.
+Exact Python names are implementation choices. If `C`
 is not hour-aligned, Stage 4D may source `floor_hour(C)` from raw minutes strictly below `C`,
 even when earlier hours use durable segments. This edge rule does not alter `/activity` and reuses
 its classification, `build_segments` and energy fold. A purged current edge that cannot be

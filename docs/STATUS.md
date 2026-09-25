@@ -344,10 +344,14 @@ follows owner review of the completed 4D-B pure domain; 4D-D follows (§25.4).
   policy; it is removed. Calendar resolution depends on Warsaw boundaries, not installation
   history. A fully historical period without rows reports settled gaps and `null` measurements;
   only actual calendar/time or whole-hour-grid unrepresentability raises a pure request error.
+  Targeted review of that correction found 0 blockers, 0 important findings and 2 minor
+  contract gaps, both now closed: `ReportUnrepresentable` again inherits the shared
+  `timegrid.Unrepresentable` semantics, and the 4D-C report-local loader is required to cover
+  settled pre-Unix-0 time as ordinary gaps when no rows exist, without changing `/activity`.
   Committed regressions cover empty history, conversion extremes, evidence widening, timestamp
   precision, stop/overlap attribution, unavailable widening, duration means and internal guards
-  alongside the literal and deterministic randomized minute oracles. Sixty-four report tests pass;
-  focused report/activity/aggregation/timegrid suites: 258 passed. Full no-DB backend: 989 passed,
+  alongside the literal and deterministic randomized minute oracles. Sixty-five report tests pass;
+  focused report/activity/aggregation/timegrid suites: 259 passed. Full no-DB backend: 990 passed,
   278 skipped (MariaDB-gated), one dependency deprecation warning. Gate: final owner acceptance
   before 4D-C.
 - **4D-C — read model + API:** first, an independently reviewable behavior-preserving extraction

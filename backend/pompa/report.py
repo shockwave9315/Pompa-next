@@ -20,7 +20,7 @@ from .activity import (ACTIVITY_RULE_VERSION, Activity, ActivitySegment, Boundar
                        compressor_runs, defrosts)
 from .aggregation import PAIRS, POWER_CHANNELS, RECORDED, Stats, combine_maps, cop, coverage_percent, energy_kwh
 from .minute import MINUTE, iso_utc
-from .timegrid import HOUR, LOCAL_TZ_NAME, bucket_edges, local_midnight
+from .timegrid import HOUR, LOCAL_TZ_NAME, Unrepresentable, bucket_edges, local_midnight
 
 HEATING_ACTIVITIES = (Activity.CO, Activity.DHW, Activity.TRANSITION)
 _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
@@ -36,7 +36,7 @@ class ReportActivityUnavailable(ValueError):
     """Recorded history in the requested range lacks Stage 4C activity evidence."""
 
 
-class ReportUnrepresentable(ValueError):
+class ReportUnrepresentable(Unrepresentable):
     """A valid calendar period cannot be represented by the Warsaw hour grid."""
 
 
