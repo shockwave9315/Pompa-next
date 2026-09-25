@@ -229,7 +229,7 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
   - every purge-proof corruption class
   - post-purge equivalence of timeline, runs, defrosts, gaps, energy and paired COP
   - cross-hour and Warsaw-midnight stitching
-  - three MariaDB concurrency races
+  - four MariaDB concurrency races
 
 ### Remaining checkpoints
 
