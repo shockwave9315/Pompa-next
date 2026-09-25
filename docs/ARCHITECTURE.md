@@ -1252,7 +1252,8 @@ CREATE TABLE activity_segment_1h (
   without a child table or fifty columns.
 - **No foreign key.** There is no FK to `sample_1m`: segments must outlive raw purge. An hour with
   no raw minutes has no rows; no gap row, no empty-hour record and no cross-hour or open-event
-  state is stored. Gaps are the holes between segments, read back as `Gap`s.
+  state is stored. Within a materialized span, missing minutes are the holes between segments,
+  read back as `Gap`s.
 - **Validation.** `pompa.activity` encodes and fail-closed decodes every row. It checks:
   - the rule version (only 1 exists) and known `Activity`/`Compressor` strings;
   - activity/compressor/defrost-fraction combinations version 1 can produce;
@@ -1291,8 +1292,20 @@ segment row.
   anomaly, not backfill work, and the purge proof keeps reporting it.
 - **History purged before 4C-B.** Hours whose raw was purged before this checkpoint have a rollup
   but no raw and no segments. They are never backfilled, and nothing is inferred from hourly
-  averages or `operations_counter`. Their activity is unavailable evidence, and
-  `first_purged_hour` keeps its single meaning.
+  averages or `operations_counter`. `first_purged_hour` keeps its single meaning.
+
+**Activity evidence per UTC hour.** Stored facts give four distinct cases:
+
+| Segments | Raw | Canonical rollup | Activity evidence |
+|---|---|---|---|
+| present | any | present | durable |
+| absent | present | any | derivable from raw (not yet rolled, or awaiting backfill) |
+| absent | absent | present | **unavailable**: canonical minutes were recorded, but their activity detail was purged before 4C-B |
+| absent | absent | absent | not recorded |
+
+An unavailable hour is not an ordinary gap. `timeline()` receives only segments, so it would
+render both of the last two rows as `Gap`. Checkpoint C must consult these storage facts and keep
+"activity unavailable" distinct from "not recorded" on every read.
 
 **Purge proof.** After the canonical count proof and the optional proof, purge decodes the
 candidate hours' segment rows through a locking read. It requires them to equal, hour by hour and
@@ -1302,6 +1315,15 @@ Any missing, extra, split, shifted, changed or invalid row raises `PurgeRefused`
 nothing. After deletion, canonical and optional rollups and all segments remain. Decoded segments
 rebuild the same `Timeline`, activity events, compressor runs with boundaries, defrosts and their
 seconds, gaps, and per-run energy and paired-COP ingredients as the raw minutes did.
+
+- **Canonical form.** Semantic equality is not enough. Each stored row must also equal
+  `segment_record` of its expected segment exactly, including the `energy_json` text. JSON that
+  Python decodes to the same values can still mean something else to another reader. Examples
+  are a duplicate key, other whitespace, key order or number spelling, and `-0.0`. On MariaDB,
+  `JSON_EXTRACT` returns a duplicate key's first occurrence, while Python keeps the last.
+- **Why byte equality is safe.** MariaDB stores and returns the `utf8mb4_bin` text byte for byte,
+  and a DOUBLE collapses `-0.0` to `0.0`. Exact record equality is therefore reliable, and
+  application-written rows always pass it.
 
 **Locking.** Every writer (persist, roll, backfill, purge, policy PUT) takes the policy-head lock
 first, so they serialize. After it come the rolled frontier, canonical raw and the derived tables.

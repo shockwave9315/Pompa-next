@@ -519,8 +519,40 @@ def test_backfill_never_fabricates_hours_purged_before_4c(any_storage):
     with any_storage.session() as s:
         assert s.first_purged_hour(T0, T0 + 2 * H) == T0  # canonical purge fact unchanged
         assert s.read_rollup(T0, T0 + H, ["recorded"])[0][2] == 3
-    tl = timeline(durable(any_storage), T0, T0 + 2 * H, T0 + 2 * H)
-    assert tl.items[0] == Gap(T0, T0 + H)  # unavailable evidence, never invented segments
+    # Recorded once, activity detail lost before 4C-B: unavailable, not a never-recorded gap.
+    assert _activity_evidence(any_storage, T0) == "unavailable"
+
+
+def _activity_evidence(storage, hour):
+    """The four storage-level activity facts of one UTC hour (a test view; 4C-C owns the API form)."""
+    with storage.session() as s:
+        if s.read_activity_segments(hour, hour + H):
+            return "durable"
+        if s.read_minutes(hour, hour + H, ["outside_temp"]):
+            return "derivable from raw"
+        if s.read_rollup(hour, hour + H, ["recorded"]):
+            return "unavailable"  # canonical minutes existed; their activity order was purged pre-4C-B
+        return "not recorded"
+
+
+def test_pre_4c_purged_activity_stays_distinguishable_from_a_never_recorded_hour(any_storage):
+    put(any_storage, T0, [CO] * 3)  # hour 0: later purged by a pre-4C-B process
+    # hour 1: never recorded
+    for hour in range(2, 8):
+        put(any_storage, T0 + hour * H, [CO] * 3 + [OFF] * 57)
+    delete_activity(any_storage, T0, T0 + H)
+    with any_storage.session() as s:
+        s.delete_minutes_before(T0 + H)
+    assert purge_step(any_storage, NOW, 365, None, 1)[1] == 60  # hour 2 purged after 4C-B
+    delete_activity(any_storage, T0 + 3 * H, T0 + 4 * H)  # hour 3: rolled before 4C-B, raw kept
+    assert [_activity_evidence(any_storage, T0 + h * H) for h in range(5)] == [
+        "unavailable", "not recorded", "durable", "derivable from raw", "durable"]
+    with any_storage.session() as s:  # canonical purge fact alone cannot tell hours 0 and 2 apart
+        assert s.first_purged_hour(T0, T0 + H) == T0 and s.first_purged_hour(T0 + 2 * H, T0 + 3 * H) == T0 + 2 * H
+        assert s.first_purged_hour(T0 + H, T0 + 2 * H) is None
+    assert backfill_activity_step(any_storage, 0, 24)[1:] == ([T0 + 3 * H], True)
+    assert [_activity_evidence(any_storage, T0 + h * H) for h in range(5)] == [
+        "unavailable", "not recorded", "durable", "durable", "durable"]  # nothing fabricated
 
 
 def test_backfill_ignores_raw_hours_without_a_rollup(any_storage):
@@ -833,3 +865,87 @@ def test_backfill_snapshot_older_than_a_purge_rebuilds_nothing_purged(mariadb, m
     assert result["backfill"][1:] == ([T0 + 2 * H, T0 + 3 * H], True)
     assert (records(mariadb, T0, T0 + 2 * H), rollup_facts(mariadb, T0, T0 + 2 * H)) == kept
     assert len(durable(mariadb)) == 8
+
+
+# ------------------------------------------------------------------ canonical persisted records (F1)
+
+def _variants():
+    """Energy JSON that Python decodes to the canonical values but is not the canonical text."""
+    import json
+
+    def reorder(text):
+        return json.dumps(dict(reversed(list(json.loads(text).items()))), separators=(",", ":"))
+
+    return {
+        "duplicate key": lambda t: '{"co_power_consumption":[1,0.0,0.0,0.0,0.0],' + t[1:],
+        "whitespace": lambda t: json.dumps(json.loads(t), sort_keys=True),
+        "key order": reorder,
+        "exponent spelling": lambda t: t.replace("4502.5", "4.5025e3"),
+        "trailing zero": lambda t: t.replace("4502.5", "4502.50"),
+        "signed zero": lambda t: t.replace('"dhw_power_consumption":[5,0.0,', '"dhw_power_consumption":[5,-0.0,'),
+        "integer spelling": lambda t: t.replace('"dhw_power_production":[5,0.0,', '"dhw_power_production":[5,0,'),
+    }
+
+
+@pytest.mark.parametrize("variant", _variants())
+def test_purge_refuses_noncanonical_but_equivalent_energy_json(any_storage, variant):
+    scenario(any_storage)
+    canonical = records(any_storage, T0, T0 + H)
+    record = list(canonical[1])  # CO minutes 5-9: co_power_consumption [5,4502.5,...]
+    text = _variants()[variant](record[6])
+    assert text != record[6]
+    record[6] = text
+    # A decoded-values proof alone would accept it: Python sees exactly the canonical segment.
+    assert decode_segment(tuple(record)) == decode_segment(canonical[1])
+    with any_storage.session() as s:
+        s.replace_activity_hour(T0, [*canonical[:1], tuple(record), *canonical[2:]])
+    minutes_before = raw(any_storage)
+    with pytest.raises(PurgeRefused, match="canonical persisted form"):
+        purge_step(any_storage, NOW, 365, None, 24)
+    assert raw(any_storage) == minutes_before
+    with any_storage.session() as s:  # repairable from raw
+        rebuild_hour(s, T0)
+    assert records(any_storage, T0, T0 + H) == canonical
+    assert purge_all(any_storage) == 178
+
+
+def test_duplicate_key_means_different_things_to_mariadb_and_python(mariadb):
+    """The reproducer: valid JSON, two readers, two meanings; purge must not trust either."""
+    mariadb.ensure_schema()
+    scenario(mariadb)
+    canonical = records(mariadb, T0, T0 + H)
+    record = list(canonical[1])
+    record[6] = _variants()["duplicate key"](record[6])
+    with mariadb.session() as s:
+        s.replace_activity_hour(T0, [*canonical[:1], tuple(record), *canonical[2:]])
+        s._cur.execute("SELECT JSON_VALID(energy_json), JSON_EXTRACT(energy_json, '$.co_power_consumption[0]')"
+                       " FROM activity_segment_1h WHERE start_ts = %s", (record[0],))
+        assert s._cur.fetchone() == (1, "1")  # MariaDB reads the first occurrence: n = 1
+    assert decode_segment(tuple(record)).energy["co_power_consumption"].n == 5  # Python: the last
+    assert records(mariadb, T0, T0 + H)[1][6] == record[6]  # stored and returned byte for byte
+    minutes_before = raw(mariadb)
+    with pytest.raises(PurgeRefused, match="canonical persisted form"):
+        purge_step(mariadb, NOW, 365, None, 24)
+    assert raw(mariadb) == minutes_before
+
+
+def test_application_records_are_canonical_and_pass_the_proof(any_storage):
+    """No false refusal: arbitrary non-dyadic floats written by the application round-trip exactly."""
+    import random
+
+    rng = random.Random(9)
+    shapes = []
+    for i in range(300):
+        shape = dict(rng.choice([CO, DHW, OFF, IDLE, UNKNOWN, defrost(rng.choice([0.583333, 1.0, 0.1]))]))
+        for key in ("co_power_consumption", "co_power_production", "dhw_power_consumption",
+                    "dhw_power_production"):
+            if shape[key] is not None:
+                shape[key] = rng.choice([0.0, 0.1 + 0.2, 1 / 3, rng.uniform(0, 5000), 1e-9])
+        shapes.append(None if i % 97 == 50 else shape)
+    rows = put(any_storage, T0, shapes)
+    for hour in range(5):
+        hour_rows = [(r.ts, r.values) for r in rows if T0 + hour * H <= r.ts < T0 + (hour + 1) * H]
+        assert records(any_storage, T0 + hour * H, T0 + (hour + 1) * H) == [
+            segment_record(seg) for seg in build_segments(hour_rows)]
+    assert purge_all(any_storage) == len([r for r in rows if r.ts < T0 + 3 * H])
+    assert records(any_storage, T0, T0 + 3 * H)

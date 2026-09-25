@@ -222,18 +222,25 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
   than its policy-head lock. A late minute racing a purge could then rebuild a purged hour from
   itself alone. `persist()` now evaluates `first_purged_hour` with current reads. Production had
   no concurrent path, because persist and purge share the recorder thread.
+- Final hardening:
+  - Purge also requires every stored row to be exactly the canonical `segment_record`, including
+    the `energy_json` text. A duplicate JSON key had let MariaDB and Python read one row
+    differently while the decoded-values proof passed.
+  - Hours whose raw was purged before 4C-B are documented and tested as "activity unavailable",
+    distinct from never-recorded hours. Checkpoint C must keep that distinction on reads.
 - `backend/tests/test_activity_durable.py` covers:
   - schema, round trip and fail-closed decoding
   - rebuild, forward roll, late writes, lost acknowledgement and rollback
-  - backfill, including pre-4C purged history
-  - every purge-proof corruption class
+  - backfill, including pre-4C purged history as "unavailable" rather than "not recorded"
+  - every purge-proof corruption class, including non-canonical but equivalent JSON
   - post-purge equivalence of timeline, runs, defrosts, gaps, energy and paired COP
   - cross-hour and Warsaw-midnight stitching
   - four MariaDB concurrency races
 
 ### Remaining checkpoints
 
-- C: activity/timeline/cycles API resources and their evidence-loading policy.
+- C: activity/timeline/cycles API resources, their evidence-loading policy, and a read form that
+  keeps "activity unavailable" (pre-4C-B purged hours) distinct from "not recorded".
 - D: tests/docs closure and CT109 runtime validation.
 
 ## Out of scope

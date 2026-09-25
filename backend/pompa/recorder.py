@@ -314,14 +314,21 @@ def purge_step(storage: Storage, now: float, retention_days: int, pending_from: 
 
 
 def _prove_activity(session: Session, rows: list, first: int, end: int) -> None:
-    """Stored activity segments must equal the segments of the locked raw minutes, hour by hour.
+    """Stored activity rows must be exactly the canonical rows of the locked raw minutes, per hour.
 
-    Exact equality of every field (start, minutes, activity, compressor,
-    defrost fraction, rule version via decoding, every energy statistic), not
-    a minute count: raw is the only source that could ever repair them.
+    Two checks, both required. Every stored row must decode as valid version-1
+    truth equal to ``build_segments`` of the hour's raw minutes (start, minutes,
+    activity, compressor, defrost fraction, every energy statistic). And every
+    stored row must be the exact persisted form ``segment_record`` writes, down
+    to the ``energy_json`` text: JSON that decodes to the same Python values
+    (a duplicate key, other whitespace, key order or number spelling) can mean
+    something else to another reader, e.g. MariaDB's ``JSON_EXTRACT`` takes the
+    first duplicate where Python takes the last. Raw is the only source that
+    could ever repair either, so any difference deletes nothing.
     """
+    records = session.read_activity_segments(first, end, locking=True)
     try:
-        stored = decode_segments(session.read_activity_segments(first, end, locking=True))
+        stored = decode_segments(records)
     except ActivityRecordInvalid as e:
         raise PurgeRefused(f"stored activity segments are invalid: {e}") from e
     for hour_ts in range(first, end, HOUR):
@@ -330,6 +337,11 @@ def _prove_activity(session: Session, rows: list, first: int, end: int) -> None:
         if actual != expected:
             raise PurgeRefused(f"activity segments of hour {iso_utc(hour_ts)} do not match its raw minutes"
                                f" ({len(actual)} stored, {len(expected)} expected)")
+        # MariaDB returns energy_json byte for byte; a DOUBLE cannot hold a distinct -0.0.
+        if [tuple(r) for r in records if hour_ts <= r[0] < hour_ts + HOUR] != [
+                segment_record(seg) for seg in expected]:
+            raise PurgeRefused(f"activity segments of hour {iso_utc(hour_ts)} are not in their canonical"
+                               " persisted form")
 
 
 def physical_reading_dict(reading: PhysicalReading, *, now: float, connected: bool,
