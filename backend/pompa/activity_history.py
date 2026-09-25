@@ -18,10 +18,11 @@ a span that intersects the range still ends at the edge of the examined evidence
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 
 from .activity import (
     ACTIVITY_COLUMNS, ACTIVITY_RULE_VERSION, POWER_CHANNELS, Activity, ActivitySegment, Boundary, Gap,
-    ObservedSpan, Unavailable, activity_events, build_segments, classify, compressor_off_intervals,
+    ObservedSpan, Timeline, Unavailable, activity_events, build_segments, classify, compressor_off_intervals,
     ActivityRecordInvalid, compressor_runs, decode_segments, defrosts, segment_record, summarize, timeline,
 )
 from .aggregation import PAIRS, RECORDED, Stats, cop, energy_kwh
@@ -124,6 +125,47 @@ def _undecided(tl, a: int, b: int) -> tuple[bool, bool]:
     return left, right
 
 
+@dataclass(frozen=True)
+class LoadedTimeline:
+    timeline: Timeline
+    evidence_from: int
+    evidence_to: int
+
+
+def load_timeline(session: Session, start: int, end: int, closed_until: int,
+                  *, left_floor: int | None = None) -> LoadedTimeline:
+    """Load and widen Stage 4C evidence inside the caller's existing snapshot.
+
+    ``left_floor`` is the public activity resource's Unix-0 evidence boundary.
+    Other callers may examine earlier settled gaps without changing that resource.
+    """
+    cap = ceil_hour(closed_until)  # no closed minute lies at or beyond it
+    evidence = _Evidence(session, closed_until)
+    lo = floor_hour(start - MINUTE if left_floor is None else max(left_floor, start - MINUTE))
+    hi = max(lo, min(ceil_hour(end + MINUTE), cap))
+    evidence.load(lo, hi)
+    lost = [h for h in sorted(evidence.unavailable)
+            if h < min(end, closed_until) and h + HOUR > start]
+    if lost:
+        raise ActivityUnavailable(lost[0])
+    step = HOUR
+    while True:
+        tl = evidence.timeline(lo, max(hi, end))
+        left, right = _undecided(tl, start, end)
+        left, right = left and (left_floor is None or lo > left_floor), right and hi < cap
+        if not (left or right):
+            break
+        if left:
+            next_lo = lo - step if left_floor is None else max(left_floor, lo - step)
+            evidence.load(next_lo, lo)
+            lo = next_lo
+        if right:
+            evidence.load(hi, min(cap, hi + step))
+            hi = min(cap, hi + step)
+        step = min(2 * step, MAX_WIDENING_STEP)
+    return LoadedTimeline(tl, lo, hi)
+
+
 def query(storage: Storage, start: int, end: int, now: float, settled_before: int | None = None) -> dict:
     """Activity facts for minute-aligned ``start < end``.
 
@@ -138,31 +180,10 @@ def query(storage: Storage, start: int, end: int, now: float, settled_before: in
                                        or settled_before > wall_closed):
         raise ValueError("settled_before must be a minute-aligned integer no later than floor_minute(now)")
     closed_until = wall_closed if settled_before is None else settled_before
-    cap = ceil_hour(closed_until)  # no closed minute lies at or beyond it
     with storage.session() as s:
-        evidence = _Evidence(s, closed_until)
-        lo = floor_hour(max(0, start - MINUTE))
-        hi = max(lo, min(ceil_hour(end + MINUTE), cap))
-        evidence.load(lo, hi)
-        lost = [h for h in sorted(evidence.unavailable)
-                if h < min(end, closed_until) and h + HOUR > start]
-        if lost:
-            raise ActivityUnavailable(lost[0])
-        step = HOUR
-        while True:
-            tl = evidence.timeline(lo, max(hi, end))
-            left, right = _undecided(tl, start, end)
-            left, right = left and lo > 0, right and hi < cap
-            if not (left or right):
-                break
-            if left:
-                evidence.load(max(0, lo - step), lo)
-                lo = max(0, lo - step)
-            if right:
-                evidence.load(hi, min(cap, hi + step))
-                hi = min(cap, hi + step)
-            step = min(2 * step, MAX_WIDENING_STEP)
-    return _response(tl, start, end, now, closed_until, lo, hi)
+        loaded = load_timeline(s, start, end, closed_until, left_floor=0)
+    return _response(loaded.timeline, start, end, now, closed_until,
+                     loaded.evidence_from, loaded.evidence_to)
 
 
 # ------------------------------------------------------------------ serialization

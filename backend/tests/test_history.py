@@ -5,15 +5,16 @@ Tests taking ``any_storage`` run on FakeStorage and, with POMPA_TEST_DB_HOST, on
 
 from contextlib import contextmanager
 from datetime import date
+import json
 
 import pytest
 
 from conftest import T0, FakeStorage, minutes, row, sample
 from conftest import persist_canonical
-from pompa import history
+from pompa import activity_history, history
 from pompa.aggregation import fold_minutes
 from pompa.recorder import purge_step, roll_next_hour
-from pompa.timegrid import Unrepresentable, local_midnight
+from pompa.timegrid import Unrepresentable, bucket_edges, local_midnight
 
 H = 3600
 H0 = T0  # 2027-01-15T08:00:00Z
@@ -67,6 +68,45 @@ def spy(storage, monkeypatch):
 def gappy(start, hours):
     """Minutes with scattered missing rows, NULL metrics and one 100-minute outage."""
     return [sample(start + 60 * i, i) for i in range(hours * 60) if i % 17 and not 130 <= i < 230]
+
+
+@pytest.mark.parametrize("bucket", ["1m", "1h", "total"])
+def test_canonical_partials_use_caller_session_and_match_whole_history_response(
+        any_storage, monkeypatch, bucket):
+    persist_canonical(any_storage, gappy(H0, 3))
+    roll_until(any_storage, H0 + 2 * H)
+    start, end, now = H0 + 7 * 60, H0 + 3 * H, H0 + 4 * H
+    series = ["outside_temp", "co_power_consumption", "cop_co", "cop_total"]
+    expected = q(any_storage, start, end, bucket, series, now)
+    original_session = any_storage.session
+    with original_session() as session:
+        def nested_session():
+            raise AssertionError("extraction opened a nested storage session")
+
+        monkeypatch.setattr(any_storage, "session", nested_session)
+        partials = history.canonical_partials(session, start, end, history._needed(series), bucket)
+        edges = bucket_edges(start, end, bucket)
+        canonical, optional = partials.fold(edges)
+        actual = history._response(start, end, bucket, bucket, edges, canonical, series, now,
+                                   optional, {})
+        assert actual == expected
+        assert json.dumps(actual, ensure_ascii=False, separators=(",", ":")) == json.dumps(
+            expected, ensure_ascii=False, separators=(",", ":"))
+        assert session.read_minutes(start, start + 60)  # the caller still owns a usable session
+
+
+def test_history_and_activity_extractions_share_one_caller_session(any_storage, monkeypatch):
+    persist_canonical(any_storage, [sample(H0, 0), sample(H0 + 60, 1)])
+    original_session = any_storage.session
+    with original_session() as session:
+        monkeypatch.setattr(any_storage, "session", lambda: (_ for _ in ()).throw(
+            AssertionError("extraction opened a nested storage session")))
+        assert history.canonical_partials(session, H0, H0 + 2 * 60,
+                                          history._needed(["cop_co"]), "1m").fold(
+                                              [(H0, H0 + 2 * 60)])[0][0]["recorded"].n == 2
+        loaded = activity_history.load_timeline(session, H0, H0 + 2 * 60, H0 + H)
+        assert loaded.timeline is not None
+        assert session.read_minutes(H0, H0 + 60)
 
 
 # ------------------------------------------------------------------ raw == mixed

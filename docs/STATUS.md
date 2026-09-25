@@ -3,8 +3,10 @@
 ## Current stage
 
 **Current stage: Stage 4D — Reports and product analytics projections.** Checkpoint 4D-A's
-contract freeze is owner-accepted. Checkpoint 4D-B's pure report domain and owner-approved targeted
-hardening are complete; final owner acceptance is pending. Stage 4C is DONE and merged to `main`
+contract freeze is owner-accepted. Checkpoint 4D-B's pure report domain and targeted hardening
+are owner accepted and closed at `5de43b88f632a7069a4f579ff7a26302624e2855`.
+Checkpoint 4D-C-A is the behavior-preserving history/activity extraction refactor; 4D-C-B report
+read-model orchestration has not started. Stage 4C is DONE and merged to `main`
 in PR #8 (merge commit `8c3bccbcf6ba305bbf547c59ef3f6167471442e8`). Its A–D
 checkpoints and whole-PR review are complete. Frontend work starts after Stage 4.
 
@@ -316,7 +318,8 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
 
 ## Out of scope
 
-- Stage 4D-B SQL, database sessions, storage/schema, API handlers and frontend.
+- Stage 4D-C-B report orchestration, report-specific SQL, HTTP handlers and CT109 deployment in
+  the 4D-C-A extraction checkpoint; frontend throughout Stage 4D.
 - Stage 4E SET/control, Stage 5 frontend, cooling/heater/cost/external-meter analytics and year or
   season reports.
 - Legacy compatibility or historical migration.
@@ -325,15 +328,16 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
 
 ## Next
 
-Stage 4E — isolated SET/control and final backend API, after Stage 4D. Within Stage 4D, 4D-C
-follows owner review of the completed 4D-B pure domain; 4D-D follows (§25.4).
+Stage 4E — isolated SET/control and final backend API, after Stage 4D. Within Stage 4D, owner
+review of the 4D-C-A refactor precedes 4D-C-B report orchestration; 4D-D follows (§25.4).
 
 ## Stage 4D checkpoints
 
 - **4D-A — contract freeze (accepted/closed):** architecture, API, knownness, storage, time, error
   and snapshot contracts; stale Stage 4C docs. Documentation only.
-- **4D-B — pure report domain (complete; awaiting final owner acceptance):** `pompa/report.py` resolves
-  Warsaw calendar periods and bucket edges, clamps the settled extraction endpoint, composes
+- **4D-B — pure report domain (owner accepted/closed at
+  `5de43b88f632a7069a4f579ff7a26302624e2855`):** `pompa/report.py` resolves Warsaw calendar
+  periods and bucket edges, clamps the settled extraction endpoint, composes
   coverage, observed-channel energy, paired COP, H* and class energy, technical facts and
   Stage 4C spans. One timeline extraction per span family and indexed bucket attribution avoid
   per-bucket whole-timeline summaries. It performs no SQL, storage or HTTP work. Independent
@@ -352,11 +356,16 @@ follows owner review of the completed 4D-B pure domain; 4D-D follows (§25.4).
   precision, stop/overlap attribution, unavailable widening, duration means and internal guards
   alongside the literal and deterministic randomized minute oracles. Sixty-five report tests pass;
   focused report/activity/aggregation/timegrid suites: 259 passed. Full no-DB backend: 990 passed,
-  278 skipped (MariaDB-gated), one dependency deprecation warning. Gate: final owner acceptance
-  before 4D-C.
-- **4D-C — read model + API:** first, an independently reviewable behavior-preserving extraction
-  refactor; then one-snapshot loading, report-local current edge, consistency guard and
-  `/api/v1/report`. Gate: byte-identical `/history` and `/activity`, report API and MariaDB tests,
+  278 skipped (MariaDB-gated), one dependency deprecation warning.
+- **4D-C-A — behavior-preserving extraction refactor (complete; awaiting owner review):**
+  `history.canonical_partials()` loads canonical and requested optional facts inside a caller-owned
+  session and folds them over supplied edges with the existing algebra. `activity_history.load_timeline()`
+  loads and widens Stage 4C evidence inside that same caller-owned session. The public history and
+  activity wrappers retain their existing response serializers, source policies and single-session
+  paths; `/activity` still applies its Unix-0 evidence floor locally. No report read model or API
+  was added.
+- **4D-C-B — read model + API (not started):** one-snapshot loading, report-local current edge,
+  consistency guard and `/api/v1/report`. Gate: byte-identical `/history` and `/activity`, report API and MariaDB tests,
   including a concurrency race.
 - **4D-D — runtime/adversarial closeout:** raw/rollup, raw/durable and post-purge equality; DST,
   F2 current tail, snapshot races, bounded performance, CT109 smoke and whole-PR adversarial
