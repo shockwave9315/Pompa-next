@@ -2,15 +2,17 @@
 
 ## Current stage
 
-**Stage 4C — operational state, activity, cycles, defrost and durable events — DONE.**
-Checkpoints A (domain truth), B (durable hourly activity segments), C (activity read model and
-API resources) and D (closure and CT109 runtime validation) are complete. Branch
-`stage-4c-activity-cycles` remains in DRAFT PR #8. The owner's whole-PR adversarial review is
-complete; its F2 correction awaits targeted final review. Frontend work starts after Stage 4.
+**Current stage: Stage 4D — Reports and product analytics projections.** Checkpoint 4D-A has
+frozen the architecture and API contract for owner review, before production report code. Stage
+4C is DONE and merged to `main` in PR #8 (merge commit
+`8c3bccbcf6ba305bbf547c59ef3f6167471442e8`). Its A–D
+checkpoints and whole-PR review are complete. Frontend work starts after Stage 4.
 
-The owner-approved F2 merge hardening makes `/activity` hold the unacknowledged recorder tail
-`open` until its historical outcome settles, preventing transient false gaps before a tick or
-during a write backlog.
+The already-reviewed F2 hardening commit `b81d680eecda67e7d2d80facd4b79ba08472c824` is in
+that merge. It makes `/activity` hold the unacknowledged recorder tail `open` until its historical
+outcome settles, preventing transient false gaps before a tick or during a write backlog. CT109
+still runs Stage 4C runtime head `7d6757028ff56065631263ac765565d30887817d`; the first Stage
+4D deployment will also deploy the F2 correction.
 
 Stage 4B — DONE and merged to `main` (PR #7, merge commit
 `dfd225d2a8fe35563cd1f684efb81cf91b532a2f`).
@@ -314,11 +316,31 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
 
 ## Out of scope
 
-- Stage 4D reports, SET publishing and frontend.
-- Frontend and legacy compatibility or historical migration.
+- Stage 4D-A production report code, SQL, schema, API handlers and frontend.
+- Stage 4E SET/control, Stage 5 frontend, cooling/heater/cost/external-meter analytics and year or
+  season reports.
+- Legacy compatibility or historical migration.
 - Changing the 21 canonical metric semantics, Stage 1–4A history invariants, or the 365-day
   default raw retention.
 
 ## Next
 
-Stage 4D — reports and product analytics projections, as defined in `docs/ROADMAP.md`.
+Stage 4E — isolated SET/control and final backend API, after Stage 4D. Within Stage 4D, 4D-B
+follows owner review of the 4D-A contract freeze, then 4D-C and 4D-D (§25.4).
+
+## Stage 4D checkpoints
+
+- **4D-A — contract freeze (complete; awaiting owner review):** architecture, API, knownness,
+  storage, time, error and snapshot contracts; stale Stage 4C docs. Documentation only. Gate:
+  owner review of this contract before 4D-B.
+- **4D-B — pure report domain:** period/calendar resolution, bucket edges, H*, coverage, energy,
+  paired COP, class grouping and one-pass span attribution; no SQL or HTTP. Gate: hand-calculated
+  and independent brute-force fixtures for knownness, partitions, DST and one-pass equivalence.
+- **4D-C — read model + API:** first, an independently reviewable behavior-preserving extraction
+  refactor; then one-snapshot loading, report-local current edge, consistency guard and
+  `/api/v1/report`. Gate: byte-identical `/history` and `/activity`, report API and MariaDB tests,
+  including a concurrency race.
+- **4D-D — runtime/adversarial closeout:** raw/rollup, raw/durable and post-purge equality; DST,
+  F2 current tail, snapshot races, bounded performance, CT109 smoke and whole-PR adversarial
+  review. This deployment also first delivers F2. Gate: owner-accepted runtime evidence,
+  whole-PR review and owner merge decision.
