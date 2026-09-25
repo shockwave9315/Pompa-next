@@ -2,11 +2,11 @@
 
 ## Current stage
 
-**Stage 4C — operational state, activity, cycles, defrost and durable events — IN PROGRESS.**
-Checkpoints A (domain truth), B (durable hourly activity segments) and C (activity read model and
-API resources) are complete; checkpoint D (closure and CT109 runtime validation) is next.
-Branch `stage-4c-activity-cycles`, one DRAFT PR for checkpoints A–D. Frontend work starts after
-Stage 4.
+**Stage 4C — operational state, activity, cycles, defrost and durable events — DONE.**
+Checkpoints A (domain truth), B (durable hourly activity segments), C (activity read model and
+API resources) and D (closure and CT109 runtime validation) are complete. Branch
+`stage-4c-activity-cycles` remains in DRAFT PR #8 for the owner's independent whole-PR final
+adversarial review. Frontend work starts after Stage 4.
 
 Stage 4B — DONE and merged to `main` (PR #7, merge commit
 `dfd225d2a8fe35563cd1f684efb81cf91b532a2f`).
@@ -274,17 +274,47 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
     check alone cannot detect.
   - Documentation of widening overshoot and raw read counts is corrected.
 
-### Remaining checkpoint
+### Checkpoint D — accepted CT109 runtime validation (DONE)
 
-- D: tests/docs closure and CT109 runtime validation.
+- The owner upgraded CT109 from Stage 4B head `730e0470387f2614efff70bda43dfb978767a807`
+  to Stage 4C head `7d6757028ff56065631263ac765565d30887817d`. The backend image's
+  activity, activity-history, storage, recorder and API source hashes matched that checkout.
+  Health, MQTT and MariaDB recovered; parse rejects, clock steps, recorder queues, rollup/purge
+  errors and the backend log error scan were all zero or clear.
+- Deployment added only `activity_segment_1h`; all existing table definitions matched before and
+  after. Normal bounded backfill reduced 116 rolled/raw hours still missing activity at the first
+  poll to zero. Logs show six batches of 24, 24, 24, 24, 24 and 20 hours: 140 materialized hours.
+  The final audit found 140 rolled/raw and durable hours, 168 durable segments, no minute-count
+  mismatch, missing eligible hour or orphan, and only rule version 1. One raw hour without a
+  rollup was the current unrolled hour. No activity-unavailable hour existed in this retained
+  history, so CT109 did not exercise that 422 path; local tests cover it.
+- An independent fold of real raw minutes for 2026-09-24 08:00–09:00 UTC produced exactly the
+  stored durable segment record (60 raw and 60 recorded minutes). `/activity/live` returned
+  `unknown` activity and compressor with retained classifier inputs; the literal classifier
+  agreed, correctly refusing to treat retained values as current evidence.
+- The recent 11-minute activity query accounted for 10 recorded and one gap minute. A real
+  38-minute observed compressor run crossed 14:00 UTC as one run with a 20-minute query overlap
+  and full-span energy/COP fields. The 24-hour query accounted for 1,439 recorded minutes and one
+  gap, two observed starts/stops, two complete 38-minute runs and one exact 774-minute off
+  interval. No defrost occurred in this window; defrost semantics remain covered by local tests.
+- The closed 2026-09-19 12:00–13:00 UTC `/history` response matched byte for byte before and
+  after deployment (SHA256
+  `12868d5f376a47eb3afadecf7985086c880e18962107dd4041a1f6a92ac91487`); default
+  health/live/metrics/status shapes were unchanged. Deployment left one expected unrecorded
+  08:06 UTC partial minute, preserved earlier rows and resumed recording at 08:07, with no
+  fabricated or duplicate minute.
+- Final local validation at the closure head: Stage 4C tests 307 passed / 94 skipped without
+  MariaDB and 401 passed with MariaDB 11.4; affected suites 450 passed / 197 skipped without
+  MariaDB; full backend 913 passed / 277 skipped without MariaDB and 1,190 passed with MariaDB.
+  The backend Docker image built, and `git diff --check` passed.
 
 ## Out of scope
 
-- Stage 4C checkpoint D until its turn; reports, SET publishing and frontend.
+- Stage 4D reports, SET publishing and frontend.
 - Frontend and legacy compatibility or historical migration.
 - Changing the 21 canonical metric semantics, Stage 1–4A history invariants, or the 365-day
   default raw retention.
 
 ## Next
 
-Stage 4C checkpoint D — closure and CT109 runtime validation.
+Stage 4D — reports and product analytics projections, as defined in `docs/ROADMAP.md`.

@@ -1,9 +1,9 @@
 # Pompa Next backend
 
 One Python 3.12 process: a paho-mqtt client, a recorder thread and a FastAPI
-server (one uvicorn worker). It records canonical minutes from HeishaMon MQTT
-into the MariaDB tables `sample_1m` and `rollup_1h` and serves history,
-aggregates and status over `/api/v1`.
+server (one uvicorn worker). It records canonical and selected optional minutes from HeishaMon
+MQTT, maintains hourly rollups and durable activity segments in MariaDB, and serves live state,
+history, activity and factual status over `/api/v1`.
 Domain rules are in [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 
 | Module | Responsibility |
@@ -21,7 +21,7 @@ Domain rules are in [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 | `pompa/storage.py` | History, optional-history and `activity_segment_1h` DDL and parameterized PyMySQL queries, one transaction per session. |
 | `pompa/history.py` | Bucket composition from rollups and raw minutes. |
 | `pompa/mqtt.py` | paho adapter: subscribe `{prefix}/#`, reconnect, forward retain flag and LWT. |
-| `pompa/api.py` | `/health`, `/api/v1/status`, `/api/v1/live`, `/api/v1/metrics`, `/api/v1/history`. |
+| `pompa/api.py` | `/health` and the `/api/v1` status, live, metrics, history, optional-history and activity resources. |
 | `pompa/main.py` | Process wiring and shutdown. |
 
 ## Configuration
@@ -43,7 +43,7 @@ Domain rules are in [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 
 ## API
 
-The Stage 3 default API shapes and the CT109-validated Stage 4A opt-in forms are specified in
+The Stage 3 default API shapes and the additive Stage 4A–4C forms are specified in
 [`docs/API.md`](../docs/API.md); this section is the operator's summary.
 
 - `GET /health` — process liveness only: `{"status": "ok"}`.
@@ -65,7 +65,11 @@ The Stage 3 default API shapes and the CT109-validated Stage 4A opt-in forms are
   buckets and the 3000-bucket limit. No database or MQTT dependency.
 - `GET /api/v1/metrics?include=capabilities` — the unchanged default metric catalog plus all 203
   reference-backed TOP/OPT/SET/XTOP capabilities.
+- `GET /api/v1/metrics?include=history_profiles` — the unchanged default catalog plus the
+  history-eligible optional profiles.
 - `GET /api/v1/history?from=…&to=…[&bucket=…][&series=a,b]` — exact `[from, to)`, never rounded.
+- `GET`/`PUT /api/v1/optional-history/selection` — factual active/pending selection and an
+  explicit update; `GET /api/v1/optional-history/series` discovers persisted series meanings.
 - `GET /api/v1/activity?from=…&to=…` — exact `[from, to)` (≤ 31 days + 1 h): activity timeline, whole
   compressor runs, off intervals and defrosts with overlap facts, full-span energy/COP, factual summary.
 - `GET /api/v1/activity/live` — current activity from the in-memory live observation; no database.
@@ -94,10 +98,11 @@ by default all of them are returned.
 | power (W) | additionally `kwh` = Σ W / 60000 over the known minutes |
 | COP | `cop` = Σ paired out / Σ paired in, `paired_minutes`, `input_kwh`, `output_kwh` |
 
-Errors: 400 malformed parameters, 422 well-formed but unrepresentable (over 3000 buckets, a range
-or partial edge hour whose raw minutes were purged, instants outside 1970–2100), 503 database
-unavailable. 422 means the minutes provably existed and are gone; a range that was simply never
-recorded — including one predating the recorder — is answered with `recorded_minutes = 0`.
+Errors: 400 malformed parameters; 422 well-formed but unrepresentable history, including an
+activity range intersecting an hour whose detail was purged before durable activity existed;
+500 inconsistent stored durable activity; 503 database unavailable for DB-backed resources.
+See `docs/API.md` for the route-specific contract. An activity-unavailable hour is distinct from
+one that was never recorded.
 
 ## Rollup, late writes and purge
 
@@ -114,8 +119,9 @@ leaves both committed, and retries are idempotent.
 
 Purge runs hourly in bounded steps (at most 24 whole hours per step) and deletes `sample_1m` rows
 below `min(floor_hour(now − RETENTION_1M_DAYS), rolled_until − 2 h, floor_hour(oldest pending
-minute))`, and only after proving per hour that the rollup accounts for every minute still stored
-there. Anything unproven, missing or failing deletes nothing.
+minute))`, and only after proving per hour that the canonical rollup, optional rollup and durable
+activity segments agree with locked raw evidence. Anything unproven, missing or failing deletes
+nothing; canonical and optional raw are purged together.
 
 That proof is what makes deletion self-evidencing. A rolled hour with a `rollup_1h` row and no
 `sample_1m` row was purged; an hour with neither was never recorded. `Session.first_purged_hour`
