@@ -3,7 +3,8 @@
 ## Current stage
 
 **Stage 4C — operational state, activity, cycles, defrost and durable events — IN PROGRESS.**
-Checkpoint A (domain truth) is complete; checkpoint B (durable hourly activity segments) is next.
+Checkpoints A (domain truth) and B (durable hourly activity segments) are complete; checkpoint C
+(activity/timeline/cycles API resources) is next.
 Branch `stage-4c-activity-cycles`, one DRAFT PR for checkpoints A–D. Frontend work starts after
 Stage 4.
 
@@ -207,20 +208,41 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
   short stop across a minute boundary, the power tail after a CO run, energy/paired-COP
   ingredients against the canonical history fold, and a minute-by-minute brute-force reference.
 
+### Checkpoint B — durable hourly activity segments (DONE)
+
+- The additive `activity_segment_1h` table (one row per hour-local segment, rule version, exact
+  defrost fraction, deterministic energy `Stats` JSON; no FK to raw) is created by ordinary
+  `ensure_schema()`. See `docs/ARCHITECTURE.md` §25.3.2.
+- `rebuild_hour()` replaces canonical rollup, optional rollup and activity segments of one hour
+  in one transaction, so forward roll and late-write repair materialize activity atomically.
+- A bounded backfill materializes hours rolled before this checkpoint, with no new watermark.
+  Purge waits for it and proves every candidate hour's segments field by field against the
+  locked raw minutes before deleting anything. Hours purged before 4C-B are never fabricated.
+- A real MariaDB race test found that `persist()` judged "already purged" from a snapshot older
+  than its policy-head lock. A late minute racing a purge could then rebuild a purged hour from
+  itself alone. `persist()` now evaluates `first_purged_hour` with current reads. Production had
+  no concurrent path, because persist and purge share the recorder thread.
+- `backend/tests/test_activity_durable.py` covers:
+  - schema, round trip and fail-closed decoding
+  - rebuild, forward roll, late writes, lost acknowledgement and rollback
+  - backfill, including pre-4C purged history
+  - every purge-proof corruption class
+  - post-purge equivalence of timeline, runs, defrosts, gaps, energy and paired COP
+  - cross-hour and Warsaw-midnight stitching
+  - three MariaDB concurrency races
+
 ### Remaining checkpoints
 
-- B: persist hour segments with their rule version through `persist()`/`rebuild_hour()`, with
-  purge proof, before any raw retention change.
-- C: activity/timeline/cycles API resources.
+- C: activity/timeline/cycles API resources and their evidence-loading policy.
 - D: tests/docs closure and CT109 runtime validation.
 
 ## Out of scope
 
-- Stage 4C checkpoints B–D until their turn; reports, SET publishing and frontend.
+- Stage 4C checkpoints C–D until their turn; reports, SET publishing and frontend.
 - Frontend and legacy compatibility or historical migration.
 - Changing the 21 canonical metric semantics, Stage 1–4A history invariants, or the 365-day
   default raw retention.
 
 ## Next
 
-Stage 4C checkpoint B — durable hourly activity segments.
+Stage 4C checkpoint C — activity/timeline/cycles API resources.

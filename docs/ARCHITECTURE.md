@@ -295,12 +295,11 @@ delete sample_1m where ts < cutoff
 
 If no contiguous rollup exists, `rolled_until` is absent and purge deletes nothing. Purge cannot delete a minute from an unrolled hour, from the two-hour margin below `rolled_until`, or from an hour a pending write can still enter and force a rebuild of.
 Each bounded step additionally proves per hour that the rollup accounts for exactly as many minutes as the hour still stores; any mismatch, missing rollup row or error deletes nothing. That proof is what makes a surviving rollup row conclusive evidence of deletion (§8), which is how reads learn what purge removed; the `cutoff` itself is prospective policy and is never used to answer that question.
-**Current Stage 1–3 limitation:** activity/event timelines and minute-order cycle reconstruction
-are guaranteed only while raw `sample_1m` exists. Hourly flags preserve duration but not order.
-The current reset-aware interpretation of `operations_counter` likewise has only the raw-minute
-window; the counter must not be assumed to equal observed compressor starts. Stage 4C will add
-durable factual activity/events before any retention reduction, after comparing storage designs
-(§25). The default raw retention remains 365 days during early Stage 4.
+**Activity durability.** Hourly flags preserve duration but not order. Since Stage 4C-B, purge also
+proves the hour's durable activity segments (§25.3.2), so activity order, compressor runs,
+defrosts and their energy ingredients survive raw purge. The reset-aware interpretation of
+`operations_counter` still has only the raw-minute window; the counter must not be assumed to equal
+observed compressor starts. The default raw retention remains 365 days during early Stage 4.
 
 ## 14. Query resolution and read paths
 
@@ -441,9 +440,9 @@ Substantive stages deliver a complete vertical outcome and use a feature branch 
 10. Coverage is expressed only as counts and percentages, without arbitrary completeness verdicts.
 11. All query intervals are exact `[from,to)`; 422 without rounding means a needed hour's raw evidence was provably purged, never merely that the range is old or never recorded.
 12. UTC is storage truth; Europe/Warsaw calendar days include correct 23/25-hour DST behavior.
-13. In the current Stage 1–3 implementation, activity/timeline and reset-aware counter analysis
-    are guaranteed only while raw 1-minute data remains. Stage 4C must make useful event facts
-    durable before raw purge can remove their evidence.
+13. Raw purge deletes an hour only after proving its durable Stage 4C activity segments equal
+    the segments of its raw minutes (§25.3.2), so activity facts survive it. Reset-aware counter
+    analysis is still guaranteed only while raw 1-minute data remains.
 14. Backend owns domain truth; frontend only renders backend facts.
 15. Recorder/history remain independent of the later isolated control path.
 16. Legacy history is not migrated or backfilled, and legacy compatibility is not a requirement.
@@ -1107,8 +1106,9 @@ Useful event facts must survive raw purge; raw-only recomputation cannot meet du
 decision:** durable per-hour activity segments. Checkpoint B materializes each UTC hour's ordered
 segments through the existing `persist()` → `rebuild_hour()` path, together with the rule version.
 Events, compressor runs, starts, intervals, continuation and range projections are derived on read
-by stitching segments; no cross-hour state machine is persisted. The segment table, its purge
-proof and the API resources are frozen in checkpoints B and C, not here.
+by stitching segments; no cross-hour state machine is persisted. The segment table and its purge
+proof are frozen in §25.3.2; the API resources and their evidence-loading policy belong to
+checkpoint C.
 
 #### 25.3.1 Checkpoint A — activity domain truth (DONE)
 
@@ -1223,6 +1223,94 @@ the window contains the minute before `start` and the minute at `end` (`[start �
 1 min)`). Complete-run durations and exact off intervals may need evidence arbitrarily far beyond
 the range, because a span can continue. Minute counts, gaps and defrost seconds depend only on
 `[start, end)`. How much evidence an API loads is a checkpoint C policy decision.
+
+#### 25.3.2 Checkpoint B — durable hourly activity segments (DONE)
+
+**Table.** One additive table holds one row per `ActivitySegment`:
+
+```sql
+CREATE TABLE activity_segment_1h (
+  start_ts         INT UNSIGNED      NOT NULL PRIMARY KEY,
+  minutes          TINYINT UNSIGNED  NOT NULL,
+  rule_version     SMALLINT UNSIGNED NOT NULL,
+  activity         VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  compressor       VARCHAR(8)  CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  defrost_fraction DOUBLE            NULL,
+  energy_json      JSON              NOT NULL CHECK (JSON_VALID(energy_json)),
+  CHECK (start_ts MOD 60 = 0 AND minutes BETWEEN 1 AND 60 AND start_ts MOD 3600 + minutes * 60 <= 3600),
+  CHECK (defrost_fraction IS NULL OR (defrost_fraction >= 0 AND defrost_fraction <= 1))
+) ENGINE=InnoDB;
+```
+
+- **Hour and order.** A segment never crosses a UTC hour, so its hour is `floor_hour(start_ts)` and
+  `start_ts` alone is the unique, ordered key. A separate hour/sequence column would only duplicate
+  that fact.
+- **Energy.** `energy_json` holds the segment's `ENERGY_SERIES` `Stats` as deterministic JSON
+  (`{series: [n, sum, min, max, last]}`, sorted keys, shortest round-trip float text). A series
+  with no known minute is absent, exactly as in `fold_minutes`. MariaDB JSON is stored as text, so
+  every DOUBLE round-trips bit for bit. One row per segment carries its ten optional series
+  without a child table or fifty columns.
+- **No foreign key.** There is no FK to `sample_1m`: segments must outlive raw purge. An hour with
+  no raw minutes has no rows; no gap row, no empty-hour record and no cross-hour or open-event
+  state is stored. Gaps are the holes between segments, read back as `Gap`s.
+- **Validation.** `pompa.activity` encodes and fail-closed decodes every row. It checks:
+  - the rule version (only 1 exists) and known `Activity`/`Compressor` strings;
+  - activity/compressor/defrost-fraction combinations version 1 can produce;
+  - alignment inside one UTC hour, and ascending non-overlapping rows;
+  - energy structure: known series; `1 ≤ n ≤ minutes`; finite, non-negative values with
+    `min ≤ last ≤ max`;
+  - canonical pairing invariants: paired input and output together with equal `n`; a pair never
+    exceeds its channels; the total pair never exceeds the CO or DHW pair.
+
+  Nothing malformed is coerced. The database CHECKs are a second structural guard.
+
+**Materialization.**
+- **Forward roll and repair.** `rebuild_hour(H)` reads the locked canonical minutes of `H` once and,
+  in the caller's transaction, replaces `rollup_1h(H)`, `optional_rollup_1h(H)` and the complete
+  segment set of `H` (`build_segments` of those minutes). It deletes the whole hour and inserts
+  the deterministic new set, so a repeated rebuild or a lost-acknowledgement retry is idempotent.
+  A failure anywhere rolls back all three with the raw write. `roll_next_hour` and late-write
+  repair in `persist()` therefore materialize activity with no new pipeline and no new watermark;
+  `rolled_until` remains the one roll frontier.
+- **Purged hours.** A late write into an already-purged hour is still refused
+  (`first_purged_hour`). Segments are a read representation, never a rebuild source.
+
+**Upgrade backfill.** Hours rolled before this checkpoint have rollups but no segments, and
+forward rolling never revisits them. `backfill_activity_step` derives them from the tables:
+rolled hours (a `rollup_1h` row) at or above an in-memory scan hint that store raw minutes but no
+segment row.
+- **Scope and bounds.** Each step rebuilds at most 24 such hours through `rebuild_hour`. It
+  examines at most seven days of raw (a bounded, primary-key range anti-join) and starts from a
+  current read of the next raw minute, so long empty stretches cost nothing.
+- **Order.** The recorder runs one step per maintenance pass after rolling. It purges only once
+  a pass has found nothing left: roll, then backfill, then purge.
+- **No watermark.** The scan hint and the completion flag are process memory, recomputed after
+  every restart by one scan. No new watermark exists, because no Stage 4C-B path can create an
+  unmaterialized rolled raw hour.
+- **Anomalies stay visible.** A raw hour below `rolled_until` without a rollup row is a canonical
+  anomaly, not backfill work, and the purge proof keeps reporting it.
+- **History purged before 4C-B.** Hours whose raw was purged before this checkpoint have a rollup
+  but no raw and no segments. They are never backfilled, and nothing is inferred from hourly
+  averages or `operations_counter`. Their activity is unavailable evidence, and
+  `first_purged_hour` keeps its single meaning.
+
+**Purge proof.** After the canonical count proof and the optional proof, purge decodes the
+candidate hours' segment rows through a locking read. It requires them to equal, hour by hour and
+field by field, `build_segments` of the same locked raw minutes. The compared fields are start,
+minutes, activity, compressor, exact defrost fraction, rule version and every energy statistic.
+Any missing, extra, split, shifted, changed or invalid row raises `PurgeRefused` and deletes
+nothing. After deletion, canonical and optional rollups and all segments remain. Decoded segments
+rebuild the same `Timeline`, activity events, compressor runs with boundaries, defrosts and their
+seconds, gaps, and per-run energy and paired-COP ingredients as the raw minutes did.
+
+**Locking.** Every writer (persist, roll, backfill, purge, policy PUT) takes the policy-head lock
+first, so they serialize. After it come the rolled frontier, canonical raw and the derived tables.
+A transaction's snapshot predates that lock, so any read that decides a write must be current.
+`persist()` therefore evaluates `first_purged_hour` with current reads (`locking=True`, the same
+fact). A real MariaDB race test showed that the earlier snapshot read let a late minute commit a
+partial rebuild over an hour purged while it waited. Backfill discovery may stay a snapshot read
+because its range starts at a current read of the oldest raw minute and purge deletes only a
+prefix.
 
 ### 25.4 Stage 4D — report projections
 

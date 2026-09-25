@@ -61,7 +61,7 @@ retention change only after durable events and storage/backup measurements.
 Derive one operational interpretation from canonical minutes and expose factual runtime, starts,
 cycle durations/intervals and individual defrosts. Preserve missing evidence. The owner chose
 durable per-hour activity segments; events and runs are derived on read. Checkpoints: A pure
-domain truth (DONE), B durable segments, C API resources, D closure and CT109 validation.
+domain truth (DONE), B durable segments (DONE), C API resources, D closure and CT109 validation.
 
 ### 4D — Reports and product analytics projections
 

@@ -14,10 +14,10 @@ Domain rules are in [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 | `pompa/ingest.py` | Connection epochs, LWT, retained vs live, `seen_live`, freshness, source selection. |
 | `pompa/minute.py` | `MinuteAccumulator` → `MinuteRow` (full-minute source life, time-weighted means). |
 | `pompa/aggregation.py` | `Stats` algebra, derived series, energy, paired COP, coverage. |
-| `pompa/activity.py` | Stage 4C activity domain: minute classification, hour segments, gaps, runs, defrosts, projections. Pure. |
+| `pompa/activity.py` | Stage 4C activity domain: minute classification, hour segments, gaps, runs, defrosts, projections, persisted segment records. Pure. |
 | `pompa/timegrid.py` | UTC/Europe/Warsaw alignment, buckets, `auto` length, prospective purge cutoff. |
-| `pompa/recorder.py` | Serialises events, closes minutes, write buffer, flush, rollup, purge, status facts. |
-| `pompa/storage.py` | `sample_1m`/`rollup_1h` DDL and parameterized PyMySQL queries, one transaction per session. |
+| `pompa/recorder.py` | Serialises events, closes minutes, write buffer, flush, rollup (with activity segments), activity backfill, purge, status facts. |
+| `pompa/storage.py` | History, optional-history and `activity_segment_1h` DDL and parameterized PyMySQL queries, one transaction per session. |
 | `pompa/history.py` | Bucket composition from rollups and raw minutes. |
 | `pompa/mqtt.py` | paho adapter: subscribe `{prefix}/#`, reconnect, forward retain flag and LWT. |
 | `pompa/api.py` | `/health`, `/api/v1/status`, `/api/v1/live`, `/api/v1/metrics`, `/api/v1/history`. |
@@ -134,7 +134,7 @@ cd backend && ../.venv/bin/python -m pytest
 ```
 
 Storage, rollup, purge, history and slice tests run against real MariaDB when `POMPA_TEST_DB_HOST`
-is set (they drop and recreate `sample_1m` and `rollup_1h` there, so use a throwaway database):
+is set (they drop and recreate the Pompa Next tables there, so use a throwaway database):
 
 ```sh
 docker run -d --name pompa-next-testdb -e MARIADB_ROOT_PASSWORD=testroot \

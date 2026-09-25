@@ -17,13 +17,15 @@ never evidence of a start, stop or continuation.
 
 from __future__ import annotations
 
+import json
+import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from .aggregation import PAIRS, POWER_CHANNELS, Stats, combine_maps, fold_minutes
 from .minute import MINUTE
-from .timegrid import floor_hour
+from .timegrid import HOUR, floor_hour
 
 # Version of the persisted minute/segment interpretation: classification, the enum strings,
 # segment grouping and ENERGY_SERIES. Once 4C-B persists segments, any change to them needs a
@@ -539,3 +541,125 @@ def summarize(tl: Timeline, start: int, end: int) -> ActivitySummary:
         defrosts_overlapping=len(defrost_pieces),
         observed_defrost_seconds=sum(p.observed_defrost_seconds for p in defrost_pieces),
     )
+
+
+# ------------------------------------------------------------------ persisted segment records
+
+class ActivityRecordInvalid(ValueError):
+    """A persisted activity segment cannot describe version-1 activity truth; never coerced."""
+
+
+# (start_ts, minutes, rule_version, activity, compressor, defrost_fraction, energy_json):
+# one ``activity_segment_1h`` row. Stage 4C-B, docs/ARCHITECTURE.md §25.3.2.
+SegmentRecord = tuple[int, int, int, str, str, float | None, str]
+
+_ACTIVITY_FOR_COMPRESSOR = {
+    Compressor.OFF: frozenset({Activity.OFF, Activity.IDLE, Activity.DEFROST, Activity.UNKNOWN}),
+    Compressor.ON: frozenset({Activity.CO, Activity.DHW, Activity.TRANSITION, Activity.DEFROST,
+                              Activity.UNKNOWN}),
+    Compressor.UNKNOWN: frozenset({Activity.DEFROST, Activity.UNKNOWN}),
+}
+
+
+def encode_energy(energy: Mapping[str, Stats]) -> str:
+    """Deterministic JSON: ``{series: [n, sum, min, max, last]}``, sorted, shortest-repr floats."""
+    return json.dumps({k: [s.n, s.sum, s.min, s.max, s.last] for k, s in energy.items()},
+                      sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def segment_record(segment: ActivitySegment) -> SegmentRecord:
+    """The persisted form of one complete hour-local segment under ``ACTIVITY_RULE_VERSION``."""
+    if segment.energy is None:
+        raise ValueError("a clipped segment piece cannot be persisted")
+    record = (segment.start, segment.minutes, ACTIVITY_RULE_VERSION, segment.activity.value,
+              segment.compressor.value, segment.defrost_fraction, encode_energy(segment.energy))
+    decode_segment(record)  # never write what could not be read back
+    return record
+
+
+def _number(value, what: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ActivityRecordInvalid(f"{what} is not a number")
+    try:
+        number = float(value)
+    except OverflowError:
+        raise ActivityRecordInvalid(f"{what} is not finite") from None
+    if not math.isfinite(number):
+        raise ActivityRecordInvalid(f"{what} is not finite")
+    return number
+
+
+def _decode_energy(text, minutes: int, where: str) -> dict[str, Stats]:
+    try:
+        document = json.loads(text) if isinstance(text, (str, bytes)) else None
+    except ValueError:
+        document = None
+    if not isinstance(document, dict):
+        raise ActivityRecordInvalid(f"{where}: energy is not a JSON object")
+    energy: dict[str, Stats] = {}
+    for key, value in document.items():
+        if key not in ENERGY_SERIES:
+            raise ActivityRecordInvalid(f"{where}: unknown energy series {key!r}")
+        if not isinstance(value, list) or len(value) != 5:
+            raise ActivityRecordInvalid(f"{where}: {key} is not [n, sum, min, max, last]")
+        n = value[0]
+        if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= minutes:
+            raise ActivityRecordInvalid(f"{where}: {key} has invalid n")
+        v_sum, v_min, v_max, v_last = (_number(v, f"{where}: {key}") for v in value[1:])
+        if not 0 <= v_min <= v_last <= v_max or v_sum < 0:  # canonical power is never negative
+            raise ActivityRecordInvalid(f"{where}: {key} statistics are inconsistent")
+        energy[key] = Stats(n, v_sum, v_min, v_max, v_last)
+    for pair_in, pair_out in PAIRS.values():
+        a, b = energy.get(pair_in), energy.get(pair_out)
+        if (a is None) != (b is None) or (a is not None and a.n != b.n):
+            raise ActivityRecordInvalid(f"{where}: {pair_in}/{pair_out} are not paired")
+    for name, channels in (("co", POWER_CHANNELS[:2]), ("dhw", POWER_CHANNELS[2:])):
+        pair = energy.get(PAIRS[name][0])
+        if pair is not None and any(k not in energy or energy[k].n < pair.n for k in channels):
+            raise ActivityRecordInvalid(f"{where}: paired {name} minutes exceed its channels")
+    total = energy.get(PAIRS["total"][0])
+    if total is not None and any(energy.get(PAIRS[p][0]) is None or energy[PAIRS[p][0]].n < total.n
+                                 for p in ("co", "dhw")):
+        raise ActivityRecordInvalid(f"{where}: paired total minutes exceed CO/DHW pairs")
+    return energy
+
+
+def decode_segment(record) -> ActivitySegment:
+    """Validate one persisted row into its version-1 ``ActivitySegment``; fail closed."""
+    try:
+        start, minutes, version, activity, compressor, fraction, energy = record
+    except (TypeError, ValueError):
+        raise ActivityRecordInvalid("activity record does not have seven fields") from None
+    where = f"activity segment at {start!r}"
+    if version != ACTIVITY_RULE_VERSION:
+        raise ActivityRecordInvalid(f"{where}: unknown activity rule version {version!r}")
+    if (any(isinstance(v, bool) or not isinstance(v, int) for v in (start, minutes))
+            or start < 0 or start % MINUTE or not 1 <= minutes <= HOUR // MINUTE
+            or start % HOUR + minutes * MINUTE > HOUR):
+        raise ActivityRecordInvalid(f"{where}: not whole minutes inside one UTC hour")
+    try:
+        activity, compressor = Activity(activity), Compressor(compressor)
+    except ValueError:
+        raise ActivityRecordInvalid(f"{where}: unknown activity or compressor state") from None
+    if activity not in _ACTIVITY_FOR_COMPRESSOR[compressor]:
+        raise ActivityRecordInvalid(f"{where}: {activity} cannot have compressor {compressor}")
+    if fraction is not None:
+        fraction = _number(fraction, f"{where}: defrost fraction")
+        if not 0 <= fraction <= 1:
+            raise ActivityRecordInvalid(f"{where}: defrost fraction outside [0, 1]")
+    if (activity is Activity.DEFROST) != (fraction is not None and fraction > 0) \
+            or (fraction is None and activity is not Activity.UNKNOWN):
+        raise ActivityRecordInvalid(f"{where}: defrost fraction contradicts activity {activity}")
+    return ActivitySegment(start, minutes, activity, compressor, fraction,
+                           _decode_energy(energy, minutes, where))
+
+
+def decode_segments(records: Iterable) -> list[ActivitySegment]:
+    """Decode ascending, non-overlapping persisted rows; any doubt raises ``ActivityRecordInvalid``."""
+    out: list[ActivitySegment] = []
+    for record in records:
+        segment = decode_segment(record)
+        if out and segment.start < out[-1].end:
+            raise ActivityRecordInvalid(f"activity segment at {segment.start} overlaps its predecessor")
+        out.append(segment)
+    return out
