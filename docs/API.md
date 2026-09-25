@@ -685,9 +685,14 @@ FACTS = {coverage, energy, activity, events, technical}
 `period.kind` is `day|week|month|custom`; `from_date` and `to_date` are the resolved local dates,
 the latter exclusive; `from` and `to` are UTC `Z` instants at those midnights; `timezone` is
 `Europe/Warsaw`. `observation.now` is one sampled UTC instant, `closed_until` is the Stage 4C
-settled frontier, and `effective_to = min(period.to, closed_until)`. `segment_rule_version` is the
-Stage 4C rule version read, currently 1. `evidence.from/to` are the UTC extent actually examined
-for activity, including span widening; both are `null` when no settled activity window needs
+settled frontier, and `effective_to = min(period.to, max(period.from, closed_until))`. Thus
+`period.from <= effective_to <= period.to`: it equals `period.to` when the frontier reaches or
+passes `period.to`, `closed_until` when `period.from < closed_until < period.to`, and `period.from`
+when `closed_until <= period.from` (including a fully future report). The clamp changes only the
+settled extraction endpoint; it does not change the Stage 4C frontier or the coverage partition
+below. `segment_rule_version` is the Stage 4C rule version read, currently 1.
+`evidence.from/to` are the UTC extent actually examined for activity, including span widening;
+both are `null` when no settled activity window needs
 examination. Bucket `start/end` are UTC `Z` instants, ordered and half-open. A day with the
 repeated autumn hour has two buckets with different UTC starts. A future bucket still has the
 same FACTS shape and factual zero counts, with unknown measurements as `null`.
@@ -708,6 +713,8 @@ For bucket `[a,b)`, set `C = closed_until` and `F = floor_minute(now)`:
 minutes are zero. Totals use the whole period under the same equations. The current partial
 minute is future; a waiting or protected unacknowledged tail is unsettled, never a gap. No
 readiness/quality status or threshold is returned.
+For a period entirely after `floor_minute(now)`, `settled_minutes=0`, `unsettled_minutes=0`,
+`future_minutes=calendar_minutes` and `coverage_percent=null`.
 
 **Energy.** Each FACTS has `energy = {channels, consumption, production, cop}`. `channels`
 contains exactly `co_power_consumption`, `co_power_production`, `dhw_power_consumption` and
@@ -758,8 +765,8 @@ events: {
   observed_starts, observed_stops,
   complete_runs: {count, total_minutes, min_minutes, max_minutes, mean_minutes},
   exact_off_intervals: {count, total_minutes, min_minutes, max_minutes, mean_minutes},
-  defrosts_started,
-  activity_events_started: {off, idle, co, dhw, transition, defrost, unknown},
+  defrost_events,
+  activity_events: {off, idle, co, dhw, transition, defrost, unknown},
   observed_defrost_seconds
 }
 ```
@@ -768,11 +775,16 @@ events: {
 The report carries no `complete_runs.minutes[]` list; individual runs remain available in
 `/activity`. Observed starts are attributed to the bucket holding the run's first minute;
 observed stops to its last minute. Complete runs and exact off intervals are attributed
-at their first minute. `defrosts_started` and each activity-event count use the span's first
-minute, regardless of whether the preceding boundary is observed; the boundary is already
-handled by Stage 4C span truth. `observed_defrost_seconds` clips to each bucket. A span crossing
-calendar boundaries counts once for these additive facts. The non-additive
-`compressor_runs_overlapping` and `defrosts_overlapping` are top-level `totals` fields only.
+at their first minute. `defrost_events` counts maximal observed Stage 4C defrost spans;
+`activity_events[A]` counts maximal observed activity spans of class `A`. Each span is attributed
+to the bucket containing its first observed minute, even if its Stage 4C left boundary is `gap`,
+`unknown` or `outside_evidence`. An `observed` boundary proves a start; those other boundaries
+do not. The generic event counts include all four cases without claiming a physical/domain
+start, and a span crossing adjacent buckets counts only once. `observed_starts` and
+`observed_stops` retain their strict Stage 4C observed-boundary requirements. No separate
+observed-defrost-start fact is included. `observed_defrost_seconds` clips to each bucket. The
+non-additive `compressor_runs_overlapping` and `defrosts_overlapping` are top-level `totals`
+fields only.
 
 **Technical.** Each FACTS has `technical.outside_temp = {avg, min, max, minutes}` and
 `technical.compressor_freq = {avg, max, minutes, active_avg}`. Missing numerical values are

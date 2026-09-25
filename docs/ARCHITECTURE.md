@@ -1531,20 +1531,33 @@ calendar_minutes  = settled_minutes + unsettled_minutes + future_minutes
 recorded_minutes  = canonical rows in the settled part only
 gap_minutes       = settled_minutes - recorded_minutes
 coverage_percent  = round(100 * recorded_minutes / settled_minutes, 1), or null if settled=0
-effective_to      = min(report_to, C)
+effective_to      = min(report_to, max(report_from, C))
 ```
 
-The current partial minute is future. A waiting/protected unacknowledged tail is unsettled, never
-a gap. Future buckets contain no fabricated data. Counts and coverage are facts, with no
+The clamp applies only to the settled extraction endpoint, never to the actual Stage 4C
+`closed_until` frontier: `report_from <= effective_to <= report_to`. If `C >= report_to`, a
+fully historical report ends at `report_to`. If `report_from < C < report_to`, a partially settled
+report ends at `C`. If `C <= report_from`, including a fully future report, `effective_to` equals
+`report_from` and the settled extraction range is empty. If the whole period is after
+`F`, it has zero settled and unsettled minutes, all calendar minutes future, and null coverage.
+The coverage intersections above are unchanged. The current partial minute is future. A
+waiting/protected unacknowledged tail is unsettled, never a gap. Future buckets contain no
+fabricated data. Counts and coverage are facts, with no
 `ready`, `partial`, `full`, `good`, `bad` or 95% verdict. As with existing history, clock-step
 anomalies are surfaced rather than silently clamped.
 
-**Spans and events.** Reuse the Stage 4C full spans and boundaries. Attribute observed starts,
-complete runs, exact off intervals, defrost starts and activity-event starts to the bucket holding
-their first minute; attribute observed stops to the run's last minute, as in Stage 4C.
-`observed_defrost_seconds` is clipped to the bucket and adds
-exactly. `complete_runs` and `exact_off_intervals` each report `count`, `total_minutes`,
-`min_minutes`, `max_minutes`, `mean_minutes`; the report carries no `minutes[]` list. The overall
+**Spans and events.** Reuse the Stage 4C full spans and boundaries. `observed_starts` and
+`observed_stops` keep their strict Stage 4C observed-boundary requirements, attributed to the
+run's first and last minutes respectively. Complete runs and exact off intervals retain
+first-minute attribution. `defrost_events` counts maximal observed defrost spans, and
+`activity_events[A]` counts maximal observed Stage 4C activity spans of class `A`; each belongs
+to the bucket holding its first observed minute. A span with an `observed`, `gap`, `unknown` or
+`outside_evidence` left boundary counts once, but only `observed` proves its start. These generic
+counts do not claim a physical/domain start. A span crossing adjacent buckets is counted only in
+the bucket with that first observed minute. No separate observed-defrost-start field is needed.
+`observed_defrost_seconds` is clipped to the bucket and adds exactly. `complete_runs` and
+`exact_off_intervals` each report `count`, `total_minutes`, `min_minutes`, `max_minutes`,
+`mean_minutes`; the report carries no `minutes[]` list. The overall
 `compressor_runs_overlapping` and `defrosts_overlapping` are non-additive and never emitted per
 bucket. A run crossing day/week/month boundaries is attributed once.
 
