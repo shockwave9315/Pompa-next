@@ -139,6 +139,7 @@ class Ingest:
         self.uncatalogued_topics: set[str] = set()
         self.clock_steps = 0  # detected backward CLOCK_REALTIME steps; each discarded confirmed evidence
         self.last_clock_step_at: float | None = None
+        self.readings_generation = 0  # increases whenever physical receipt continuity is reset
 
     # ------------------------------------------------------------------ events
 
@@ -347,6 +348,7 @@ class Ingest:
         self.alive_since = None
 
     def _clear_physical_readings(self) -> None:
+        self.readings_generation += 1
         for identity, reading in self.physical_readings.items():
             self.physical_readings[identity] = PhysicalReading(identity, reading.topic)
 

@@ -382,6 +382,8 @@ class ReadingsObservation:
     readings: dict[str, dict]
     received_at: dict[str, float | None]  # exact receipt instants, same clock as ``now``
     seq: int  # MQTT events applied so far; see ``Recorder.wait_for_change``
+    receipts: dict[str, PhysicalReading]  # immutable latest receipt objects, not a history
+    generation: int  # physical readings reset by connect/disconnect/Offline/clock step
 
 
 class Recorder:
@@ -712,7 +714,8 @@ class Recorder:
 
     def readings_observation(self, clock: Callable[[], float]) -> ReadingsObservation:
         """The ``/live?include=readings`` readings as one locked observation, plus the exact
-        receipt instants and the change sequence number a waiter can wait beyond.
+        receipt instants, immutable receipt identities, reset generation and change sequence
+        number a waiter can wait beyond.
 
         No database I/O and no state change.
         """
@@ -724,6 +727,8 @@ class Recorder:
                 readings=self._readings(now),
                 received_at={r.identity: r.received_at for r in self.ingest.physical_snapshot()},
                 seq=self._change_seq,
+                receipts={r.identity: r for r in self.ingest.physical_snapshot()},
+                generation=self.ingest.readings_generation,
             )
 
     def physical_readings(self) -> tuple[PhysicalReading, ...]:

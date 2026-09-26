@@ -954,7 +954,9 @@ broker nor HeishaMon receipt, and never physical execution.
   keys at any depth and `NaN`/`Infinity` are `400 invalid_request`.
 - Checks run in this order: body (`400`), key (`404`), `command_in_progress` (`409`), validation
   (`400`/`409`/`422`), then the publish (`503`).
-- Once paho has accepted the publish, the response is `200` whatever the readback shows.
+- Once paho has accepted the publish, normal readback responses are `200`, including timeout
+  or mismatch. Unexpected bug-class exceptions may still produce `500` without changing the
+  accepted publish fact.
 
 For a `curve`, `readback` also has `fields` (requested field → TOP). `expected` and `observed` are
 objects over the requested fields only, and `observed` holds `null` for a field with no live
@@ -962,22 +964,36 @@ reading. A request without readback returns at once with
 `{"identity": null, "kind": null, "expected": null, "outcome": "not_applicable", "observed": null,
 "window_seconds": W, "waited_seconds": 0.0}`.
 
-**Readback outcomes.** Only `mode="live"` readings that are `available` count. A reading
-received before `publish.at` is pre-publish state; one received at or after it is post-publish.
+**Readback outcomes.** Only `mode="live"` readings that are `available` count. The exact
+receipt present in the baseline is always pre-publish, even if a backward wall-clock step makes
+its timestamp numerically newer than `publish.at`. A new receipt at or after `publish.at` may
+qualify as post-publish evidence. Only requested curve fields participate, separately.
+
+The outcomes have this precedence:
 
 | Outcome | Meaning |
 |---|---|
-| `matched` | A reading received at or after `publish.at` equals `expected`. For a curve, every requested field matched. For `kind: "effect"`, the expected effect state was observed. |
-| `unchanged_match` | A live reading already equalled `expected` before the publish, and nothing different arrived. The match is not attributable to this request. |
-| `not_observed` | No matching post-publish reading arrived within the window. `observed` is the last live reading, or `null`. This is a fact, not a failure. |
-| `not_applicable` | The control has no readback. `identity`, `expected` and `observed` are `null`. |
+| `unchanged_match` | The entire requested state already matched in the baseline, with no observed contradiction or relevant live-state continuity loss during the full window. Same-value periodic re-publications do not upgrade this to `matched`. |
+| `matched` | Otherwise, every requested field obtained qualifying post-publish expected evidence. For a whole baseline match, a contradicted field needs a later expected receipt. Disconnect, LWT Offline or clock-step invalidation discards earlier matches; later genuinely live evidence can qualify again. Effects follow the same rule: an already-active effect re-published unchanged is `unchanged_match`, not evidence of a new effect. |
+| `not_observed` | Neither condition holds. `observed` is the last qualifying live reading seen, or `null`. This is a fact, not a failure. |
+| `not_applicable` | The control has no readback. `identity`, `expected` and `observed` are `null`; there is no wait. |
+
+These are observation facts, never command causality or physical-execution claims. There is no
+receipt history: overwritten intermediates may conservatively prevent a match. Continuity loss
+cannot establish `unchanged_match`.
+
+Each POST logs once. Known refusals use their error code as `publish`; unexpected exceptions
+before acceptance use `publish=error` (the outcome is not established). Once the publisher returns
+`True`, `publish=sent` remains the log fact even if an unexpected readback exception produces HTTP
+500. Normal accepted publishes, including readback timeout or mismatch, still return 200.
 
 **Retries.** `POST` is not idempotent for `trigger` and re-arms `temporary` controls. Clients must
 not retry it automatically. After a lost response, read `GET /api/v1/controls` instead.
 
 ### Control errors
 
-Every error means nothing was published. The body is `{"detail": "…", "code": "…"}`:
+Every documented error below means this request caused no accepted publish. The body is
+`{"detail": "…", "code": "…"}`:
 
 | Status | `code` | Cause |
 |---|---|---|

@@ -704,3 +704,210 @@ def test_adapter_publishes_one_qos0_non_retained_command_only_while_connected():
         assert len(failing.calls) == 1  # no retry
     with pytest.raises(ValueError):
         _adapter(FakeClient()).publish_command("main/DHW_Target_Temp", "50")  # never a generic publish
+
+# ------------------------------------------------------ final adversarial corrections M1–M4
+
+def scripted_window(h, monkeypatch, actions=()):
+    """Apply one event between observations; finish W without wall-time sleeps."""
+    elapsed = [0.0]
+    pending = iter(actions)
+    h.runtime.monotonic = lambda: elapsed[0]
+
+    def wait(seq, timeout):
+        action = next(pending, None)
+        if action is None:
+            elapsed[0] += timeout
+        else:
+            action()
+
+    monkeypatch.setattr(h.recorder, "wait_for_change", wait)
+
+
+@pytest.mark.parametrize("loss", ["disconnect", "offline", "clock_step"])
+def test_lost_continuity_cannot_hide_a_contradiction(loss, monkeypatch):
+    h = ready_harness()
+    h.top("TOP9", 50, age=5)
+    waiting, release = threading.Event(), threading.Event()
+    elapsed = [0.0]
+    h.runtime.monotonic = lambda: elapsed[0]
+
+    def wait(seq, timeout):
+        waiting.set()
+        assert release.wait(5)
+        elapsed[0] = 2.0
+
+    monkeypatch.setattr(h.recorder, "wait_for_change", wait)
+    results = {}
+    thread = threading.Thread(target=_run, args=(h.runtime, "dhw_target_temperature", 50, results))
+    thread.start()
+    try:
+        assert waiting.wait(5)
+        h.top("TOP9", 49)
+        if loss == "disconnect":
+            h.recorder.on_disconnect(h.now)
+        elif loss == "offline":
+            h.recorder.on_lwt("Offline", False, h.now)
+        else:
+            h.recorder.on_message(TOPIC["TOP23"], "3", False, h.now - 2)
+            assert h.ingest.clock_steps == 1
+    finally:
+        release.set()
+        thread.join(5)
+    assert not thread.is_alive()
+    assert results["dhw_target_temperature"]["readback"]["outcome"] == "not_observed"
+    assert h.publisher.calls == [("commands/SetDHWTemp", "50")]
+
+
+@pytest.mark.parametrize("retained,outcome", [(True, "not_observed"), (False, "matched")])
+def test_recovered_continuity_requires_genuine_live_receipt(retained, outcome, monkeypatch):
+    h = ready_harness()
+    h.top("TOP9", 50, age=5)
+
+    def recover():
+        h.recorder.on_disconnect(h.now)
+        h.recorder.on_connect(h.now)
+        h.top("TOP9", 50, retained=retained)
+
+    scripted_window(h, monkeypatch, [recover])
+    assert h.post("dhw_target_temperature", {"value": 50}).json()["readback"]["outcome"] == outcome
+
+
+def test_backward_clock_never_promotes_the_baseline_receipt(monkeypatch):
+    h = ready_harness()
+    h.top("TOP9", 50)
+    clocks = iter([h.now, h.now - 1])
+    h.runtime.clock = lambda: next(clocks, h.now - 1)
+    scripted_window(h, monkeypatch)
+    body = h.post("dhw_target_temperature", {"value": 50}).json()
+    assert body["readback"]["observed"]["received_at"] > body["publish"]["at"]
+    assert body["readback"]["outcome"] == "unchanged_match"
+    assert body["readback"]["waited_seconds"] == 2.0
+
+
+@pytest.mark.parametrize("key,identity,raw,value", [
+    ("dhw_target_temperature", "TOP9", 50, 50),
+    ("force_defrost", "TOP26", 1, control.ABSENT),
+    ("force_sterilization", "TOP69", 1, control.ABSENT),
+])
+def test_expected_republication_keeps_unchanged_precedence(key, identity, raw, value, monkeypatch):
+    h = ready_harness()
+    h.top(identity, raw, age=5)
+    scripted_window(h, monkeypatch, [lambda: h.top(identity, raw), lambda: h.top(identity, raw)])
+    body = h.runtime.execute(key, value)
+    assert body["readback"]["outcome"] == "unchanged_match"
+    assert body["readback"]["waited_seconds"] == 2.0
+
+
+@pytest.mark.parametrize("key,identity,expected,different,value", [
+    ("dhw_target_temperature", "TOP9", 50, 49, 50),
+    ("force_defrost", "TOP26", 1, 0, control.ABSENT),
+])
+def test_observed_transition_can_match_after_expected_republication(
+        key, identity, expected, different, value, monkeypatch):
+    h = ready_harness()
+    h.top(identity, expected, age=5)
+    scripted_window(h, monkeypatch, [lambda: h.top(identity, expected),
+                                    lambda: h.top(identity, different),
+                                    lambda: h.top(identity, expected)])
+    assert h.runtime.execute(key, value)["readback"]["outcome"] == "matched"
+
+
+def test_expected_republication_then_only_different_is_not_observed(monkeypatch):
+    h = ready_harness()
+    h.top("TOP9", 50, age=5)
+    scripted_window(h, monkeypatch, [lambda: h.top("TOP9", 50), lambda: h.top("TOP9", 49)])
+    assert h.post("dhw_target_temperature", {"value": 50}).json()["readback"]["outcome"] == "not_observed"
+
+
+@pytest.mark.parametrize("mixed,outcome,waited", [(True, "matched", 0.0), (False, "unchanged_match", 2.0)])
+def test_curve_baseline_precedence_and_separate_requested_receipts(mixed, outcome, waited, monkeypatch):
+    h = ready_harness()
+    h.top("TOP29", 32, age=5).top("TOP32", -10 if mixed else -15, age=5)
+    scripted_window(h, monkeypatch, [lambda: h.top("TOP29", 32),
+                                    lambda: h.top("TOP30", 99),
+                                    lambda: h.top("TOP32", -15)])
+    body = h.post("zone1_heat_curve", {"value": {"target_high": 32, "outside_low": -15}}).json()
+    assert body["readback"]["outcome"] == outcome
+    assert body["readback"]["waited_seconds"] == waited
+    assert {k: v["value"] for k, v in body["readback"]["observed"].items()} == {
+        "target_high": 32, "outside_low": -15}
+
+
+@pytest.mark.parametrize("where,result", [("publisher", "error"), ("readback", "sent")])
+def test_unexpected_exception_logs_factual_publish_outcome(where, result, monkeypatch, caplog):
+    h = ready_harness()
+    if where == "publisher":
+        h.publisher.raises = RuntimeError("publisher outcome unknown")
+    else:
+        def broken_wait(seq, timeout):
+            raise RuntimeError("readback failed after acceptance")
+        monkeypatch.setattr(h.recorder, "wait_for_change", broken_wait)
+    client = TestClient(create_app(h.recorder, NoStorage(), clock=lambda: h.now,
+                                  controls=h.runtime), raise_server_exceptions=False)
+    with caplog.at_level(logging.INFO, logger="pompa.control_runtime"):
+        response = client.post("/api/v1/controls/dhw_target_temperature", json={"value": 50})
+    assert response.status_code == 500
+    assert h.publisher.calls == [("commands/SetDHWTemp", "50")]
+    lines = _control_lines(caplog)
+    assert len(lines) == 1 and f"publish={result} " in lines[0]
+    assert "publish=refused" not in lines[0]
+    assert h.runtime._in_flight == set()
+
+
+def test_no_readback_never_enters_wait_path(monkeypatch):
+    h = ready_harness(window=30)
+
+    def forbidden_wait(*args):
+        pytest.fail("not_applicable entered readback wait")
+
+    monkeypatch.setattr(h.recorder, "wait_for_change", forbidden_wait)
+    body = h.post("fault_reset").json()
+    assert body["readback"]["outcome"] == "not_applicable"
+    assert body["readback"]["waited_seconds"] == 0.0
+
+
+def test_different_key_reaches_publish_while_first_wait_is_held(monkeypatch):
+    h = ready_harness()
+    held, release, second_published = threading.Event(), threading.Event(), threading.Event()
+    results = {}
+
+    def wait(seq, timeout):
+        held.set()
+        assert release.wait(10)
+
+    monkeypatch.setattr(h.recorder, "wait_for_change", wait)
+
+    def published(topic, payload):
+        if topic == "commands/SetFloorHeatDelta":
+            h.top("TOP23", 6)
+            second_published.set()
+
+    h.publisher.on_publish = published
+    first = threading.Thread(target=_run, args=(h.runtime, "dhw_target_temperature", 50, results))
+    second = threading.Thread(target=_run, args=(h.runtime, "heat_delta", 6, results))
+    first.start()
+    try:
+        assert held.wait(5)
+        second.start()
+        assert second_published.wait(5)
+        h.top("TOP9", 50)
+    finally:
+        release.set()
+        first.join(5)
+        if second.ident is not None:
+            second.join(5)
+    assert not first.is_alive() and not second.is_alive()
+    assert results["heat_delta"]["readback"]["outcome"] == "matched"
+    assert results["dhw_target_temperature"]["readback"]["outcome"] == "matched"
+
+
+def test_mixed_curve_matches_are_factual_and_need_not_be_simultaneous(monkeypatch):
+    h = ready_harness()
+    h.top("TOP29", 32, age=5).top("TOP32", -10, age=5)
+    scripted_window(h, monkeypatch, [lambda: h.top("TOP29", 32),
+                                    lambda: h.top("TOP29", 33),
+                                    lambda: h.top("TOP32", -15)])
+    body = h.post("zone1_heat_curve", {"value": {"target_high": 32, "outside_low": -15}}).json()
+    assert body["readback"]["outcome"] == "matched"
+    assert body["readback"]["observed"]["target_high"]["value"] == 32
+    assert body["readback"]["observed"]["outside_low"]["value"] == -15

@@ -407,8 +407,8 @@ The readback window `W` stays provisional until the 4E-D CT109 measurement.
   - `pompa/control_runtime.py`: per-key in-memory in-flight guard, factual readback (`matched`,
     `unchanged_match`, `not_observed`, `not_applicable`) within the provisional `W` = 15 s, one
     log line per request.
-  - The recorder gains only a generic readings observation and a change signal; it knows nothing
-    about control.
+  - The recorder exposes generic readings observations, receipt identities, a reset generation
+    and a change signal; it knows nothing about control.
   - Evidence:
     - `test_control_api.py`: 53 tests;
     - runtime/API/adapter mutations killed;
@@ -424,7 +424,27 @@ The readback window `W` stays provisional until the 4E-D CT109 measurement.
       request log line. It now writes exactly one, with `requested=<invalid_request>` and never
       the raw body.
     - Requests that reach the runtime still log once; regression tests pin both paths.
-- **4E-D — CT109 validation, API freeze, whole-stage review and closeout:** planned.
+  - Final adversarial corrections (0 blocker / 0 important / 4 minor; owner decisions implemented):
+    - M1: generic physical-readings reset generation prevents false `unchanged_match` after
+      disconnect, LWT Offline or normal clock-step invalidation, even when an intermediate
+      contradiction was erased before the waiter observed it.
+    - M2: immutable baseline receipt identity remains pre-publish regardless of wall-clock steps.
+    - M3: known refusals log their error code; unexpected pre-acceptance exceptions log `error`.
+      Accepted publishes immediately become `sent`, including when later readback raises.
+    - M4: whole baseline matches with uninterrupted, uncontradicted evidence stay
+      `unchanged_match` after full W despite same-value re-publications. Scalar, effect and curve
+      readbacks share this precedence; mixed curves retain separate factual post matches.
+    - 19 added regression cases, including deterministic M25 different-key concurrency and
+      M23 no-readback wait-path pins. The starting code fails 10 targeted correction cases;
+      both surviving contract mutants are killed in isolated scratch copies.
+    - Validation: expanded focused 524 passed; full no-DB 1,411 passed, 303 expected
+      MariaDB-gated skips; full MariaDB 11.4.13 1,714 passed, 0 skipped.
+    - Production image built; offline packaged observation/control probe passed. Disposable
+      localhost Mosquitto: 5/5 scalar, effect, curve and transition scenarios passed.
+    - Self-review A–N: 14/14 passed. Compile and `git diff --check` passed.
+    - No journal, persistence, transport, clock-policy or storage change. Still IMPLEMENTED /
+      AWAITING OWNER REVIEW; 4E-D NOT STARTED.
+- **4E-D — CT109 validation, API freeze, whole-stage review and closeout:** NOT STARTED.
 
 ## Stage 4D checkpoints (DONE)
 

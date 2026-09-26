@@ -142,12 +142,13 @@ def _same(a: object, b: object) -> bool:
 class _Readback:
     """Factual readback evidence of one published request (§25.5.8).
 
-    Only a ``live``, ``available`` reading counts. A reading received before ``published_at``
-    is pre-publish state; one received at or after it is a post-publish observation. The
-    evidence is factual, never causal.
+    Only live, available receipts count. Baseline receipt identity stays pre-publish even
+    across wall-clock corrections. Continuous whole-baseline matches take precedence over
+    same-value re-publications. The evidence is factual, never causal.
     """
 
-    def __init__(self, prepared: PreparedCommand, published_at: float):
+    def __init__(self, prepared: PreparedCommand, published_at: float,
+                 baseline: ReadingsObservation):
         readback = prepared.control.readback
         self.readback = readback
         self.published_at = published_at
@@ -161,34 +162,58 @@ class _Readback:
         self.matched: dict = {}
         self.different: set = set()
         self.last: dict = {}
+        self.baseline_receipts = baseline.receipts
+        self.generation = baseline.generation
+        self.continuity_lost = False
+        for name, identity in self.fields.items():
+            reading = baseline.readings[identity]
+            if reading["mode"] == "live" and reading["available"]:
+                self.pre[name] = self._seen(reading)
+        self.pre_matches = all(
+            name in self.pre and _same(self.pre[name]["value"], self.expected[name])
+            for name in self.fields
+        )
+
+    def _seen(self, reading: Mapping) -> dict:
+        return {"value": self.readback.value_of(reading["raw"]), "raw": reading["raw"],
+                "received_at": reading["received_at"]}
+
+    def unchanged(self) -> bool:
+        return self.pre_matches and not self.continuity_lost and not self.different
 
     def observe(self, observation: ReadingsObservation) -> None:
+        if observation.generation != self.generation:
+            self.continuity_lost = True
+            self.matched.clear()
+            self.generation = observation.generation
         for name, identity in self.fields.items():
             reading = observation.readings[identity]
             received = observation.received_at[identity]
             if reading["mode"] != "live" or not reading["available"] or received is None:
+                if name in self.pre:
+                    self.continuity_lost = True
+                self.matched.pop(name, None)
                 continue
-            seen = {"value": self.readback.value_of(reading["raw"]), "raw": reading["raw"],
-                    "received_at": reading["received_at"]}
+            seen = self._seen(reading)
             self.last[name] = seen
-            if received < self.published_at:
-                self.pre[name] = seen
-            elif _same(seen["value"], self.expected[name]):
-                self.matched.setdefault(name, seen)
-            else:
+            if observation.receipts[identity] is self.baseline_receipts[identity]:
+                continue  # this exact receipt was already present before publishing
+            if not _same(seen["value"], self.expected[name]):
                 self.different.add(name)
+                if self.pre_matches:
+                    # A same-value baseline republish cannot qualify a later contradiction.
+                    self.matched.pop(name, None)
+            elif received >= self.published_at:
+                self.matched.setdefault(name, seen)
 
     def complete(self) -> bool:
-        return len(self.matched) == len(self.fields)
+        return not self.unchanged() and len(self.matched) == len(self.fields)
 
     def outcome(self) -> str:
+        if self.unchanged():
+            return "unchanged_match"
         if self.complete():
             return "matched"
-        if not self.different and all(
-            name in self.pre and _same(self.pre[name]["value"], self.expected[name])
-            for name in self.fields
-        ):
-            return "unchanged_match"
         return "not_observed"
 
     def observed(self, outcome: str) -> object:
@@ -241,8 +266,13 @@ class ControlRuntime:
         """Validate, publish at most once and observe the readback, or raise
         :class:`ControlRequestError` (nothing published). ``value`` is ``ABSENT`` for ``{}``."""
         started = self.monotonic()
-        result = "refused"
+        result = "error"  # no factual acceptance/refusal established yet
         outcome = None
+
+        def accepted() -> None:
+            nonlocal result
+            result = "sent"
+
         try:
             if key not in control.definitions():
                 raise ControlRequestError("unknown_control", f"no control {key!r}")
@@ -250,19 +280,20 @@ class ControlRuntime:
                 raise ControlRequestError("command_in_progress",
                                           f"an earlier {key!r} request is still in its readback window")
             try:
-                body = self._execute_claimed(key, value, started)
+                body = self._execute_claimed(key, value, accepted)
             finally:
                 self._release(key)
-            result, outcome = "sent", body["readback"]["outcome"]
+            outcome = body["readback"]["outcome"]
             return body
         except ControlRequestError as error:
-            result = error.code
+            if result != "sent":
+                result = error.code
             raise
         finally:
             log_request(key, "{}" if value is ABSENT else repr(value), result, outcome,
                         self.monotonic() - started)
 
-    def _execute_claimed(self, key: str, value: object, started: float) -> dict:
+    def _execute_claimed(self, key: str, value: object, accepted: Callable[[], None]) -> dict:
         baseline = self.recorder.readings_observation(self.clock)
         try:
             prepared = control.prepare(key, value, reading_facts(baseline))
@@ -271,7 +302,7 @@ class ControlRuntime:
         published_at = self.clock()
         if self.publisher is None or not self.publisher.publish_command(prepared.topic, prepared.payload):
             raise ControlRequestError("mqtt_unavailable", "MQTT is not connected or did not accept the publish")
-        # From here on the command is sent: nothing below may turn it into an error or a retry.
+        accepted()  # preserve the accepted publish fact even if readback unexpectedly raises
         return {
             "key": key,
             "requested": prepared.requested,
@@ -286,7 +317,7 @@ class ControlRuntime:
         if readback.kind == "none":
             return {"identity": None, "kind": None, "expected": None, "outcome": "not_applicable",
                     "observed": None, "window_seconds": self.window_seconds, "waited_seconds": 0.0}
-        evidence = _Readback(prepared, published_at)
+        evidence = _Readback(prepared, published_at, baseline)
         evidence.observe(baseline)
         began = self.monotonic()
         deadline = began + self.window_seconds

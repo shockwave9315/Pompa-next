@@ -1827,8 +1827,8 @@ Pompa Next adopts neither the composite entities nor the automatic retry.
   - 4E-A introduces no new live-state abstraction and no refactor.
 - **Command echoes.** Pompa Next subscribes to `{prefix}/#`. Its own command publications, and
   HA's (including HA-retained command topics), therefore reach ingest as uncatalogued topics. They
-  carry no source life, are not readings and never confirm a command. Stage 4E does not change
-  ingest.
+  carry no source life, are not readings and never confirm a command. Stage 4E adds only a generic
+  physical-readings reset generation to ingest, without changing its source or history semantics.
 
 #### 25.5.5 Complete command inventory and control definitions
 
@@ -2067,14 +2067,18 @@ A request's facts are kept separate:
 4. **Readback.** Only for definitions with a readback. The backend polls the same in-memory
    live-readings observation for up to `W` seconds. Only `mode="live"` readings count, never
    retained ones. Outcomes:
-   - `matched`: a reading received at or after the publish time equals the expected mapped value.
-     For every field of a curve. For a trigger, the expected effect state.
-   - `unchanged_match`: a live reading already matched before the publish and nothing different
-     arrived. The match cannot be attributed to this command, because HeishaMon publishes only
-     changes.
-   - `not_observed`: the window ended without a matching post-publish reading. The last observed
-     reading is reported. This is a fact, not a failure verdict.
-   - `not_applicable`: the definition has no readback.
+   - `unchanged_match` takes precedence when the whole requested state matched in the baseline
+     and no contradiction or relevant continuity loss was observed during the full window.
+     Same-value periodic re-publications do not change this outcome.
+   - Otherwise `matched` requires qualifying post-publish expected evidence for every requested
+     field (or the expected effect state). For a whole baseline match, a contradicted field needs
+     a later expected receipt.
+   - Otherwise `not_observed` reports the last observed live reading. It is a fact, not a failure.
+   - `not_applicable`: the definition has no readback, so it does not wait.
+   The exact baseline receipt always remains pre-publish, regardless of wall-clock corrections.
+   Disconnect, LWT Offline and normal clock-step invalidation break continuity and discard earlier
+   matches; later genuinely live post-publish evidence can qualify again. These rules apply to
+   scalar, effect and partial curve readbacks alike, using only requested fields.
 5. **Physical execution.** Never claimed. A matching TOP is the heat pump's reported state, not
    proof of physical actuation.
 
@@ -2376,7 +2380,8 @@ reconciliation was added. The 63 Stage 4E-B definitions are unchanged.
   - it never retries, and there is no generic publish.
 - `pompa/recorder.py` gains two generic, control-unaware facilities:
   - `readings_observation(clock)` is the `/live?include=readings` entries (same serializer, same
-    lock), plus the exact float receipt instants and a change sequence number;
+    lock), plus the exact float receipt instants, immutable latest receipt identities, a generic
+    physical-readings reset generation and a change sequence number;
   - `wait_for_change(seq, timeout)` is a `threading.Condition` on the recorder lock, notified
     after every applied MQTT event. `Condition.wait` releases the lock, so a waiting request
     never delays ingest. Recorder and ingest import nothing from control (a test enforces this).
@@ -2401,12 +2406,16 @@ reconciliation was added. The 63 Stage 4E-B definitions are unchanged.
 3. The in-flight guard: `409 command_in_progress`.
 4. `control.prepare()` on one baseline observation: `400`/`409`/`422`.
 5. `publish_command`: a `False` result is `503 mqtt_unavailable`.
-6. After an accepted publish, nothing can turn the request into an error or a second publish.
+6. An accepted publish is immediately recorded as `sent`. Normal readback returns 200; an
+   unexpected exception may produce 500, but never changes the accepted publish fact or retries.
 
 **Request log line (§25.5.10).** Every POST writes exactly one line, through the shared
 `control_runtime.log_request`.
 
 - Requests that reach the runtime log from its `finally`, including unexpected exceptions.
+- Known refusals log their factual error code. An unexpected pre-acceptance exception logs
+  `publish=error`: acceptance or refusal is not established. Immediately after the publisher
+  returns `True`, the log result becomes `sent` and stays so even if readback later raises.
 - A body refused before validation has no trustworthy value. It is logged by the API with
   `requested=<invalid_request>`, and the raw body is never logged.
 - A path key that is not an identifier is logged with `repr`, so it stays on one line.
@@ -2420,30 +2429,36 @@ reconciliation was added. The 63 Stage 4E-B definitions are unchanged.
 
 **Readback evidence.**
 
-- **Qualifying reading.** A reading counts only if it is `mode="live"` and `available` at the
-  observation that sees it.
-- **Pre- and post-publish.** `publish.at` is the API clock (`time.time`, the same wall clock as
-  MQTT receipts) read immediately before the paho call.
-  - A qualifying reading received before it is pre-publish state; the latest one wins, from the
-    baseline or a later observation.
-  - One received at or after it is a post-publish observation.
-- **Outcome per requested field** (a curve uses only its requested fields; a scalar has one):
-  - `matched`: every field had a post-publish observation equal to `expected`. Equality is
-    type-exact, so `True` never equals `1`. The request returns as soon as this holds.
-  - `unchanged_match`: every field's latest pre-publish state equalled `expected` and no field
-    had a different post-publish observation. This needs the whole window.
-  - `not_observed`: anything else.
-- **What is ignored.** Retained, stale, disconnected-epoch and `commands/…` topics never
-  qualify; command topics are not physical readings at all.
-- **Timing.** The window is measured with `time.monotonic`, so a wall-clock step can never
-  extend it. A backward step can only make a post-publish receipt look earlier, which
-  under-reports a match (`not_observed`); it never manufactures one.
-- **Waiting.** The runtime waits for recorder change notifications, not by polling.
-- **Missed intermediates.** Only intermediate values that are overwritten between two
-  observations can be missed. That can only turn a `matched` into `not_observed`, never
-  manufacture a match.
-- **No readback.** A control without readback returns `not_applicable` immediately after the
-  publish, without waiting.
+- **Qualifying reading.** Only `mode="live"` and `available` readings count.
+- **Baseline identity.** The immutable receipt object already present in the baseline is always
+  pre-publish. A wall-clock correction cannot reclassify it. Other receipts must be timestamped
+  at or after `publish.at` to qualify as post-publish matches; time comparisons can still
+  conservatively under-report new evidence after a backward step.
+- **Whole-request precedence.** If all requested fields matched in the baseline and no
+  contradictory evidence or continuity loss is observed, the outcome is `unchanged_match`
+  after full W, even with repeated same-value publications. Otherwise, every requested field
+  needs qualifying post-publish expected evidence for `matched`, which can return early.
+  For a whole baseline match, a contradicted field needs a later expected receipt. Anything
+  else is `not_observed`.
+- **Curves and effects.** Only requested curve fields participate; they may arrive separately.
+  Mixed baseline curves still match once every requested field has qualifying post evidence,
+  without requiring simultaneous values.
+  An already-active effect repeatedly published true remains `unchanged_match`; an observed
+  false then true transition can match. TOP26/TOP69 are effect readings, not acknowledgements.
+- **Continuity.** Ingest's generic physical-readings reset generation changes on connect,
+  disconnect, LWT Offline and normal clock-step invalidation. Recorder exposes it atomically
+  with the latest immutable receipt objects. A changed generation discards earlier matches and
+  prevents `unchanged_match`; a qualifying new live receipt can match afterward. Observed loss
+  of relevant availability also prevents `unchanged_match`. Neither component knows control
+  keys or expectations, and no event journal or additional receipt history exists.
+- **What is ignored.** Retained, stale, disconnected-epoch and `commands/…` topics never qualify.
+- **Timing and waiting.** W uses `time.monotonic` and recorder change notifications. Waiting
+  releases the recorder lock; wall-clock corrections cannot extend W.
+- **Missed intermediates.** Overwritten intermediate values can prevent a factual match. The
+  old timestamp-only implementation could also falsely claim unchanged after invalidation;
+  the reset generation now prevents that claim even if the intermediate value was missed.
+  No causal claim is made for any matching observation.
+- **No readback.** `not_applicable` returns immediately after publish without entering the wait.
 
 **Why no replay is possible (paho 2.1.0 source).**
 
