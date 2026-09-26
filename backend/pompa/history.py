@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from bisect import bisect_left
 from collections.abc import Sequence
+from dataclasses import dataclass
 import re
 
 from .aggregation import (
@@ -39,7 +40,7 @@ from .aggregation import (
 from .catalog import METRICS, METRICS_BY_KEY, RECORDED_KEYS
 from .minute import iso_utc
 from .optional_policy import snapshot_timeline
-from .storage import SeriesRow, Storage
+from .storage import SeriesRow, Session, Storage
 from .timegrid import (
     BUCKETS, HOUR, LOCAL_TZ_NAME, MAX_BUCKETS, MINUTE_BUCKETS, Unrepresentable, auto_bucket,
     bucket_edges, ceil_hour, expected_minutes, floor_hour,
@@ -138,6 +139,99 @@ def _hour_pieces(a: int, b: int):
         h += HOUR
 
 
+@dataclass
+class CanonicalPartials:
+    """Loaded history facts; folding uses the same hour-by-hour algebra as ``/history``."""
+
+    needed: tuple[str, ...]
+    roll_lo: int
+    roll_hi: int
+    raw: list
+    raw_ts: list[int]
+    rolled: dict[int, dict[str, Stats]]
+    optional_ids: list[int]
+    optional_raw: list
+    optional_raw_ts: list[int]
+    optional_timeline: dict
+    optional_rolled: dict[int, dict[int, OptionalStats]]
+
+    def fold(self, edges: Sequence[tuple[int, int]]) -> tuple[list[dict[str, Stats]],
+                                                              list[dict[int, OptionalStats]]]:
+        per_bucket: list[dict[str, Stats]] = []
+        optional_per_bucket: list[dict[int, OptionalStats]] = []
+        for a, b in edges:
+            acc: dict[str, Stats] = {}
+            optional_acc: dict[int, OptionalStats] = {}
+            for pa, pb in _hour_pieces(a, b):
+                if self.roll_lo <= pa and pb <= self.roll_hi:
+                    part = self.rolled.get(pa, {})
+                    optional_part = self.optional_rolled.get(pa, {}) if self.optional_ids else {}
+                else:
+                    minute_part = self.raw[bisect_left(self.raw_ts, pa):bisect_left(self.raw_ts, pb)]
+                    part = fold_minutes(minute_part, self.needed)
+                    optional_part = (fold_optional_minutes(
+                        [ts for ts, _ in minute_part], self.optional_timeline,
+                        dict(self.optional_raw[bisect_left(self.optional_raw_ts, pa):
+                                               bisect_left(self.optional_raw_ts, pb)]),
+                        set(self.optional_ids))
+                        if self.optional_ids else {})
+                acc = combine_maps(acc, part)
+                if self.optional_ids:
+                    optional_acc = combine_optional_maps(optional_acc, optional_part)
+            per_bucket.append(acc)
+            optional_per_bucket.append(optional_acc)
+        return per_bucket, optional_per_bucket
+
+
+def canonical_partials(session: Session, start: int, end: int, needed: Sequence[str],
+                       bucket: str, optional_rows: dict[str, SeriesRow] | None = None
+                       ) -> CanonicalPartials:
+    """Load canonical (and requested optional) facts in the caller's snapshot.
+
+    ``bucket`` retains the existing raw/rollup selection policy. This function owns no
+    transaction and its result can be folded over caller-supplied bucket edges.
+    """
+    optional_rows = optional_rows or {}
+    optional_ids = [row.id for row in optional_rows.values()]
+    optional_by_id = {row.id: row for row in optional_rows.values()}
+    rolled_until = session.rolled_until()
+    roll_lo = roll_hi = ceil_hour(start)
+    if bucket in HOURLY_BUCKETS and rolled_until is not None:
+        roll_hi = max(roll_lo, min(floor_hour(end), rolled_until))
+    raw_spans = [(start, end)] if roll_lo == roll_hi else [
+        (a, b) for a, b in ((start, roll_lo), (roll_hi, end)) if a < b]
+    for a, b in raw_spans:
+        purged = session.first_purged_hour(a, b)
+        if purged is not None:
+            raise Unrepresentable(
+                f"bucket={bucket} needs the raw minutes of {iso_utc(a)}–{iso_utc(b)}, but the raw"
+                f" evidence of hour {iso_utc(purged)} was purged; the range is not rounded")
+
+    needed = tuple(needed)
+    columns = minute_columns(needed)
+    raw = [r for a, b in raw_spans for r in session.read_minutes(a, b, columns)]
+    raw_ts = [ts for ts, _ in raw]
+    optional_raw = ([item for a, b in raw_spans for item in session.read_optional_minutes(a, b)]
+                    if optional_ids else [])
+    optional_raw_ts = [ts for ts, _ in optional_raw]
+    optional_timeline = (snapshot_timeline(session, session.read_policy_head(), raw_ts)
+                         if optional_ids else {})
+    rolled: dict[int, dict[str, Stats]] = {}
+    for h, name, n, v_sum, v_min, v_max, v_last in session.read_rollup(roll_lo, roll_hi, needed):
+        rolled.setdefault(h, {})[name] = Stats(n, v_sum, v_min, v_max, v_last)
+    optional_rolled: dict[int, dict[int, OptionalStats]] = {}
+    if optional_ids:
+        for h, sid, selected, known, v_sum, v_min, v_max, v_last in session.read_optional_rollup(
+                roll_lo, roll_hi, optional_ids):
+            if selected <= 0 or (optional_by_id[sid].kind == "last" and v_sum is not None):
+                raise OptionalHistoryInconsistent(
+                    f"optional rollup {h}/{sid} has invalid selected count or last-series sum")
+            optional_rolled.setdefault(h, {})[sid] = OptionalStats(
+                selected, known, v_sum, v_min, v_max, v_last)
+    return CanonicalPartials(needed, roll_lo, roll_hi, raw, raw_ts, rolled, optional_ids,
+                             optional_raw, optional_raw_ts, optional_timeline, optional_rolled)
+
+
 def query(storage: Storage, start: int, end: int, bucket: str, series: Sequence[str],
           now: float) -> dict:
     """History for minute-aligned ``start < end``. Raises ``Unrepresentable`` (422)."""
@@ -145,7 +239,6 @@ def query(storage: Storage, start: int, end: int, bucket: str, series: Sequence[
     if unknown:
         raise HistoryRequestError(f"unknown series: {', '.join(unknown)}")
     needed = _needed(series)
-
     with storage.session() as s:
         optional_rows: dict[str, SeriesRow] = {}
         for selector in series:
@@ -159,73 +252,15 @@ def query(storage: Storage, start: int, end: int, bucket: str, series: Sequence[
                 if found[0].kind not in ("mean", "last"):
                     raise OptionalHistoryInconsistent(f"invalid persisted optional kind: {selector}")
                 optional_rows[selector] = found[0]
-        optional_ids = [row.id for row in optional_rows.values()]
-        optional_by_id = {row.id: row for row in optional_rows.values()}
-        rolled_until = s.rolled_until()
         if bucket == "auto":
             resolved = auto_bucket(start, end)
             if resolved in MINUTE_BUCKETS and s.first_purged_hour(start, end) is not None:
-                resolved = "1h"  # the raw minutes are gone; whole rolled hours can still answer
+                resolved = "1h"
         else:
             resolved = bucket
         edges = bucket_edges(start, end, resolved)
-
-        # Complete rolled hours [roll_lo, roll_hi) come from rollup_1h, everything else from raw.
-        roll_lo = roll_hi = ceil_hour(start)
-        if resolved in HOURLY_BUCKETS and rolled_until is not None:
-            roll_hi = max(roll_lo, min(floor_hour(end), rolled_until))
-        raw_spans = [(start, end)] if roll_lo == roll_hi else [
-            (a, b) for a, b in ((start, roll_lo), (roll_hi, end)) if a < b]
-        for a, b in raw_spans:
-            purged = s.first_purged_hour(a, b)
-            if purged is not None:
-                raise Unrepresentable(
-                    f"bucket={resolved} needs the raw minutes of {iso_utc(a)}–{iso_utc(b)}, but the raw"
-                    f" evidence of hour {iso_utc(purged)} was purged; the range is not rounded")
-
-        columns = minute_columns(needed)
-        raw = [r for a, b in raw_spans for r in s.read_minutes(a, b, columns)]
-        raw_ts = [ts for ts, _ in raw]
-        optional_raw = ([item for a, b in raw_spans for item in s.read_optional_minutes(a, b)]
-                        if optional_ids else [])
-        optional_raw_ts = [ts for ts, _ in optional_raw]
-        timeline = (snapshot_timeline(s, s.read_policy_head(), raw_ts) if optional_ids else {})
-        rolled: dict[int, dict[str, Stats]] = {}
-        for h, name, n, v_sum, v_min, v_max, v_last in s.read_rollup(roll_lo, roll_hi, needed):
-            rolled.setdefault(h, {})[name] = Stats(n, v_sum, v_min, v_max, v_last)
-        optional_rolled: dict[int, dict[int, OptionalStats]] = {}
-        if optional_ids:
-            for h, sid, selected, known, v_sum, v_min, v_max, v_last in s.read_optional_rollup(
-                    roll_lo, roll_hi, optional_ids):
-                if selected <= 0 or (optional_by_id[sid].kind == "last" and v_sum is not None):
-                    raise OptionalHistoryInconsistent(
-                        f"optional rollup {h}/{sid} has invalid selected count or last-series sum")
-                optional_rolled.setdefault(h, {})[sid] = OptionalStats(
-                    selected, known, v_sum, v_min, v_max, v_last)
-
-    per_bucket: list[dict[str, Stats]] = []
-    optional_per_bucket: list[dict[int, OptionalStats]] = []
-    for a, b in edges:
-        acc: dict[str, Stats] = {}
-        optional_acc: dict[int, OptionalStats] = {}
-        for pa, pb in _hour_pieces(a, b):
-            if roll_lo <= pa and pb <= roll_hi:
-                part = rolled.get(pa, {})
-                optional_part = optional_rolled.get(pa, {}) if optional_ids else {}
-            else:
-                minute_part = raw[bisect_left(raw_ts, pa):bisect_left(raw_ts, pb)]
-                part = fold_minutes(minute_part, needed)
-                optional_part = (fold_optional_minutes(
-                    [ts for ts, _ in minute_part], timeline,
-                    dict(optional_raw[bisect_left(optional_raw_ts, pa):bisect_left(optional_raw_ts, pb)]),
-                    set(optional_ids))
-                    if optional_ids else {})
-            acc = combine_maps(acc, part)
-            if optional_ids:
-                optional_acc = combine_optional_maps(optional_acc, optional_part)
-        per_bucket.append(acc)
-        optional_per_bucket.append(optional_acc)
-
+        partials = canonical_partials(s, start, end, needed, resolved, optional_rows)
+        per_bucket, optional_per_bucket = partials.fold(edges)
     return _response(start, end, bucket, resolved, edges, per_bucket, series, now,
                      optional_per_bucket, optional_rows)
 

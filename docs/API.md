@@ -7,6 +7,7 @@ optional-history policy. Checkpoint C adds internal raw minute recording. Checkp
 persisted optional-series discovery and explicit optional history selectors; default responses
 remain canonical. The owner validated these Stage 4B endpoints on CT109. Stage 4C checkpoint C adds
 one range activity resource and one current activity resource; every earlier response is unchanged.
+Stage 4D-A froze the `GET /api/v1/report` contract below; Stage 4D-C-B implements it.
 
 Domain rules behind it are in [`ARCHITECTURE.md`](ARCHITECTURE.md). This file describes only what
 the HTTP surface promises.
@@ -25,8 +26,9 @@ the HTTP surface promises.
 | `GET /api/v1/optional-history/series` | Discover persisted optional historical meanings | no | yes |
 | `GET /api/v1/activity` | Activity timeline, compressor runs, off intervals, defrosts and summary over `[from, to)` | no | yes |
 | `GET /api/v1/activity/live` | Current activity from the in-memory live observation | no | no |
+| `GET /api/v1/report` (Stage 4D-C) | Day/week/month/custom Warsaw calendar report | no | yes |
 
-The application contract exposes the ten product API endpoints above; FastAPI may additionally
+The application exposes all eleven product API endpoints above. FastAPI may additionally
 expose its standard documentation/OpenAPI routes (`/docs`, `/redoc`, `/openapi.json`). `/api/v1` is
 a fresh namespace, not inherited legacy versioning.
 
@@ -317,9 +319,9 @@ bucket.
 | Status | When |
 |---|---|
 | `400` | Malformed parameters: missing `from`/`to`, unparseable or naive timestamps, non-minute alignment, `from >= to`, unknown bucket, unknown or duplicate series, invalid or repeated `include`. |
-| `422` | Well-formed but unrepresentable: more than 3000 buckets, a range or partial edge hour whose raw minutes were provably purged, an optional mean/energy bucket whose known-value sum cannot fit in binary DOUBLE, instants outside 1970–2100, an activity range longer than 31 days and one hour, or an activity range that intersects activity-unavailable history. |
-| `500` | `/api/v1/activity` only: stored durable activity is inconsistent. A row may be invalid or not in its exact canonical persisted form, or an hour's durable segment minutes may differ from its recorded canonical minutes. This applies to any hour the request examines, including widened evidence. It is never answered from raw instead, and it is never a `422`. |
-| `503` | The database is unavailable for `/api/v1/history`, `/api/v1/optional-history/selection`, `/api/v1/optional-history/series` or `/api/v1/activity`. |
+| `422` | Well-formed but unrepresentable: more than 3000 history buckets, a history range or partial edge hour whose raw minutes were provably purged, an optional mean/energy bucket whose known-value sum cannot fit in binary DOUBLE, instants outside 1970–2100, an activity range longer than 31 days and one hour, or activity-unavailable history. Stage 4D report-specific cases are below. |
+| `500` | `/api/v1/activity`: stored durable activity is inconsistent. A row may be invalid or not in its exact canonical persisted form, or an hour's durable segment minutes may differ from its recorded canonical minutes. This applies to widened evidence too. It is never answered from raw instead. Stage 4D report consistency cases are below. |
+| `503` | The database is unavailable for a DB-backed resource (`/history`, optional-history selection/series, `/activity`, or `/report`). |
 
 The body is `{"detail": "…"}`. `422` for purged raw means the backend knows the minutes existed and
 were physically deleted — it is never a consequence of a range simply being old. A range that was
@@ -420,9 +422,9 @@ paths remain unchanged. `/status` keeps its Stage 3 shape and `uncatalogued_topi
 still list known non-core capability topics. Default `/history` remains canonical; explicit
 Stage 4B selectors are documented below.
 
-Reports and commands belong to later Stage 4 checkpoints. This document lists no endpoint or
-response for them until implemented and contract-tested. The frontend starts only after the
-complete product-backend contract is documented.
+Stage 4D-C-B implements `GET /api/v1/report`; its frozen contract is below. Commands belong to
+later Stage 4 checkpoints. The frontend starts only after the complete product-backend contract
+is documented.
 
 ## Stage 4B optional-history selection
 
@@ -641,3 +643,177 @@ last closed history minute.
 | `all_inputs_live` | Every classifier input was a live value. |
 | `mqtt` | `{connected, alive, epoch}` from the same observation. |
 | `inputs` | For each of `compressor_freq`, `defrosting_state`, `heatpump_state`, `three_way_valve` and the four power channels: `{value, mode, received_at, used}`. `used` is true only for a live value. |
+
+## Stage 4D report (frozen in 4D-A; implemented in 4D-C)
+
+`GET /api/v1/report` is one backend-owned domain resource. This section is the implementation
+contract, not a claim that the route is live at checkpoint 4D-A. The endpoint needs MariaDB but
+not MQTT. It leaves the public `/history`, `/activity`, `/activity/live`, `/live`, `/metrics` and
+`/status` responses unchanged.
+
+| Form | Resolved period |
+|---|---|
+| `?period=day&date=YYYY-MM-DD` | That Warsaw local day. |
+| `?period=week&date=YYYY-MM-DD` | ISO Monday–Sunday Warsaw week containing the anchor date. |
+| `?period=month&date=YYYY-MM-DD` | Warsaw calendar month containing the anchor date. |
+| `?period=custom&from=YYYY-MM-DD&to=YYYY-MM-DD` | Local `from` inclusive, local `to` exclusive; at most 31 local days. |
+
+Use exactly the parameters of one form, each once. A date is a valid calendar date in the exact
+`YYYY-MM-DD` form, never a timestamp or time of day. `to > from` is required. Other period values,
+missing/extra/repeated parameters and custom spans over 31 local days are 400. Arbitrary instant
+ranges remain `/history` and `/activity`. Calendar midnight is converted through
+`Europe/Warsaw`, yielding UTC-hour-aligned boundaries. Day may be 23/24/25 hours, ISO week
+167/168/169 hours, and month 672/696/720/743/744/745 hours. Day has one bucket per local hour
+(`bucket: "1h"`, so the repeated autumn hour has two distinct UTC buckets); week, month and
+custom have one bucket per local day (`bucket: "1d"`). All calendar buckets are emitted.
+Calendar resolution does not check installation history or impose a report-specific year range.
+A valid settled period with no stored rows is an ordinary empty report: zero recorded minutes,
+settled gaps, zero event counts and `null` unmeasured values. Actual calendar/time conversion
+failure or a Warsaw boundary outside the whole UTC-hour grid is a pure unrepresentable condition.
+Malformed report request forms map to 400; a well-formed but technically unrepresentable
+calendar/time maps to 422. Absence of stored rows never makes a calendar period unrepresentable.
+
+The response shape is:
+
+```text
+report {
+  period: {kind, from_date, to_date, from, to, timezone, bucket},
+  observation: {now, closed_until, effective_to},
+  segment_rule_version,
+  evidence: {from, to},
+  totals: FACTS + {compressor_runs_overlapping, defrosts_overlapping},
+  buckets: [{start, end, FACTS}, ...]
+}
+FACTS = {coverage, energy, activity, events, technical}
+```
+
+`period.kind` is `day|week|month|custom`; `from_date` and `to_date` are the resolved local dates,
+the latter exclusive; `from` and `to` are UTC `Z` instants at those midnights; `timezone` is
+`Europe/Warsaw`. `observation.now` is one sampled UTC instant, `closed_until` is the Stage 4C
+settled frontier, and `effective_to = min(period.to, max(period.from, closed_until))`. Thus
+`period.from <= effective_to <= period.to`: it equals `period.to` when the frontier reaches or
+passes `period.to`, `closed_until` when `period.from < closed_until < period.to`, and `period.from`
+when `closed_until <= period.from` (including a fully future report). The clamp changes only the
+settled extraction endpoint; it does not change the Stage 4C frontier or the coverage partition
+below. `segment_rule_version` is the Stage 4C rule version read, currently 1.
+`evidence.from/to` are the UTC extent actually examined for activity, including span widening;
+both are `null` when no settled activity window needs
+examination. Bucket `start/end` are UTC `Z` instants, ordered and half-open. A day with the
+repeated autumn hour has two buckets with different UTC starts. A future bucket still has the
+same FACTS shape and factual zero counts, with unknown measurements as `null`.
+
+**Coverage.** In each FACTS, `coverage` is:
+
+```text
+{calendar_minutes, settled_minutes, unsettled_minutes, future_minutes,
+ recorded_minutes, gap_minutes, coverage_percent}
+```
+
+For bucket `[a,b)`, set `C = closed_until` and `F = floor_minute(now)`:
+`settled_minutes = |[a,b) ∩ (-∞,C)|`, `unsettled_minutes = |[a,b) ∩ [C,F)|`, and
+`future_minutes = |[a,b) ∩ [F,+∞)|`. Their sum is `calendar_minutes`.
+`recorded_minutes` counts canonical rows only in the settled part;
+`gap_minutes = settled_minutes - recorded_minutes`.
+`coverage_percent = round(100 * recorded_minutes / settled_minutes, 1)`, or `null` when settled
+minutes are zero. Totals use the whole period under the same equations. The current partial
+minute is future; a waiting or protected unacknowledged tail is unsettled, never a gap. No
+readiness/quality status or threshold is returned.
+For a period entirely after `floor_minute(now)`, `settled_minutes=0`, `unsettled_minutes=0`,
+`future_minutes=calendar_minutes` and `coverage_percent=null`.
+
+**Energy.** Each FACTS has `energy = {channels, consumption, production, cop}`. `channels`
+contains exactly `co_power_consumption`, `co_power_production`, `dhw_power_consumption` and
+`dhw_power_production`, each with `{kwh, minutes, unknown_minutes}`. For that FACTS' recorded
+minutes, `minutes` counts known channel readings, `unknown_minutes = recorded_minutes - minutes`,
+and `kwh = Σ known minute-average W / 60000` or `null` when no minute is known. A known zero is
+counted as known and has 0 kWh; `NULL` is unknown; a no-row minute is counted only in coverage.
+
+`consumption` and `production` each have `{observed_kwh, unknown_channel_minutes}`. Consumption
+uses both CO and DHW consumption channels; production uses both production channels.
+`observed_kwh` sums actually observed energy from those channels and is `null` only if neither
+has a known minute. `unknown_channel_minutes` is the sum of their two `unknown_minutes` values,
+in `0..2*recorded_minutes`. Zero means complete across both channels over recorded minutes.
+A positive count does not make observed energy false or complete. There is no `total_kwh` claim.
+The `pair_*` series are used for COP only, never for ordinary energy knownness.
+
+`cop` contains exactly `co`, `dhw`, `total`, each
+`{cop, paired_minutes, input_kwh, output_kwh}`. CO pairs its two power channels, DHW pairs its
+two, and total requires all four in each contributing minute. Ingredients are paired kWh sums;
+they are `null` when there is no paired minute. `cop = Σ paired output / Σ paired input`, `null`
+with no pairs or a zero denominator. Known zero is valid paired evidence. No average of
+instantaneous COP or ratio of unpaired energy totals is permitted.
+
+**Activity.** Each FACTS has:
+
+```text
+activity: {
+  compressor_minutes: {off, on, unknown},
+  classes: {off, idle, co, dhw, transition, defrost, unknown},
+  heating: {activities: ["co", "dhw", "transition"], minutes,
+            channels, consumption, production, cop}
+}
+```
+
+Every `classes[A]` value is `{minutes, channels, consumption, production, cop}`, with the same
+energy and COP field meanings as `energy`; its unknown-minute denominator is that class's
+recorded `minutes`. All seven classes sum to `coverage.recorded_minutes`; all class channel
+known/unknown counts and aggregate unknown-channel counts sum to the corresponding top-level
+energy counts. `compressor_minutes` similarly partitions recorded minutes. `heating` uses only
+the three listed classes. Its `production.observed_kwh` is useful heat; its headline heating COP
+is `heating.cop.total`, paired over all four channels within heating segments. Other classes,
+including defrost and unknown, remain separately visible. The frontend never reclassifies them.
+
+**Events.** Each FACTS has:
+
+```text
+events: {
+  observed_starts, observed_stops,
+  complete_runs: {count, total_minutes, min_minutes, max_minutes, mean_minutes},
+  exact_off_intervals: {count, total_minutes, min_minutes, max_minutes, mean_minutes},
+  defrost_events,
+  activity_events: {off, idle, co, dhw, transition, defrost, unknown},
+  observed_defrost_seconds
+}
+```
+
+`min_minutes`, `max_minutes` and `mean_minutes` are `null` when the corresponding count is zero.
+The report carries no `complete_runs.minutes[]` list; individual runs remain available in
+`/activity`. Observed starts are attributed to the bucket holding the run's first minute;
+observed stops to its last minute. Complete runs and exact off intervals are attributed
+at their first minute. `defrost_events` counts maximal observed Stage 4C defrost spans;
+`activity_events[A]` counts maximal observed activity spans of class `A`. Each span is attributed
+to the bucket containing its first observed minute, even if its Stage 4C left boundary is `gap`,
+`unknown` or `outside_evidence`. An `observed` boundary proves a start; those other boundaries
+do not. The generic event counts include all four cases without claiming a physical/domain
+start, and a span crossing adjacent buckets counts only once. `observed_starts` and
+`observed_stops` retain their strict Stage 4C observed-boundary requirements. No separate
+observed-defrost-start fact is included. `observed_defrost_seconds` clips to each bucket. The
+non-additive `compressor_runs_overlapping` and `defrosts_overlapping` are top-level `totals`
+fields only.
+
+**Technical.** Each FACTS has `technical.outside_temp = {avg, min, max, minutes}` and
+`technical.compressor_freq = {avg, max, minutes, active_avg}`. Missing numerical values are
+`null`, with `minutes=0`. `active_avg` is the compressor-frequency sum divided by
+`activity.compressor_minutes.on`, or `null` when on minutes are zero. This is allowed only under
+the Stage 4C identity that on means known frequency `>0`, off means known frequency `0`, and
+unknown frequency means compressor unknown. The read model checks that frequency known minutes
+equal on + off minutes for the same range/bucket and returns 500 on inconsistency. No P95 or
+non-durable active minimum is reported; detailed temperatures and pump facts stay in `/history`.
+
+**Whole-resource refusal.** A settled report range intersecting Stage 4C activity-unavailable
+history returns 422. It never returns energy with `activity=null` in the same report; numeric
+history remains independently queryable. Corrupt durable activity or a per-hour mismatch between
+history and activity recorded-minute counts in one DB snapshot returns 500. No raw fallback hides
+corruption. The report-specific HTTP errors frozen so far are:
+
+| Status | Cause |
+|---|---|
+| `400` | Malformed period/date/custom parameters, any time component, `to <= from`, or custom span over 31 local days. |
+| `422` | Well-formed but technically unrepresentable Warsaw calendar/time, activity-unavailable history, or a pathological purged current edge that cannot be represented. |
+| `500` | Invalid/corrupt durable activity, history/activity recorded-count inconsistency, or the technical compressor-frequency identity failing. |
+| `503` | Database unavailable. |
+
+Error bodies use `{"detail": "…"}`. The report reads one MariaDB consistent snapshot after
+sampling the settled frontier, with no DB I/O under the recorder lock. The unrolled current hour
+may be read from raw below that frontier under a report-local edge rule. Existing `/history` and
+`/activity` behavior remains byte-identical through the Stage 4D-C extraction refactor.

@@ -43,7 +43,7 @@ Domain rules are in [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 
 ## API
 
-The Stage 3 default API shapes and the additive Stage 4A–4C forms are specified in
+The Stage 3 default API shapes and the additive Stage 4A–4D forms are specified in
 [`docs/API.md`](../docs/API.md); this section is the operator's summary.
 
 - `GET /health` — process liveness only: `{"status": "ok"}`.
@@ -67,6 +67,8 @@ The Stage 3 default API shapes and the additive Stage 4A–4C forms are specifie
   reference-backed TOP/OPT/SET/XTOP capabilities.
 - `GET /api/v1/metrics?include=history_profiles` — the unchanged default catalog plus the
   history-eligible optional profiles.
+- `GET /api/v1/report` — MariaDB-backed Warsaw day/week/month/custom reports with backend-owned
+  report facts. The detailed contract remains in [`docs/API.md`](../docs/API.md).
 - `GET /api/v1/history?from=…&to=…[&bucket=…][&series=a,b]` — exact `[from, to)`, never rounded.
 - `GET`/`PUT /api/v1/optional-history/selection` — factual active/pending selection and an
   explicit update; `GET /api/v1/optional-history/series` discovers persisted series meanings.
@@ -166,7 +168,7 @@ cd /opt/pompa-next
 git checkout main
 cp .env.example .env && chmod 600 .env   # set MQTT_HOST, credentials, DB passwords
 docker compose up -d --build
-scripts/smoke.sh                         # health, status, last-hour gaps, per-topic table
+scripts/smoke.sh                         # health, status, last-hour gaps, Warsaw-day report, per-topic table
 ```
 
 Update:
@@ -181,6 +183,10 @@ scripts/smoke.sh
 
 Run exactly one backend container. The `db-data` volume must normally survive updates — do not run
 `docker compose down -v`.
+
+The smoke report date comes from `/api/v1/status.now` in `Europe/Warsaw`, independent of the host
+timezone. It prints the report period, settled frontier, effective endpoint and coverage counts
+without thresholds. `scripts/smoke.sh --json` still emits only raw status for freshness measurement.
 
 ## Freshness re-measurement procedure
 

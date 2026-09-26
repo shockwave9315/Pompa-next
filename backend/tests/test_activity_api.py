@@ -5,6 +5,7 @@ Expected values are literals or independent raw references, never the serializer
 """
 
 from datetime import date, datetime, timezone
+import json
 
 import pytest
 
@@ -36,6 +37,37 @@ def put(storage, start, shapes, *, roll=True):
 
 def q(storage, a, b, now=NOW):
     return activity_history.query(storage, a, b, now)
+
+
+def test_loaded_timeline_uses_caller_session_and_matches_whole_activity_response(
+        any_storage, monkeypatch):
+    put(any_storage, T0, SCENARIO + TAIL)
+    start, end = RANGES[0]
+    expected = q(any_storage, start, end)
+    original_session = any_storage.session
+    with original_session() as session:
+        def nested_session():
+            raise AssertionError("timeline extraction opened a nested storage session")
+
+        monkeypatch.setattr(any_storage, "session", nested_session)
+        loaded = activity_history.load_timeline(session, start, end, NOW, left_floor=0)
+        actual = activity_history._response(loaded.timeline, start, end, NOW, NOW,
+                                            loaded.evidence_from, loaded.evidence_to)
+        assert actual == expected
+        assert json.dumps(actual, ensure_ascii=False, separators=(",", ":")) == json.dumps(
+            expected, ensure_ascii=False, separators=(",", ":"))
+        assert session.read_minutes(start, start + M)
+
+
+def test_generic_timeline_can_cover_pre_unix_gaps_without_changing_activity_clamp():
+    storage = conftest.FakeStorage()
+    with storage.session() as session:
+        generic = activity_history.load_timeline(session, -H, 0, H)
+        public_window = activity_history.load_timeline(session, -H, 0, H, left_floor=0)
+    assert generic.evidence_from == -2 * H
+    assert generic.timeline.start == -2 * H
+    assert generic.timeline.items[0].start == -2 * H
+    assert public_window.evidence_from == 0
 
 
 def runs(body):
@@ -339,6 +371,20 @@ def test_dst_days_through_the_api(any_storage, day, minutes):
 
 
 # ------------------------------------------------------------------ API contract
+
+def test_activity_api_preserves_unix_zero_evidence_floor(any_storage):
+    put(any_storage, 0, [CO, CO, OFF], roll=False)
+    body = Api(storage=any_storage, start=H).body(
+        "/api/v1/activity", t=H,
+        **{"from": "1970-01-01T00:00:00Z", "to": "1970-01-01T00:03:00Z"})
+    assert body["evidence"]["from"] == "1970-01-01T00:00:00Z"
+    first_event = body["timeline"][0]["event"]
+    assert first_event["start"] == "1970-01-01T00:00:00Z"
+    assert first_event["start_boundary"] == "outside_evidence"
+    [run] = body["compressor_runs"]
+    assert run["start"] == "1970-01-01T00:00:00Z"
+    assert run["start_boundary"] == "outside_evidence"
+
 
 def test_literal_response_contract(any_storage):
     put(any_storage, T0, [OFF, CO, CO, OFF])

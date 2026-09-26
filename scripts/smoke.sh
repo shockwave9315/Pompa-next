@@ -6,7 +6,7 @@
 #   scripts/smoke.sh --json > status-$(date -u +%Y%m%dT%H%M%SZ).json   # archive raw status
 #
 # Prints facts only. Exits non-zero when /health, /api/v1/status or
-# /api/v1/history cannot be fetched. Uses host python3 when present, otherwise
+# /api/v1/history or /api/v1/report cannot be fetched. Uses host python3 when present, otherwise
 # the python inside the running backend container.
 set -euo pipefail
 
@@ -17,6 +17,7 @@ BASE="${1:-${POMPA_URL:-http://127.0.0.1:8001}}"
 read -r -d '' PROGRAM <<'PY' || true
 import json, sys, time, urllib.error, urllib.request
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 mode, base = sys.argv[1], sys.argv[2].rstrip("/")
 
@@ -81,6 +82,16 @@ if run:
 print(f"history last 60m  recorded_minutes={recorded}/{len(buckets)} missing_ranges={len(gaps)}")
 for g in gaps:
     print(f"                  missing [{g[0]}, {g[1]})")
+
+day = datetime.fromisoformat(status["now"]).astimezone(ZoneInfo("Europe/Warsaw")).date().isoformat()
+code, report = get(f"/api/v1/report?period=day&date={day}")
+if code != 200:
+    fail(f"/api/v1/report HTTP {code} {report}")
+print(f"report period     {json.dumps(report['period'], ensure_ascii=False)}")
+print(f"report observation closed_until={report['observation']['closed_until']} "
+      f"effective_to={report['observation']['effective_to']}")
+print("report coverage   " + " ".join(f"{key}={value}"
+                                       for key, value in report["totals"]["coverage"].items()))
 
 print()
 print("per-topic measurement (process lifetime): gaps are sampled only between consecutive non-retained")

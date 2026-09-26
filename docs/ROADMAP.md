@@ -63,12 +63,17 @@ cycle durations/intervals and individual defrosts. Preserve missing evidence. Th
 durable per-hour activity segments; events and runs are derived on read. Checkpoints A (pure
 domain truth), B (durable segments), C (API resources) and D (CT109 validation) are complete.
 The owner accepted CT109 schema, backfill, durable integrity, raw-vs-durable, activity API and
-unchanged prior-contract evidence. PR #8 remains draft for independent whole-PR final review.
+unchanged prior-contract evidence. PR #8 is merged to `main` at
+`8c3bccbcf6ba305bbf547c59ef3f6167471442e8`.
 
-### 4D — Reports and product analytics projections
+### 4D — Reports and product analytics projections (CURRENT)
 
 Compose day, week, month and custom-period outputs from the existing energy, paired COP and
-coverage algebra plus 4C activity truth. Do not add separate formulas per frontend panel.
+coverage algebra plus 4C activity truth. Use `rollup_1h` and `activity_segment_1h`; add no report
+storage. Expose one `GET /api/v1/report` resource for Warsaw calendar periods, with backend-owned
+facts rather than formulas per frontend panel. Checkpoints: A contract freeze (owner review), B
+pure report domain, C one-snapshot read model/API, D runtime and adversarial closeout before the
+owner merge decision. See `docs/ARCHITECTURE.md` §25.4.
 
 ### 4E — SET/control backend, final API freeze and runtime validation
 

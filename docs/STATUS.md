@@ -2,15 +2,25 @@
 
 ## Current stage
 
-**Stage 4C — operational state, activity, cycles, defrost and durable events — DONE.**
-Checkpoints A (domain truth), B (durable hourly activity segments), C (activity read model and
-API resources) and D (closure and CT109 runtime validation) are complete. Branch
-`stage-4c-activity-cycles` remains in DRAFT PR #8. The owner's whole-PR adversarial review is
-complete; its F2 correction awaits targeted final review. Frontend work starts after Stage 4.
+**Current stage: Stage 4D — Reports and product analytics projections.** Checkpoint 4D-A's
+contract freeze is owner-accepted. Checkpoint 4D-B's pure report domain and targeted hardening
+are owner accepted and closed at `5de43b88f632a7069a4f579ff7a26302624e2855`.
+Checkpoint 4D-C-A's behavior-preserving extraction refactor is owner accepted and closed at
+`33b1e0472d818502079bea20fb7034b7cdc1c33c`. Checkpoint 4D-C-B's report read model and API and
+Stage 4D-C as a whole are owner accepted and closed at
+`4b20bdefee451e59b292181e4aa0c75cf9e2bde6`. Stage 4D-D-A is owner accepted and closed at
+`3af4d8fc0e17bafe17cc669f694bb2d3652a9ac4`; Stage 4D-D-B is owner accepted and closed after
+CT109 runtime validation of that exact SHA. Stage 4D-D-C whole-PR adversarial review is next,
+not started. Stage 4D remains open pending whole-PR review and the owner merge decision.
+Stage 4C is DONE and merged to `main` in PR #8 (merge commit
+`8c3bccbcf6ba305bbf547c59ef3f6167471442e8`). Its A–D
+checkpoints and whole-PR review are complete. Frontend work starts after Stage 4.
 
-The owner-approved F2 merge hardening makes `/activity` hold the unacknowledged recorder tail
-`open` until its historical outcome settles, preventing transient false gaps before a tick or
-during a write backlog.
+The already-reviewed F2 hardening commit `b81d680eecda67e7d2d80facd4b79ba08472c824` is in
+that merge. It makes `/activity` hold the unacknowledged recorder tail `open` until its historical
+outcome settles, preventing transient false gaps before a tick or during a write backlog. CT109
+now runs owner-validated Stage 4D head `3af4d8fc0e17bafe17cc669f694bb2d3652a9ac4`;
+this first Stage 4D deployment also delivered the F2 correction.
 
 Stage 4B — DONE and merged to `main` (PR #7, merge commit
 `dfd225d2a8fe35563cd1f684efb81cf91b532a2f`).
@@ -314,11 +324,104 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
 
 ## Out of scope
 
-- Stage 4D reports, SET publishing and frontend.
-- Frontend and legacy compatibility or historical migration.
+- CT109 connection/deployment and whole-PR review in this runtime bookkeeping checkpoint;
+  frontend throughout Stage 4D.
+- Stage 4E SET/control, Stage 5 frontend, cooling/heater/cost/external-meter analytics and year or
+  season reports.
+- Legacy compatibility or historical migration.
 - Changing the 21 canonical metric semantics, Stage 1–4A history invariants, or the 365-day
   default raw retention.
 
 ## Next
 
-Stage 4D — reports and product analytics projections, as defined in `docs/ROADMAP.md`.
+Stage 4E — isolated SET/control and final backend API, after Stage 4D. Within Stage 4D,
+4D-D-C whole-PR adversarial review is next, followed by the owner merge decision (§25.4).
+
+## Stage 4D checkpoints
+
+- **4D-A — contract freeze (accepted/closed):** architecture, API, knownness, storage, time, error
+  and snapshot contracts; stale Stage 4C docs. Documentation only.
+- **4D-B — pure report domain (owner accepted/closed at
+  `5de43b88f632a7069a4f579ff7a26302624e2855`):** `pompa/report.py` resolves Warsaw calendar
+  periods and bucket edges, clamps the settled extraction endpoint, composes
+  coverage, observed-channel energy, paired COP, H* and class energy, technical facts and
+  Stage 4C spans. One timeline extraction per span family and indexed bucket attribution avoid
+  per-bucket whole-timeline summaries. It performs no SQL, storage or HTTP work. Independent
+  adversarial review of the initial 4D-B head found 0 blockers, 0 important findings and 4 minor
+  findings; the owner approved targeted hardening of all four. The composer now rejects
+  intersecting spans with insufficiently widened evidence and uses the shared UTC timestamp
+  formatter. The previous hardening incorrectly imposed a report-specific 1970–2100 calendar
+  policy; it is removed. Calendar resolution depends on Warsaw boundaries, not installation
+  history. A fully historical period without rows reports settled gaps and `null` measurements;
+  only actual calendar/time or whole-hour-grid unrepresentability raises a pure request error.
+  Targeted review of that correction found 0 blockers, 0 important findings and 2 minor
+  contract gaps, both now closed: `ReportUnrepresentable` again inherits the shared
+  `timegrid.Unrepresentable` semantics, and the 4D-C report-local loader is required to cover
+  settled pre-Unix-0 time as ordinary gaps when no rows exist, without changing `/activity`.
+  Committed regressions cover empty history, conversion extremes, evidence widening, timestamp
+  precision, stop/overlap attribution, unavailable widening, duration means and internal guards
+  alongside the literal and deterministic randomized minute oracles. Sixty-five report tests pass;
+  focused report/activity/aggregation/timegrid suites: 259 passed. Full no-DB backend: 990 passed,
+  278 skipped (MariaDB-gated), one dependency deprecation warning.
+- **4D-C-A — behavior-preserving extraction refactor (owner accepted/closed at
+  `33b1e0472d818502079bea20fb7034b7cdc1c33c`):**
+  `history.canonical_partials()` loads canonical and requested optional facts inside a caller-owned
+  session and folds them over supplied edges with the existing algebra. `activity_history.load_timeline()`
+  loads and widens Stage 4C evidence inside that same caller-owned session. The public history and
+  activity wrappers retain their existing response serializers, source policies and single-session
+  paths; `/activity` still applies its Unix-0 evidence floor locally. No report read model or API
+  was added. Independent 4D-C-A review found 0 blocker / 0 important / 1 minor. The sole MINOR
+  was a missing regression pin for the existing public `/activity` Unix-0 evidence floor;
+  production behavior was already correct. An HTTP regression with recorded activity starting
+  at timestamp 0 now pins `evidence.from` and the first event/run's `outside_evidence` boundary.
+  Removing the wrapper's `left_floor=0` argument in scratch makes that regression fail.
+- **4D-C-B — report read model + API (owner accepted/closed at
+  `4b20bdefee451e59b292181e4aa0c75cf9e2bde6`):**
+  `report_read.py` extracts the 13 required canonical series and one widened Stage 4C timeline in
+  the same consistent snapshot, proves recorded-minute equality per UTC hour/partial hour,
+  closes the session and invokes the unchanged pure composer. `GET /api/v1/report` validates the
+  actual parameter multimap, resolves the frozen Warsaw calendar and samples the recorder's
+  settled frontier once before DB I/O. Its opt-in raw activity edge uses only raw minutes below
+  a mid-hour frontier; complete earlier hours retain durable priority. Reports have no Unix-0
+  floor, while `/activity` keeps its accepted floor and source policy. Missing history is ordinary
+  gaps; unavailable detail, corrupt durable evidence and per-hour mismatches fail closed.
+  Integration tests cover calendar forms, knownness, events, current/unacknowledged tails,
+  source/purge equality, errors, bounded range reads and a deterministic two-connection MariaDB
+  snapshot race. Independent 4D-C-B adversarial review found 0 blocker / 0 important / 1 minor.
+  The sole MINOR was stale API documentation describing the already-implemented report route as
+  future/unimplemented. The stale wording is corrected; no production code changed.
+  Stage 4D-C as a whole is owner accepted and closed at the same SHA.
+- **4D-D-A — CT112 closeout + runtime smoke preparation (OWNER ACCEPTED/CLOSED at
+  `3af4d8fc0e17bafe17cc669f694bb2d3652a9ac4`):**
+  Audited existing committed representation, DST, waiting/protected F2, snapshot race, corruption
+  and compatibility evidence.
+  The added full-response byte equality sequence covers all seven classes, technical knownness,
+  rolled history with raw activity, real backfill and real purge. CT112 MariaDB measurements of
+  a 745-hour mixed report and 10,080-segment minute flapping each use 9 SELECTs (14 SQL statements
+  including connection/transaction setup and commit), with no timing SLA.
+  `scripts/smoke.sh` now checks the current Warsaw day's report from `/status.now`;
+  `--json` remains status only. No production Python changes.
+  Local smoke tests cover existing invocation modes, Warsaw date selection and non-200 refusal.
+  The deterministic committed MariaDB snapshot race passes; 23 accepted-base old-endpoint
+  comparisons match exact statuses and response bytes. Focused no-DB: 549 passed / 149 skipped;
+  full no-DB: 1,065 passed / 303 MariaDB-gated skips; affected MariaDB: 800 passed;
+  full MariaDB: 1,368 passed. Owner CT109 runbook prepared for the exact accepted SHA.
+- **4D-D-B — CT109 runtime validation (OWNER ACCEPTED/CLOSED):** the owner's real runtime
+  evidence validates deployed SHA `3af4d8fc0e17bafe17cc669f694bb2d3652a9ac4`, exactly one
+  backend and running source hashes matching the reviewed checkout. The existing MariaDB
+  volume/data survived; pre-deployment oldest/newest/rolled state remained valid, and a
+  pre-existing historical query was byte-identical after deployment. `/health`, `/history`,
+  `/activity` and `/report` returned 200. Report coverage partitions held, the current partial
+  hour separated settled/future correctly, and activity kept the post-frontier minute `open`
+  rather than a false gap. The initial retained-only interval after restart was not written as
+  history. After live MQTT resumed: `alive=True`,
+  `last_live_message_at=2026-09-26T06:28:31.971Z`,
+  `last_closed_minute=last_written_minute=2026-09-26T06:27:00Z`,
+  `rows_closed=rows_written=2`, `protected_rows=waiting_rows=0`, DB error none.
+  The expected restart interval `[06:21,06:26)` UTC on 2026-09-26 remained a truthful five-minute
+  gap: retained MQTT values are not historical facts. At 06:28 UTC the day report had calendar
+  1,440, settled 508, recorded 503, gap 5, future 932 and coverage 99.0%; `503 + 5 = 508` and
+  `508 + 932 = 1440`. Deployment log evidence contained no traceback, schema failure, DB failure
+  or report error. This deployment also first delivered the already-reviewed F2 correction.
+- **4D-D-C — whole-PR adversarial review (NEXT / NOT STARTED):** whole-PR review and owner merge
+  decision remain. Stage 4D-D and Stage 4D remain open.

@@ -357,9 +357,9 @@ History accepts `from`, `to`, `bucket`, and a series list. Response buckets cont
 
 Mean metrics expose average, minimum, maximum, and minutes. Last metrics expose last, minimum, maximum, and minutes. Power metrics additionally expose kWh. COP exposes the ratio, paired minutes, input kWh, and output kWh.
 
-The current period summary is `bucket=total`; current daily history is `bucket=1d`. Stage 4D may
-add one report projection resource for activity/event facts that numeric history cannot express.
-It must reuse the existing energy, COP and coverage algebra, not add separate report mathematics.
+The current period summary is `bucket=total`; current daily history is `bucket=1d`. Stage 4D
+freezes one `/api/v1/report` projection resource for activity/event facts that numeric history
+cannot express (§25.4). It reuses existing energy, COP and coverage algebra.
 
 Bad parameters return 400. Unrepresentable retained-history resolution or old partial-hour edges return 422. Database unavailability returns 503 for history while live may remain available.
 
@@ -496,10 +496,12 @@ that window, not at the first paused second.
 
 ## 25. Stage 4 product-backend expansion
 
-**Current/frozen now:** Stages 1–3 are complete and deployed on CT109. Sections 3–24 specify the
-existing canonical 21-metric ingest, minute recorder, storage, aggregation and default API. Stage
-4 adds product capability around them; Stage 5 is frontend and Stage 6 is cutover. Broad capability
-must use a lightweight implementation: one definition of each domain fact, catalog metadata
+**Current/frozen now:** Stages 1–3 and 4A–4C are complete; Stage 4D is current. CT109 runs the
+validated Stage 4C runtime head, while merged `main` also includes the reviewed F2 correction.
+Sections 3–24 specify the canonical 21-metric ingest, minute recorder, storage, aggregation and
+default API. Stage 4 adds product capability around them; Stage 5 is frontend and Stage 6 is
+cutover. Broad capability must use a lightweight implementation: one definition of each domain
+fact, catalog metadata
 instead of repeated code, pure derivations where practical, and domain resources rather than
 frontend-page endpoints. Ordinary heat-pump changes may be `unknown` or `transition`; they are
 data, not infrastructure incidents.
@@ -587,7 +589,7 @@ persisted policy selection and selected/known counts in hourly rollups. The init
 remains all 15 explicit `HistoryProfile` definitions (§25.2.8). All 15 were selected together in
 accepted runtime validation; no lower max-selection cap is justified for this set. Keep the shared
 `STALE_AFTER_SECONDS=600` and `RETENTION_1M_DAYS=365`. Revisit the list or retention only with
-new semantic or durability evidence; Stage 4C still owns durable events. Sentinel-only or numeric
+new semantic or durability evidence; Stage 4C owns durable events. Sentinel-only or numeric
 zero readings on one device model do not automatically define global eligibility or support.
 A numeric known zero is a transport/history fact, not proof that a measurement is physically
 useful on every device model.
@@ -1044,7 +1046,7 @@ optional selection so D can prove both `selected_minutes` and `known_minutes`. D
 conservative guard with `optional_rollup_1h` and shared proof/deletion. No optional history query,
 kWh output or optional raw public API existed in checkpoint C.
 
-#### 25.2.11 Checkpoint D — durable optional history
+#### 25.2.11 Checkpoint D — durable optional history (DONE)
 
 `optional_rollup_1h` has primary key `(hour_ts, series_id)` and a restrictive FK to
 `optional_series(id)`. Each row has positive `selected_minutes`, `known_minutes` between zero and
@@ -1422,10 +1424,218 @@ the current moment, not the last closed history minute.
 
 ### 25.4 Stage 4D — report projections
 
-**Frozen direction:** Day, week, month and custom-period reports compose the existing energy,
-paired COP and coverage algebra with Stage 4C activity truth. A report may expose a reusable
-domain resource for facts numeric history alone cannot express. It adds no independent formula or
-backend service per frontend panel.
+**4D-A contract freeze; pure domain in 4D-B, API in 4D-C.** One backend-owned report model composes canonical
+history, `rollup_1h` and Stage 4C durable activity for day, week, month and custom local-date
+periods. The frontend renders these facts; it does not derive energy, COP, activity, event
+attribution, coverage or bucket alignment. `/history` and `/activity` retain arbitrary instant
+ranges. There is no service or formula per frontend panel.
+
+**Storage and durability.** Reports use existing `rollup_1h` and `activity_segment_1h`, both kept
+indefinitely. There is no `daily_rollup`, 5m report table, report cache, materialization or
+watermark. A longest Warsaw month has 745 UTC hours; the selected facts remain exactly
+representable after raw purge. Do not add infrastructure for hypothetical year reports. A strict
+energy total restricted to minutes where both constituent channels were simultaneously known is
+*not* representable from these durable tables: two different minute histories can yield identical
+per-channel and paired hourly/segment `Stats` but different simultaneous-known subsets for the
+ordinary consumption or production pair. Stage 4D therefore uses observed-channel energy and
+does not persist another series to manufacture that strict total.
+
+**Calendar and resource.** `GET /api/v1/report` accepts `period=day|week|month` with an anchor
+`date=YYYY-MM-DD`, or `period=custom&from=YYYY-MM-DD&to=YYYY-MM-DD` (`to` exclusive, at most 31
+local days). Day is `[midnight(D), midnight(D+1))` in `Europe/Warsaw` (23/24/25 h). Week is the
+ISO Monday–Sunday local week (167/168/169 h). Month is the local calendar month (possible UTC
+hours include 672, 696, 720, 743, 744 and 745). The anchor may fall anywhere inside its period.
+All boundaries are whole UTC hours, including on DST changes. Time-of-day inputs and minute-level
+report edges are rejected; custom is not an instant-range API. The response emits every calendar
+bucket: `1h` for day and `1d` for week, month and custom. A custom range may be empty of data but
+cannot have zero calendar days. No `/daily-report`, `/period-report`, `/statistics-report`,
+`/report-plan` or `/report-matrix` resource is introduced.
+Calendar resolution does not depend on the installation date or whether stored evidence exists.
+A settled period with no recorded rows is a normal report: recorded minutes are zero, settled
+minutes are gaps, and unmeasured energy, COP and temperatures remain `null`. Only an actual
+calendar/time conversion failure or a Warsaw boundary that cannot align to the frozen whole UTC
+hour grid is technically unrepresentable; no report-specific year range is imposed.
+
+**One interpretation.** The Stage 4C versioned classes `off`, `idle`, `co`, `dhw`, `transition`,
+`defrost`, `unknown` and compressor states `off`, `on`, `unknown` are the only activity truth.
+Reports reuse the stored/reconstructed Stage 4C segments and span builders; they never classify
+independently from power thresholds, compressor heuristics, valve hints, operating mode or legacy
+state strings. No smoothing, blip merging, dominant activity or mixed heuristic is applied.
+The owner-selected heating set is `H* = {co, dhw, transition}`. It defines useful heat and the
+headline heating COP; `defrost`, `idle`, `off` and `unknown` stay separately visible.
+
+**Energy knownness and shared serializer.** For a settled range or bucket `R`, let `rec(R)` be
+recorded canonical minutes, excluding no-row gaps. Every one of
+`co_power_consumption`, `co_power_production`, `dhw_power_consumption`,
+`dhw_power_production` serializes as `channels[ch] = {kwh, minutes, unknown_minutes}`:
+
+```text
+kwh             = Σ known minute-average W / 60000; null if minutes = 0
+minutes         = number of recorded minutes with this channel known
+unknown_minutes = rec(R) - minutes
+```
+
+Known `0 W` increments `minutes` and contributes zero kWh. `NULL` in a recorded minute increments
+`unknown_minutes`; a no-row minute belongs to coverage gaps, not channel unknownness. Aggregate
+`consumption` uses the two consumption channels and `production` the two production channels:
+
+```text
+{observed_kwh, unknown_channel_minutes}
+observed_kwh            = sum of actually observed constituent-channel energy
+unknown_channel_minutes = Σ(rec(R) - constituent channel.minutes), in 0..2*rec(R)
+```
+
+`observed_kwh` is `null` only when neither constituent channel has a known minute. Zero
+`unknown_channel_minutes` means both channels are complete over every recorded minute; a positive
+count leaves observed energy true but incomplete as a total. Do not call it `total_kwh` or assign a
+subjective completeness status. `pair_co_in/out`, `pair_dhw_in/out` and `pair_total_in/out` are
+**COP evidence only**, never ordinary energy-knownness evidence. In particular, `pair_total`
+requires all four channels; an unknown production channel must not erase valid observed
+consumption energy.
+
+**COP.** Every COP is `{cop, paired_minutes, input_kwh, output_kwh}` and uses `Σ paired output /
+Σ paired input`: `energy.cop.co` pairs both CO channels, `.dhw` both DHW channels, and `.total`
+all four power channels. Known zeros are valid paired evidence. `cop` is `null` for no paired
+minutes or zero paired input; kWh ingredients are `null` when there are no paired minutes. Never
+average instantaneous or daily COP, or divide independently aggregated unpaired energy. The
+ordinary energy serializer and COP serializer are shared by top-level, heating and every class.
+
+**Activity energy.** `activity.heating.activities = ["co", "dhw", "transition"]` in that order.
+`activity.heating` contains `minutes`, `channels`, `consumption`, `production` and `cop` using only
+H* segments. Its production `observed_kwh` is useful heat: the observed CO + DHW production
+inside H*, accompanied by the same `unknown_channel_minutes`. Its headline heating COP is
+`activity.heating.cop.total`, calculated from the strict four-channel paired subset inside H*,
+never `production.observed_kwh / consumption.observed_kwh`. Every Stage 4C class has
+`activity.classes[A] = {minutes, channels, consumption, production, cop}` using the identical
+serializer. Across all seven classes, minute and known/unknown counts partition the top-level
+facts exactly, including `Σ class.minutes = recorded_minutes`, `Σ class channel.minutes =
+channel.minutes`, `Σ class channel.unknown_minutes = channel.unknown_minutes`, and `Σ class
+unknown_channel_minutes = top-level unknown_channel_minutes` for each aggregate. kWh comparisons
+allow floating-point tolerance for changed summation association.
+
+**Technical facts.** Only `outside_temp = {avg, min, max, minutes}` and `compressor_freq =
+{avg, max, minutes, active_avg}` are included. `active_avg` is the known compressor-frequency
+`Stats.sum / activity.compressor_minutes.on`, or `null` if there are no on minutes. This identity
+is valid only when every recorded on minute has known frequency `>0`, every recorded off minute
+has known frequency `0`, and unknown-frequency minutes are exactly compressor-unknown minutes.
+The report verifies `compressor_freq.minutes = compressor_minutes.on + compressor_minutes.off`
+per composed range/bucket; an inconsistency fails 500 rather than producing `active_avg`.
+No `compressor_freq_p95`, `active_p95`, percentile approximation, histogram, raw-only report
+field or non-durable active minimum is exposed. Detailed temperatures and pump measurements remain
+in `/history`.
+
+**Coverage and current period.** For every calendar bucket `[a,b)`, take one observation with
+`C = closed_until` from the recorder and `F = floor_minute(now)`, with `C ≤ F`. Counts are lengths
+in minutes of intersections:
+
+```text
+settled_minutes   = |[a,b) ∩ (-∞,C)|
+unsettled_minutes = |[a,b) ∩ [C,F)|
+future_minutes    = |[a,b) ∩ [F,+∞)|
+calendar_minutes  = settled_minutes + unsettled_minutes + future_minutes
+recorded_minutes  = canonical rows in the settled part only
+gap_minutes       = settled_minutes - recorded_minutes
+coverage_percent  = round(100 * recorded_minutes / settled_minutes, 1), or null if settled=0
+effective_to      = min(report_to, max(report_from, C))
+```
+
+The clamp applies only to the settled extraction endpoint, never to the actual Stage 4C
+`closed_until` frontier: `report_from <= effective_to <= report_to`. If `C >= report_to`, a
+fully historical report ends at `report_to`. If `report_from < C < report_to`, a partially settled
+report ends at `C`. If `C <= report_from`, including a fully future report, `effective_to` equals
+`report_from` and the settled extraction range is empty. If the whole period is after
+`F`, it has zero settled and unsettled minutes, all calendar minutes future, and null coverage.
+The coverage intersections above are unchanged. The current partial minute is future. A
+waiting/protected unacknowledged tail is unsettled, never a gap. Future buckets contain no
+fabricated data. Counts and coverage are facts, with no
+`ready`, `partial`, `full`, `good`, `bad` or 95% verdict. As with existing history, clock-step
+anomalies are surfaced rather than silently clamped.
+
+**Spans and events.** Reuse the Stage 4C full spans and boundaries. `observed_starts` and
+`observed_stops` keep their strict Stage 4C observed-boundary requirements, attributed to the
+run's first and last minutes respectively. Complete runs and exact off intervals retain
+first-minute attribution. `defrost_events` counts maximal observed defrost spans, and
+`activity_events[A]` counts maximal observed Stage 4C activity spans of class `A`; each belongs
+to the bucket holding its first observed minute. A span with an `observed`, `gap`, `unknown` or
+`outside_evidence` left boundary counts once, but only `observed` proves its start. These generic
+counts do not claim a physical/domain start. A span crossing adjacent buckets is counted only in
+the bucket with that first observed minute. No separate observed-defrost-start field is needed.
+`observed_defrost_seconds` is clipped to the bucket and adds exactly. `complete_runs` and
+`exact_off_intervals` each report `count`, `total_minutes`, `min_minutes`, `max_minutes`,
+`mean_minutes`; the report carries no `minutes[]` list. The overall
+`compressor_runs_overlapping` and `defrosts_overlapping` are non-additive and never emitted per
+bucket. A run crossing day/week/month boundaries is attributed once.
+For any span intersecting the requested settled range, `outside_evidence` on the right is an
+internal inconsistency. `outside_evidence` on the left is likewise refused because a Stage 4C
+Timeline does not prove that any absolute evidence floor was reached. The pure composer fails
+closed if a caller supplies an insufficiently widened timeline; this does not reinterpret Stage
+4C boundaries or create a report calendar floor.
+
+**Domain shape.** The response is `{period, observation, segment_rule_version, evidence,
+totals, buckets}`. `period` names kind, resolved local `from_date`/exclusive `to_date`, UTC
+`from`/`to`, timezone and bucket size; `observation` names `now`, `closed_until`, `effective_to`;
+`evidence` gives the examined UTC window, including Stage 4C widening. Both `totals` and each
+bucket carry the same FACTS: `coverage`, `energy`, `activity`, `events`, `technical`. Buckets also
+carry `start`, `end`. Totals alone carry the overall overlap span counts. See `docs/API.md` for
+exact field names and HTTP errors.
+
+**Read consistency and current edge (4D-C).** In order: call `Recorder.settled_before(clock)`;
+release the recorder lock; open one `Storage.session()` and `START TRANSACTION WITH CONSISTENT
+SNAPSHOT`; extract history; extract activity and widen evidence; close the session; compose the
+report purely. No DB I/O under the recorder lock. Do not call the public `/history` and
+`/activity` independently. Refactor `history.py` toward a caller-session-aware canonical partial
+extractor that owns raw/rollup resolution, purged-raw semantics, series loading and folding to
+caller bucket edges; the existing route wraps the same logic. Refactor `activity_history.py`
+toward a caller-session-aware timeline loader with a report-local `raw_edge` option; the existing
+route keeps its old behavior and bytes. The report-local loader must cover the full settled
+report interval even when `period.start < 0`; it must not inherit `/activity`'s Unix-0 left
+clamp. A pre-Unix-0 interval with no stored evidence is ordinary gap evidence, not an error or
+activity-unavailable history. This requires no new stored rows and does not change `/activity`.
+Exact Python names are implementation choices. If `C`
+is not hour-aligned, Stage 4D may source `floor_hour(C)` from raw minutes strictly below `C`,
+even when earlier hours use durable segments. This edge rule does not alter `/activity` and reuses
+its classification, `build_segments` and energy fold. A purged current edge that cannot be
+represented is 422. Within the one snapshot, compare history recorded counts with activity
+recorded-minute counts **per hour** in the requested settled portion; mismatch is corruption and
+fails 500. A request intersecting Stage 4C activity-unavailable history fails 422 as a whole,
+never returns numeric energy with `activity=null`; `/history` remains independently available.
+Invalid durable activity fails 500, and DB outage 503.
+
+**Performance and compatibility.** A custom request is at most 31 local days (≤745 UTC hours).
+The selected canonical rollup series need about 9.7k rows at that bound. Typical activity is
+about 0.9k segments/month; pathological minute flapping can reach about 44.7k. Read indexed
+ranges, compute spans once and attribute them to buckets in one pass; never call whole-timeline
+`summarize()` for every bucket. No daily table, cache or materialization. Stage 4D changes none of
+the public `/history`, `/activity`, `/activity/live`, `/live`, `/metrics`, `/status` response
+contracts. Golden byte-identical `/history` and `/activity` tests are a 4D-C merge gate.
+
+**Checkpoint gates.** 4D-A freezes this architecture and the API contract for owner review,
+without production code. 4D-B adds a pure report domain (`pompa/report.py` or equivalent):
+calendar/bucket resolution, H*, coverage, shared energy/COP/class serializers and one-pass span
+attribution, with no SQL or HTTP. Hand-calculated fixtures and an independent brute-force
+reference verify knownness, partitions, DST and one-pass equivalence. 4D-C first makes the
+session-aware extraction refactor independently reviewable as behavior-preserving, then adds one
+snapshot, report-local edge, consistency guard and `/api/v1/report`; gate on byte-identical old
+endpoints, report API tests, MariaDB green and a real snapshot race. 4D-D checks raw/rollup,
+raw/durable and post-purge equality, DST, F2 current-tail behavior, races and bounded query
+count; CT109 smoke and whole-PR adversarial review precede the owner's merge decision. That CT109
+deployment first delivers the already-reviewed F2 correction.
+
+The later test matrix includes independent per-channel knownness; known zero vs `NULL` vs no row;
+observed aggregates; paired COP; H* useful heat; class partition identities; event first-minute
+attribution; runs and defrosts crossing calendar boundaries; Warsaw 23/25 h days, 167/169 h
+weeks, 743/745 h months, ISO week at year boundary and February; raw vs rollup and raw vs durable
+activity; post-purge equality; activity-unavailable 422, corrupt activity 500 and per-hour
+consistency 500; waiting/protected unsettled tails and future bucket partition; a real MariaDB
+one-snapshot race, bounded query count and old endpoint byte compatibility.
+
+**Deliberate product exclusions.** Targeted legacy report inspection supplied product evidence,
+not implementation authority. Stage 4D drops legacy P95, dominant activity, report readiness
+verdicts and 95% thresholds, smoothing/blip merging, UTC or rolling 24h/7d/30d report calendars,
+average instantaneous COP, unpaired COP ratios, daily rollup and 5m report layers, report
+planner/matrix, technical production composite, `active_day_cop` and differing legacy
+`total_day_cop` semantics. Stage 4D excludes SET/control (4E), frontend (5), cooling/heater,
+cost/tariff and external SDM analytics, year/season reports and legacy migration/backfill.
 
 ### 25.5 Stage 4E — isolated control and final backend API
 

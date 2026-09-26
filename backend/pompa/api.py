@@ -18,6 +18,7 @@ from . import activity_history
 from . import history as history_engine
 from .activity import ActivityRecordInvalid
 from . import optional_policy
+from . import report as report_domain, report_read
 from .capabilities import capability_dict, effective_capabilities
 from .history_profile import HISTORY_PROFILES, capability_topics, history_profile_dict
 from .minute import MINUTE, iso_utc
@@ -73,6 +74,23 @@ def _parse_series(raw: str | None) -> list[str]:
     if len(set(keys)) != len(keys):
         raise _bad("'series' contains duplicates")
     return keys
+
+
+def _parse_report_period(request: Request) -> report_domain.ReportPeriod:
+    params = request.query_params
+    if any(len(params.getlist(key)) != 1 for key in params):
+        raise _bad("report parameters must each appear exactly once")
+    kind = params.get("period")
+    expected = {"period", "from", "to"} if kind == "custom" else {"period", "date"}
+    if set(params) != expected:
+        raise _bad("report requires exactly period/from/to for custom or period/date for day/week/month")
+    try:
+        return report_domain.resolve_period(kind, date=params.get("date"),
+                                            from_date=params.get("from"), to_date=params.get("to"))
+    except (Unrepresentable, report_domain.ReportInvariantError):
+        raise
+    except ValueError as exc:
+        raise _bad(str(exc)) from None
 
 
 def _revision_dict(revision: RevisionInfo) -> dict:
@@ -149,6 +167,20 @@ def create_app(recorder: Recorder, storage: Storage, clock: Callable[[], float] 
             raise HTTPException(status_code=500, detail=f"stored activity history is inconsistent: {e}") from None
         except StorageUnavailable as e:
             raise HTTPException(status_code=503, detail=f"database unavailable: {e}") from None
+
+    @app.get("/api/v1/report")
+    def report(request: Request) -> dict:
+        try:
+            period = _parse_report_period(request)
+            now, closed_until = recorder.settled_before(clock)
+            return report_read.query(storage, period, now, closed_until)
+        except (Unrepresentable, activity_history.ActivityUnavailable,
+                report_domain.ReportActivityUnavailable) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        except (ActivityRecordInvalid, report_domain.ReportInvariantError) as exc:
+            raise HTTPException(status_code=500, detail=f"report history is inconsistent: {exc}") from None
+        except StorageUnavailable as exc:
+            raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from None
 
     @app.get("/api/v1/metrics")
     def metrics(request: Request,
