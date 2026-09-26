@@ -5,8 +5,9 @@
 **Current stage: Stage 4D — Reports and product analytics projections.** Checkpoint 4D-A's
 contract freeze is owner-accepted. Checkpoint 4D-B's pure report domain and targeted hardening
 are owner accepted and closed at `5de43b88f632a7069a4f579ff7a26302624e2855`.
-Checkpoint 4D-C-A is the behavior-preserving history/activity extraction refactor; 4D-C-B report
-read-model orchestration has not started. Stage 4C is DONE and merged to `main`
+Checkpoint 4D-C-A's behavior-preserving history/activity extraction refactor is independently
+reviewed, its sole minor regression-test gap is closed, and owner acceptance is pending.
+4D-C-B report read-model orchestration has not started. Stage 4C is DONE and merged to `main`
 in PR #8 (merge commit `8c3bccbcf6ba305bbf547c59ef3f6167471442e8`). Its A–D
 checkpoints and whole-PR review are complete. Frontend work starts after Stage 4.
 
@@ -329,7 +330,7 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
 ## Next
 
 Stage 4E — isolated SET/control and final backend API, after Stage 4D. Within Stage 4D, owner
-review of the 4D-C-A refactor precedes 4D-C-B report orchestration; 4D-D follows (§25.4).
+acceptance of the 4D-C-A refactor precedes 4D-C-B report orchestration; 4D-D follows (§25.4).
 
 ## Stage 4D checkpoints
 
@@ -357,13 +358,17 @@ review of the 4D-C-A refactor precedes 4D-C-B report orchestration; 4D-D follows
   alongside the literal and deterministic randomized minute oracles. Sixty-five report tests pass;
   focused report/activity/aggregation/timegrid suites: 259 passed. Full no-DB backend: 990 passed,
   278 skipped (MariaDB-gated), one dependency deprecation warning.
-- **4D-C-A — behavior-preserving extraction refactor (complete; awaiting owner review):**
+- **4D-C-A — behavior-preserving extraction refactor (independently reviewed; awaiting owner acceptance):**
   `history.canonical_partials()` loads canonical and requested optional facts inside a caller-owned
   session and folds them over supplied edges with the existing algebra. `activity_history.load_timeline()`
   loads and widens Stage 4C evidence inside that same caller-owned session. The public history and
   activity wrappers retain their existing response serializers, source policies and single-session
   paths; `/activity` still applies its Unix-0 evidence floor locally. No report read model or API
-  was added.
+  was added. Independent 4D-C-A review found 0 blocker / 0 important / 1 minor. The sole MINOR
+  was a missing regression pin for the existing public `/activity` Unix-0 evidence floor;
+  production behavior was already correct. An HTTP regression with recorded activity starting
+  at timestamp 0 now pins `evidence.from` and the first event/run's `outside_evidence` boundary.
+  Removing the wrapper's `left_floor=0` argument in scratch makes that regression fail.
 - **4D-C-B — read model + API (not started):** one-snapshot loading, report-local current edge,
   consistency guard and `/api/v1/report`. Gate: byte-identical `/history` and `/activity`, report API and MariaDB tests,
   including a concurrency race.

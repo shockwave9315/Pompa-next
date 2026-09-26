@@ -372,6 +372,20 @@ def test_dst_days_through_the_api(any_storage, day, minutes):
 
 # ------------------------------------------------------------------ API contract
 
+def test_activity_api_preserves_unix_zero_evidence_floor(any_storage):
+    put(any_storage, 0, [CO, CO, OFF], roll=False)
+    body = Api(storage=any_storage, start=H).body(
+        "/api/v1/activity", t=H,
+        **{"from": "1970-01-01T00:00:00Z", "to": "1970-01-01T00:03:00Z"})
+    assert body["evidence"]["from"] == "1970-01-01T00:00:00Z"
+    first_event = body["timeline"][0]["event"]
+    assert first_event["start"] == "1970-01-01T00:00:00Z"
+    assert first_event["start_boundary"] == "outside_evidence"
+    [run] = body["compressor_runs"]
+    assert run["start"] == "1970-01-01T00:00:00Z"
+    assert run["start_boundary"] == "outside_evidence"
+
+
 def test_literal_response_contract(any_storage):
     put(any_storage, T0, [OFF, CO, CO, OFF])
     body = Api(storage=any_storage, start=T0 + H).body(
