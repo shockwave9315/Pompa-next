@@ -7,7 +7,9 @@ optional-history policy. Checkpoint C adds internal raw minute recording. Checkp
 persisted optional-series discovery and explicit optional history selectors; default responses
 remain canonical. The owner validated these Stage 4B endpoints on CT109. Stage 4C checkpoint C adds
 one range activity resource and one current activity resource; every earlier response is unchanged.
-Stage 4D-A froze the `GET /api/v1/report` contract below; Stage 4D-C-B implements it.
+Stage 4D-A froze the `GET /api/v1/report` contract below; Stage 4D-C-B implements it. Stage 4E-A
+freezes the control contract (`GET /api/v1/controls`, `POST /api/v1/controls/{key}`), which
+Stage 4E-C implements; every earlier response stays unchanged.
 
 Domain rules behind it are in [`ARCHITECTURE.md`](ARCHITECTURE.md). This file describes only what
 the HTTP surface promises.
@@ -27,8 +29,11 @@ the HTTP surface promises.
 | `GET /api/v1/activity` | Activity timeline, compressor runs, off intervals, defrosts and summary over `[from, to)` | no | yes |
 | `GET /api/v1/activity/live` | Current activity from the in-memory live observation | no | no |
 | `GET /api/v1/report` (Stage 4D-C) | Day/week/month/custom Warsaw calendar report | no | yes |
+| `GET /api/v1/controls` (Stage 4E-C) | Control definitions, current readback state and executability | no | no |
+| `POST /api/v1/controls/{key}` (Stage 4E-C) | Validate, publish once and report readback for one semantic command | yes | no |
 
-The application exposes all eleven product API endpoints above. FastAPI may additionally
+The application exposes the thirteen product API endpoints above; the two control routes were
+frozen in Stage 4E-A and are implemented in Stage 4E-C. FastAPI may additionally
 expose its standard documentation/OpenAPI routes (`/docs`, `/redoc`, `/openapi.json`). `/api/v1` is
 a fresh namespace, not inherited legacy versioning.
 
@@ -323,7 +328,8 @@ bucket.
 | `500` | `/api/v1/activity`: stored durable activity is inconsistent. A row may be invalid or not in its exact canonical persisted form, or an hour's durable segment minutes may differ from its recorded canonical minutes. This applies to widened evidence too. It is never answered from raw instead. Stage 4D report consistency cases are below. |
 | `503` | The database is unavailable for a DB-backed resource (`/history`, optional-history selection/series, `/activity`, or `/report`). |
 
-The body is `{"detail": "…"}`. `422` for purged raw means the backend knows the minutes existed and
+The body is `{"detail": "…"}`; Stage 4E control errors additionally carry a stable `code` (see
+"Control errors" below). `422` for purged raw means the backend knows the minutes existed and
 were physically deleted — it is never a consequence of a range simply being old. A range that was
 never recorded at all — no raw minutes and no rollup row for it, including one predating the
 recorder — is answered normally with `recorded_minutes = 0`, not `422`. A whole rolled hour whose
@@ -343,8 +349,11 @@ One subsystem's failure is never turned into process failure or into a global ve
 ## Stage 4A opt-in capability and physical-reading forms
 
 `GET /api/v1/metrics?include=capabilities` returns the default `/metrics` body plus exactly one
-top-level `capabilities` array. It contains all 203 effective identities in order: TOP0–TOP143,
-OPT0–OPT6, SET1–SET46, XTOP0–XTOP5. Each entry has exactly:
+top-level `capabilities` array. It contains all 218 effective identities in order: TOP0–TOP143,
+OPT0–OPT6, SET1–SET48, the 13 Optional PCB commands in `OptionalPCB.md` table order (family `PCB`,
+identity = upstream command name, e.g. `SetSmartGridMode`), then XTOP0–XTOP5. Stage 4E-B added
+SET47, SET48 and the PCB family through the pinned upstream reference refresh. Each entry has
+exactly:
 
 ```json
 {
@@ -366,7 +375,7 @@ capability `key`. A capability's relationship to the canonical core, when any, i
 have `null` for both. A physical capability identity and a canonical logical series key are distinct
 namespaces and are never conflated into one field.
 
-`readable` is `true` for TOP/OPT/XTOP and `false` for SET. TOP/OPT/SET topics come
+`readable` is `true` for TOP/OPT/XTOP and `false` for SET and PCB commands. TOP/OPT/SET/PCB topics come
 from the documented reference. XTOP0/2/3/5 topics come from verified canonical sources; the exact
 received paths `extra/Cool_Power_Consumption_Extra` (XTOP1) and
 `extra/Cool_Power_Production_Extra` (XTOP4) were supplied from CT109 `mqtt.uncatalogued_topics`.
@@ -374,7 +383,7 @@ No type, history, safety or control policy is implied by these fields.
 
 `GET /api/v1/live?include=readings` returns the default `/live` body plus exactly one top-level
 `readings` object. It contains all 157 readable identities in order: TOP0–TOP143, OPT0–OPT6,
-XTOP0–XTOP5. SET identities are absent. Each identity maps to exactly:
+XTOP0–XTOP5. SET and PCB command identities are absent. Each identity maps to exactly:
 
 ```json
 {
@@ -817,3 +826,191 @@ Error bodies use `{"detail": "…"}`. The report reads one MariaDB consistent sn
 sampling the settled frontier, with no DB I/O under the recorder lock. The unrolled current hour
 may be read from raw below that frontier under a report-local edge rule. Existing `/history` and
 `/activity` behavior remains byte-identical through the Stage 4D-C extraction refactor.
+
+## Stage 4E control (frozen in 4E-A; implemented in 4E-C)
+
+This section is the implementation contract. Stage 4E-C implements it; the details the 4E-A
+freeze left open are marked below. Domain
+rules, the complete list of controls, the evidence and the owner decisions are in
+[`ARCHITECTURE.md`](ARCHITECTURE.md) §25.5. The control resources need MQTT but not MariaDB. They
+never read or write storage, and they leave every earlier response unchanged.
+
+Production validation phases, owner gates and evidence requirements are in
+[`STAGE_4E_D_VALIDATION.md`](STAGE_4E_D_VALIDATION.md); W remains provisional until that validation.
+
+Clients never see MQTT topics, SET numbers, raw HeishaMon payloads or `SetCurves` JSON. `key`,
+enum ids and field names are stable, language-neutral identifiers, and no display labels are
+returned. `identity` links a control to the Stage 4A capability catalog, for reference only.
+
+### `GET /api/v1/controls`
+
+Returns every control definition with its current state. The API layer obtains the existing
+immutable live-readings observation through the already-existing live path, the same one
+`/live?include=readings` uses. It passes those facts to the pure control domain, which never
+imports or calls the recorder. The request never changes recorder, queue, history or storage
+state, performs no database I/O and never publishes.
+
+`state` always comes from heat-pump-published TOP readings. A change made by Home Assistant, the
+heat-pump panel or any other writer therefore appears here as soon as HeishaMon publishes the
+TOP. Pompa Next keeps no private desired-state copy. `optional_pcb` controls have `state: null`:
+upstream publishes no readback of the emulated inputs, and `commands/…` echoes are never state.
+`readback_window_seconds` is provisional until the 4E-D CT109 measurement.
+
+```json
+{
+  "now": "2026-10-01T08:00:00Z",
+  "mqtt": {"connected": true},
+  "readback_window_seconds": 15,
+  "controls": [
+    {
+      "key": "dhw_target_temperature",
+      "identity": "SET11",
+      "family": "heat_pump",
+      "class": "setting",
+      "service": false,
+      "value": {"type": "integer", "min": 40, "max": 75, "unit": "°C", "range_basis": "documented"},
+      "readback": {"identity": "TOP9", "kind": "state"},
+      "state": {"value": 48, "raw": "48", "mode": "live",
+                "received_at": "2026-10-01T07:59:58Z", "available": true},
+      "prerequisites": [],
+      "restrictions": [],
+      "executable": true,
+      "not_executable_because": []
+    }
+  ]
+}
+```
+
+**Fields.**
+
+| Field | Meaning |
+|---|---|
+| `family` | `heat_pump` or `optional_pcb`. |
+| `class` | `setting`, `temporary`, `trigger`, `curve` or `pcb_input`. |
+| `service` | `true` where upstream describes a service mode or menu, a forced routine, the emergency heater or a fault reset. It is a fact, not an enforced restriction. |
+| `value` | The accepted request value (value types below). |
+| `readback` | `{identity, kind}`, where `kind` is `state` (the same protocol byte) or `effect` (a resulting machine state); `null` without readback. |
+| `state` | The current readback reading mapped to the control's semantic value. `raw` is the decoded payload. `value` is `null` when `raw` does not map. For example, TOP18=`4` is undocumented upstream and has no `quiet_mode` value. `mode` and `available` follow the Stage 4A reading rules. `state` is `null` without readback. A curve's `state.value` is an object of its four fields. |
+| `prerequisites` | Each entry is `{id, identity, satisfied}`. `satisfied` is `true` or `false` from a live reading of a documented state, or `null` when the reading is absent, retained or stale, or cannot be observed (`identity: null`). A live `-1` (the documented "unknown" state value) or any other undocumented value is also `null`. Ids: `heat_pump_optional_pcb` (TOP110), `heishamon_optional_pcb_emulation` (not observable), `dhw_operation_mode` (TOP4) and `external_compressor_control` (TOP122, `pcb_compressor_switch` only). |
+| `restrictions` | Documented applicability notes that are never enforced and never make a control non-executable: `documented_all_in_one_only`, `documented_h_j_series_only`, `firmware_min_4_2_0`, `documented_direct_temperature_water_mode_only` (the four zone request temperatures: upstream says their direct-temperature branch applies in water sensor mode, while thermostat/thermistor modes use the curve's high target, and that newer types may differ). |
+| `executable` / `not_executable_because` | `false` with codes `mqtt_disconnected`, `prerequisite_not_met` or `validation_context_unavailable`. A `null` prerequisite never makes a control non-executable. |
+
+**Value types.**
+
+| Type | Shape |
+|---|---|
+| `boolean` | `{"type": "boolean"}` |
+| `enum` | `{"type": "enum", "values": [...]}` |
+| `integer` | `{"type": "integer", "min": …, "max": …, "unit": …, "range_basis": "documented" \| "protocol"}`. `protocol` means upstream documents no range and the bounds are the firmware encoding limits. The device's own limit is then visible only through readback. |
+| `integer_choice` | `{"type": "integer_choice", "values": [5, 25, 50, 75, 100], "unit": "%"}` (`pcb_demand_control`) |
+| `number` | `{"type": "number", "min": …, "max": …, "unit": …}` (Optional PCB temperatures) |
+| `trigger` | `{"type": "trigger"}` |
+| `curve` | `{"type": "curve", "fields": {"target_high": {min, max, unit, range_basis}, "target_low": {…}, "outside_high": {…}, "outside_low": {…}}}`. Each field is −127..127 °C with `protocol` basis. No cross-field ordering is enforced. |
+| `request_temperature` | `{"type": "request_temperature", "context_identity": "TOP76", "active": "shift", "ranges": {"shift": {"min": -5, "max": 5, "unit": "K", "range_basis": "documented"}, "direct": {"min": 20, "max": 127, "unit": "°C", "range_basis": "protocol"}}}` (cool: direct 5..20 °C, documented) |
+
+For `request_temperature`, `active` is `shift`, `direct` or `null`. It comes from a live
+TOP76/TOP81 reading.
+
+**Curves (4E-C detail).** A curve's `readback` is `{"identity": null, "kind": "state", "fields":
+{"target_high": "TOP29", …}}`. Its `state` is `{"value": {field: value, …}, "fields": {field:
+{"identity", "value", "raw", "mode", "received_at", "available"}}}`.
+
+`mqtt.connected` and the `mqtt_disconnected` reason come from the same in-memory observation as
+the readings. A `POST` checks the MQTT client's own connection again at publish time.
+
+`force_dhw` `false` deasserts the Force DHW request. It is not a stop or cancel of a DHW cycle
+already running, which the heat pump finishes under its ordinary DHW logic. Its TOP4 prerequisite
+applies to both values.
+
+### `POST /api/v1/controls/{key}`
+
+The body is `{"value": …}`. A `trigger` takes `{}`, and any `value` is refused. A `curve` takes
+a partial object with at least one of its four integer fields. Unknown body fields are refused.
+The request is validated completely before anything is published.
+
+**Result.** An accepted request makes exactly one QoS 0, non-retained publish. The request thread
+then waits up to `readback_window_seconds` for the readback. The backend never retries or queues
+it. A `200` response means the publish was handed to the connected MQTT client. It proves neither
+broker nor HeishaMon receipt, and never physical execution.
+
+```json
+{
+  "key": "dhw_target_temperature",
+  "requested": 50,
+  "publish": {"status": "sent", "at": "2026-10-01T08:00:01.120Z"},
+  "prerequisites": [],
+  "readback": {
+    "identity": "TOP9",
+    "kind": "state",
+    "expected": 50,
+    "outcome": "matched",
+    "observed": {"value": 50, "raw": "50", "received_at": "2026-10-01T08:00:03.402Z"},
+    "window_seconds": 15,
+    "waited_seconds": 2.28
+  }
+}
+```
+
+**Order and body (4E-C detail).**
+
+- The body must be exactly one JSON object whose only allowed field is `value`. Duplicate object
+  keys at any depth and `NaN`/`Infinity` are `400 invalid_request`.
+- Checks run in this order: body (`400`), key (`404`), `command_in_progress` (`409`), validation
+  (`400`/`409`/`422`), then the publish (`503`).
+- Once paho has accepted the publish, normal readback responses are `200`, including timeout
+  or mismatch. Unexpected bug-class exceptions may still produce `500` without changing the
+  accepted publish fact.
+
+For a `curve`, `readback` also has `fields` (requested field → TOP). `expected` and `observed` are
+objects over the requested fields only, and `observed` holds `null` for a field with no live
+reading. A request without readback returns at once with
+`{"identity": null, "kind": null, "expected": null, "outcome": "not_applicable", "observed": null,
+"window_seconds": W, "waited_seconds": 0.0}`.
+
+**Readback outcomes.** Only `mode="live"` readings that are `available` count. The exact
+receipt present in the baseline is always pre-publish, even if a backward wall-clock step makes
+its timestamp numerically newer than `publish.at`. A new receipt at or after `publish.at` may
+qualify as post-publish evidence. Only requested curve fields participate, separately.
+
+The outcomes have this precedence:
+
+| Outcome | Meaning |
+|---|---|
+| `unchanged_match` | The entire requested state already matched in the baseline, with no observed contradiction or relevant live-state continuity loss during the full window. Same-value periodic re-publications do not upgrade this to `matched`. |
+| `matched` | Otherwise, every requested field obtained qualifying post-publish expected evidence. For a whole baseline match, a contradicted field needs a later expected receipt. Disconnect, LWT Offline or clock-step invalidation discards earlier matches; later genuinely live evidence can qualify again. Effects follow the same rule: an already-active effect re-published unchanged is `unchanged_match`, not evidence of a new effect. |
+| `not_observed` | Neither condition holds. `observed` is the last qualifying live reading seen, or `null`. This is a fact, not a failure. |
+| `not_applicable` | The control has no readback. `identity`, `expected` and `observed` are `null`; there is no wait. |
+
+These are observation facts, never command causality or physical-execution claims. There is no
+receipt history: overwritten intermediates may conservatively prevent a match. Continuity loss
+cannot establish `unchanged_match`.
+
+Each POST logs once. Known refusals use their error code as `publish`; unexpected exceptions
+before acceptance use `publish=error` (the outcome is not established). Once the publisher returns
+`True`, `publish=sent` remains the log fact even if an unexpected readback exception produces HTTP
+500. Normal accepted publishes, including readback timeout or mismatch, still return 200.
+
+**Retries.** `POST` is not idempotent for `trigger` and re-arms `temporary` controls. Clients must
+not retry it automatically. After a lost response, read `GET /api/v1/controls` instead.
+
+### Control errors
+
+Every documented error below means this request caused no accepted publish. The body is
+`{"detail": "…", "code": "…"}`:
+
+| Status | `code` | Cause |
+|---|---|---|
+| `400` | `invalid_request` | The body is not a JSON object, has unknown fields, is missing `value`, or gives `value` for a trigger. |
+| `404` | `unknown_control` | No such `key`. |
+| `409` | `prerequisite_not_met` | A live reading proves a documented prerequisite false. Example: TOP110=`0` for an `optional_pcb` control. |
+| `409` | `validation_context_unavailable` | A request temperature cannot choose its range because there is no live TOP76/TOP81 reading. |
+| `409` | `command_in_progress` | An earlier request for the same `key` is still within its readback window. |
+| `422` | `invalid_value` | Wrong type, not an integer where one is required, outside the range, or not an enum value. |
+| `503` | `mqtt_unavailable` | The MQTT adapter is not connected, or paho did not accept the publish. |
+
+### Control subsystem independence
+
+| Condition | `GET /api/v1/controls` | `POST /api/v1/controls/{key}` |
+|---|---|---|
+| MariaDB unavailable | 200, unchanged | unaffected |
+| MQTT disconnected | 200, `executable=false` with `mqtt_disconnected` | 503 `mqtt_unavailable`, nothing queued |

@@ -100,8 +100,8 @@ class Ingest:
         self._physical_by_topic: dict[str, str] = {}
         for capability in effective_capabilities():
             reference = capability.reference
-            if reference.family == "SET":
-                continue
+            if not capability.readable:
+                continue  # SET/PCB command topics are never physical readings
             # Documented topics, core Source paths, and exact verified XTOP overrides
             # are resolved once by the effective capability model.
             topic = capability.topic
@@ -139,6 +139,7 @@ class Ingest:
         self.uncatalogued_topics: set[str] = set()
         self.clock_steps = 0  # detected backward CLOCK_REALTIME steps; each discarded confirmed evidence
         self.last_clock_step_at: float | None = None
+        self.readings_generation = 0  # increases whenever physical receipt continuity is reset
 
     # ------------------------------------------------------------------ events
 
@@ -347,6 +348,7 @@ class Ingest:
         self.alive_since = None
 
     def _clear_physical_readings(self) -> None:
+        self.readings_generation += 1
         for identity, reading in self.physical_readings.items():
             self.physical_readings[identity] = PhysicalReading(identity, reading.topic)
 

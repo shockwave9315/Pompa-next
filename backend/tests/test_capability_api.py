@@ -11,7 +11,13 @@ CAPABILITY_FIELDS = {
 READING_FIELDS = {"topic", "value", "kind", "raw", "mode", "available", "received_at"}
 PATHS = {"/health", "/api/v1/status", "/api/v1/live", "/api/v1/metrics", "/api/v1/history",
          "/api/v1/optional-history/selection", "/api/v1/optional-history/series",
-         "/api/v1/activity", "/api/v1/activity/live", "/api/v1/report"}  # Stage 4D-C-B addition
+         "/api/v1/activity", "/api/v1/activity/live", "/api/v1/report",  # Stage 4D-C-B addition
+         "/api/v1/controls", "/api/v1/controls/{key}"}  # Stage 4E-C addition
+PCB_IDENTITIES = [
+    "SetHeatCoolMode", "SetCompressorState", "SetSmartGridMode", "SetExternalThermostat1State",
+    "SetExternalThermostat2State", "SetPoolTemp", "SetBufferTemp", "SetZ1RoomTemp",
+    "SetZ2RoomTemp", "SetSolarTemp", "SetDemandControl", "SetZ2WaterTemp", "SetZ1WaterTemp",
+]
 RANGE = {"from": "2027-01-15T08:00:00Z", "to": "2027-01-15T08:01:00Z"}
 
 
@@ -39,10 +45,11 @@ def test_capabilities_have_exact_count_order_shape_and_factual_topics():
     expected = (
         [f"TOP{i}" for i in range(144)]
         + [f"OPT{i}" for i in range(7)]
-        + [f"SET{i}" for i in range(1, 47)]
+        + [f"SET{i}" for i in range(1, 49)]
+        + PCB_IDENTITIES
         + [f"XTOP{i}" for i in range(6)]
     )
-    assert len(entries) == 203
+    assert len(entries) == len(expected) == 218
     assert [entry["identity"] for entry in entries] == expected
     assert all(set(entry) == CAPABILITY_FIELDS for entry in entries)
     by_id = {entry["identity"]: entry for entry in entries}
@@ -54,8 +61,20 @@ def test_capabilities_have_exact_count_order_shape_and_factual_topics():
     }
     assert by_id["OPT3"]["topic"] == "optional/Z2_Mixing_Valve"
     assert by_id["SET1"]["topic"] == "commands/SetHeatpump"
-    assert all(by_id[identity]["readable"] is False for identity in expected if identity.startswith("SET"))
-    assert all(by_id[identity]["readable"] is True for identity in expected if not identity.startswith("SET"))
+    assert by_id["SET47"]["topic"] == "commands/SetForceHeater"
+    assert by_id["SET48"]["topic"] == "commands/SetReset"
+    assert by_id["SetSmartGridMode"] == {
+        "identity": "SetSmartGridMode", "family": "PCB", "name": "SetSmartGridMode",
+        "topic": "commands/SetSmartGridMode",
+        "description": "Byte 06: SG ready values , External Compressor SW , Heat/Cool SW, "
+                       "Thermostat 1 (H/J series only), Thermostat 2 | 0/1/2/3",
+        "provenance": "documented", "readable": False,
+        "canonical_metric": None, "source_priority": None,
+    }
+    commands = {entry["identity"] for entry in entries if entry["family"] in ("SET", "PCB")}
+    assert len(commands) == 48 + 13
+    assert all(by_id[identity]["readable"] is False for identity in commands)
+    assert all(entry["readable"] is True for entry in entries if entry["identity"] not in commands)
     for identity, topic in {
         "XTOP0": "extra/Heat_Power_Consumption_Extra",
         "XTOP1": "extra/Cool_Power_Consumption_Extra",
@@ -113,7 +132,7 @@ def test_unseen_readings_include_every_slot_with_exact_none_shape():
             "raw": None, "mode": "none", "available": False, "received_at": None,
         }
     assert all(entry["topic"] is not None for entry in readings.values())
-    assert not any(identity.startswith("SET") for identity in readings)
+    assert not any(identity.startswith(("SET", "Set")) for identity in readings)
     assert body["mqtt"] == {"connected": False, "alive": False, "epoch": 0}
 
 
@@ -169,7 +188,7 @@ def test_opt_in_forms_need_neither_mqtt_nor_database():
     metrics = api.get("/api/v1/metrics", include="capabilities")
     live = api.get("/api/v1/live", include="readings")
     assert metrics.status_code == live.status_code == 200
-    assert len(metrics.json()["capabilities"]) == 203
+    assert len(metrics.json()["capabilities"]) == 218
     assert len(live.json()["readings"]) == 157
     assert all(entry["mode"] == "none" for entry in live.json()["readings"].values())
     assert api.storage.schema_calls == api.storage.upsert_calls == 0

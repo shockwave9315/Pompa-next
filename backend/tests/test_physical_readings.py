@@ -103,10 +103,15 @@ def test_absent_opt_and_unknown_topic_create_no_reading():
     before = ingest.physical_snapshot()
     ingest.message("unrelated/Anything", "7", False, T0 + 1)
     ingest.message("commands/SetHeatpump", "1", False, T0 + 2)
+    # Optional PCB command echoes (e.g. Home Assistant's retained commands) are never readings.
+    ingest.message("commands/SetSmartGridMode", "2", True, T0 + 3)
+    ingest.message("commands/SetDemandControl", "235", False, T0 + 4)
     assert ingest.physical_snapshot() == before
     assert ingest.physical_readings["OPT3"].payload is None
+    assert not any(identity.startswith("Set") for identity in ingest.physical_readings)
     assert ingest.uncatalogued_topics == {
-        "unrelated/Anything", "commands/SetHeatpump",
+        "unrelated/Anything", "commands/SetHeatpump", "commands/SetSmartGridMode",
+        "commands/SetDemandControl",
     }
 
 

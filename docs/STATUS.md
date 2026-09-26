@@ -2,25 +2,35 @@
 
 ## Current stage
 
-**Current stage: Stage 4D — Reports and product analytics projections.** Checkpoint 4D-A's
-contract freeze is owner-accepted. Checkpoint 4D-B's pure report domain and targeted hardening
-are owner accepted and closed at `5de43b88f632a7069a4f579ff7a26302624e2855`.
-Checkpoint 4D-C-A's behavior-preserving extraction refactor is owner accepted and closed at
-`33b1e0472d818502079bea20fb7034b7cdc1c33c`. Checkpoint 4D-C-B's report read model and API and
-Stage 4D-C as a whole are owner accepted and closed at
-`4b20bdefee451e59b292181e4aa0c75cf9e2bde6`. Stage 4D-D-A is owner accepted and closed at
-`3af4d8fc0e17bafe17cc669f694bb2d3652a9ac4`; Stage 4D-D-B is owner accepted and closed after
-CT109 runtime validation of that exact SHA. Stage 4D-D-C whole-PR adversarial review is next,
-not started. Stage 4D remains open pending whole-PR review and the owner merge decision.
-Stage 4C is DONE and merged to `main` in PR #8 (merge commit
-`8c3bccbcf6ba305bbf547c59ef3f6167471442e8`). Its A–D
-checkpoints and whole-PR review are complete. Frontend work starts after Stage 4.
+**Current stage: Stage 4E — SET/control backend, final API freeze and runtime validation.**
+Checkpoint 4E-A is owner accepted and closed at `1a7826655aefb5f79daf337b7aa5fe6e5418ab3c`.
+Checkpoint 4E-B (reference refresh and pure control domain) is OWNER ACCEPTED/CLOSED on branch
+`stage-4e-control` in draft PR #10 at `dc157beb3c1fdf58c7b23c7075b8cfbb508fd1c4`. Checkpoint 4E-C
+(control runtime and API) is OWNER ACCEPTED/CLOSED at `fa4d49e233927210260595143a0de01f12f05399`.
+**Stage 4E-D is CURRENT.** 4E-D-A validation contract is OWNER ACCEPTED/CLOSED at plan revision
+`f7bac4741d06b4328f99b660c1cbd74af7943922`. 4E-D-B is RUNBOOK PREPARED / AWAITING OWNER EXECUTION;
+CT109 validation is NOT STARTED. The tracked plan is
+[`STAGE_4E_D_VALIDATION.md`](STAGE_4E_D_VALIDATION.md). The frozen control contract is
+`docs/ARCHITECTURE.md` §25.5
+and the Stage 4E section of `docs/API.md`. Frontend work starts after Stage 4.
 
-The already-reviewed F2 hardening commit `b81d680eecda67e7d2d80facd4b79ba08472c824` is in
-that merge. It makes `/activity` hold the unacknowledged recorder tail `open` until its historical
-outcome settles, preventing transient false gaps before a tick or during a write backlog. CT109
-now runs owner-validated Stage 4D head `3af4d8fc0e17bafe17cc669f694bb2d3652a9ac4`;
-this first Stage 4D deployment also delivered the F2 correction.
+Stage 4D — DONE and merged to `main` (PR #9, merge commit
+`890e4b0b882248130dbdecf0c412b5c1eac852ff`). The closure facts:
+
+- 4D-D-A and the 4D-D-B CT109 runtime validation are owner accepted and closed.
+- The final whole-PR Opus review supported the merge.
+- GitHub Codex raised one technically valid durable-energy corruption hypothesis. An independent
+  adversarial follow-up reproduced the technical condition and classified it TECHNICALLY TRUE BUT
+  NOT A MERGE FINDING: no supported application path creates that state.
+- No partial integrity framework or read guard was justified.
+- The owner merged PR #9.
+
+Last owner-reported CT109 head: `3af4d8fc0e17bafe17cc669f694bb2d3652a9ac4`.
+Actual deployed identity must be re-observed before Stage 4E validation.
+
+Stage 4C — DONE and merged to `main` (PR #8, merge commit
+`8c3bccbcf6ba305bbf547c59ef3f6167471442e8`), including the reviewed F2 hardening commit
+`b81d680eecda67e7d2d80facd4b79ba08472c824`.
 
 Stage 4B — DONE and merged to `main` (PR #7, merge commit
 `dfd225d2a8fe35563cd1f684efb81cf91b532a2f`).
@@ -324,9 +334,10 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
 
 ## Out of scope
 
-- CT109 connection/deployment and whole-PR review in this runtime bookkeeping checkpoint;
-  frontend throughout Stage 4D.
-- Stage 4E SET/control, Stage 5 frontend, cooling/heater/cost/external-meter analytics and year or
+- In 4E-D-B preparation: agent CT109 contact/deployment, production MQTT/credentials or
+  heat-pump commands, production Python changes, final W/API freeze and later closeout execution.
+- Throughout Stage 4E: command persistence or history, generic MQTT publish, automatic retry or
+  reconciliation, Stage 5 frontend, cooling/heater/cost/external-meter analytics, and year or
   season reports.
 - Legacy compatibility or historical migration.
 - Changing the 21 canonical metric semantics, Stage 1–4A history invariants, or the 365-day
@@ -334,10 +345,134 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
 
 ## Next
 
-Stage 4E — isolated SET/control and final backend API, after Stage 4D. Within Stage 4D,
-4D-D-C whole-PR adversarial review is next, followed by the owner merge decision (§25.4).
+Owner executes PHASE 0 and PHASE 1 only using the locally prepared untracked runbook and evidence
+template, then stops and returns evidence for review. No Phase 2/3 control POST is authorized by
+this handoff. Phase 0/1 owner acceptance precedes any real write. The readback window `W` remains
+provisional at 15 s; CT109 validation, final API freeze and Stage 4 closure have not happened.
 
-## Stage 4D checkpoints
+## Stage 4E checkpoints
+
+- **4E-A — control research, contract freeze and full plan (OWNER ACCEPTED/CLOSED at
+  `1a7826655aefb5f79daf337b7aa5fe6e5418ab3c`):**
+  - Docs only.
+  - Reconciles the tracked SET1–SET46 reference with upstream HeishaMon v4.2.2 firmware: 48
+    heat-pump commands plus 14 Optional PCB commands.
+  - Adds the Home Assistant integration evidence: disabled-by-default is UX-only, not
+    "unsupported"; HA's SET37/SET38 topic names do not reach the firmware.
+  - Proves the MQTT write semantics.
+  - Freezes the transport: QoS 0, non-retained, connected-only, at most one publish per request,
+    no retry.
+  - Freezes 64 semantic controls (63 after the 4E-B review) with readback mapping, a factual readback model, no command
+    persistence and the `/api/v1/controls` contract.
+  - Plans 4E-B–4E-D and the later CT109 write matrix.
+- **4E-B — reference refresh and pure control domain (OWNER ACCEPTED/CLOSED):**
+  - Tracked `MQTT-Topics.md` is refreshed and `OptionalPCB.md` added, both verbatim from
+    `heishamon/HeishaMon@0de4f3c`, with blob-id provenance.
+  - The capability catalog grows from 203 to 218 entries (+SET47/48, +13 PCB). PCB identities are
+    upstream command names; command topics are never readings.
+  - New pure `pompa/control.py`: 63 semantic controls (51 heat-pump, 12 Optional PCB), with
+    validation, payload encoding, readback metadata, prerequisites and restrictions.
+    `SetOptPCBByte9` and `SetHeatCoolMode` are explicitly excluded.
+  - The 4E-B open questions are resolved from evidence (§25.5.14).
+  - An independent firmware probe matched 245 of 245 encode→decode samples.
+  - Tests:
+    - focused control/capability/physical-reading tests: 316 passed;
+    - full no-DB suite: 1,329 passed, 303 MariaDB-gated skips (baseline at the 4E-A head: 1,065
+      passed, 303 skipped);
+    - full suite against a local MariaDB 10.11 server: 1,632 passed.
+  - Independent adversarial review and corrective pass on CT112 (0 blocker, 1 important,
+    6 minor):
+    - IMPORTANT, fixed: `SetHeatCoolMode` was an executable boolean although no pinned source
+      documents which bit value selects heat or cool. It is now a known `PCB` capability excluded
+      from control (§25.5.14 O4); 64 → 63 controls.
+    - MINOR, fixed: a huge integer for a PCB temperature raised `OverflowError` instead of
+      `invalid_value`; an undocumented live prerequisite value (for example TOP110 = `2`) proved a
+      prerequisite false instead of leaving it unknown; documentation of the cool direct range
+      source, NTC quantization, ProtocolByteDecrypt mislabels and the backend module table.
+    - F7, OWNER DECIDED — no behavior change: `force_dhw` keeps its per-control TOP4
+      prerequisite for both values. `false` deasserts the force request; on the owner's K-series
+      it does not abort a DHW cycle already running. A regression test pins both values.
+    - F8, OWNER DECIDED — SET5–SET8 carry the informational, never-enforced restriction
+      `documented_direct_temperature_water_mode_only` (upstream water-sensor-mode note, with its
+      own "newer types may differ" caveat). No prerequisite, context or `409` path was added.
+    - Confirmed from the pinned firmware: the 43 state pairs, 16 curve bytes, two effect
+      readbacks, the Demand Control table points, PCB bit layout, verbatim reference blob ids,
+      preserved 203 earlier identities (only six upstream descriptions changed) and the unchanged
+      157 physical slots, order and topic map. O1–O3 protocol ranges stay (§25.5.14).
+    - Tests at the corrected head: focused 315 passed; full no-DB 1,328 passed, 303 MariaDB-gated
+      skips; full suite on MariaDB 11.4.13: 1,631 passed, 0 skipped. The backend image built and
+      its packaged references and catalog (218 / 157 readable / 63 controls) were probed in an
+      offline container.
+  - Closure (F7/F8 decisions): focused 317 passed; full no-DB 1,330 passed, 303
+    MariaDB-gated skips; full suite on MariaDB 11.4.13: 1,633 passed, 0 skipped. No packaging
+    change, so no image rebuild.
+- **4E-C — control runtime and API (OWNER ACCEPTED/CLOSED at
+  `fa4d49e233927210260595143a0de01f12f05399`):**
+  - `GET /api/v1/controls` (63 controls) and `POST /api/v1/controls/{key}`, with no database.
+  - `MqttAdapter.publish_command`: shared client, QoS 0, `retain=false`, connected only, at most
+    one publish, no retry or replay.
+  - `pompa/control_runtime.py`: per-key in-memory in-flight guard, factual readback (`matched`,
+    `unchanged_match`, `not_observed`, `not_applicable`) within the provisional `W` = 15 s, one
+    log line per request.
+  - The recorder exposes generic readings observations, receipt identities, a reset generation
+    and a change signal; it knows nothing about control.
+  - Evidence:
+    - `test_control_api.py`: 53 tests;
+    - runtime/API/adapter mutations killed;
+    - a disposable local Mosquitto probe passed 18/18 checks: exactly one QoS 0 non-retained
+      publication, no retained command, retained TOP not confirming, `503` while disconnected,
+      no replay on reconnect, Optional PCB `not_applicable`;
+    - focused 460 passed; full no-DB 1,383 passed, 303 MariaDB-gated skips; full MariaDB 11.4.13
+      1,686 passed, 0 skipped;
+    - the backend image built and an offline container smoke showed 63 controls, 218
+      capabilities, 157 readings and POST `503`.
+  - Correction after the owner review:
+    - A body refused before validation (invalid JSON, a duplicate key, an unknown field) wrote no
+      request log line. It now writes exactly one, with `requested=<invalid_request>` and never
+      the raw body.
+    - Requests that reach the runtime still log once; regression tests pin both paths.
+  - Final adversarial corrections (0 blocker / 0 important / 4 minor; owner decisions implemented):
+    - M1: generic physical-readings reset generation prevents false `unchanged_match` after
+      disconnect, LWT Offline or normal clock-step invalidation, even when an intermediate
+      contradiction was erased before the waiter observed it.
+    - M2: immutable baseline receipt identity remains pre-publish regardless of wall-clock steps.
+    - M3: known refusals log their error code; unexpected pre-acceptance exceptions log `error`.
+      Accepted publishes immediately become `sent`, including when later readback raises.
+    - M4: whole baseline matches with uninterrupted, uncontradicted evidence stay
+      `unchanged_match` after full W despite same-value re-publications. Scalar, effect and curve
+      readbacks share this precedence; mixed curves retain separate factual post matches.
+    - 19 added regression cases, including deterministic M25 different-key concurrency and
+      M23 no-readback wait-path pins. The starting code fails 10 targeted correction cases;
+      both surviving contract mutants are killed in isolated scratch copies.
+    - Validation: expanded focused 524 passed; full no-DB 1,411 passed, 303 expected
+      MariaDB-gated skips; full MariaDB 11.4.13 1,714 passed, 0 skipped.
+    - Production image built; offline packaged observation/control probe passed. Disposable
+      localhost Mosquitto: 5/5 scalar, effect, curve and transition scenarios passed.
+    - Self-review A–N: 14/14 passed. Compile and `git diff --check` passed.
+    - No journal, persistence, transport, clock-policy or storage change. Owner accepted/closed
+      the corrected implementation at the SHA above.
+- **4E-D — CT109 validation, API freeze, whole-stage review and closeout: CURRENT.**
+  - **4E-D-A — validation contract: OWNER ACCEPTED/CLOSED at
+    `f7bac4741d06b4328f99b660c1cbd74af7943922`.**
+    [`STAGE_4E_D_VALIDATION.md`](STAGE_4E_D_VALIDATION.md) defines deployment/identity, read-only
+    pre-checks, owner gates, 10 safe reversible and 7 state-changing candidates, 46 controls
+    excluded from real execution, exact restore evidence, HA audit, TOP44/activity watches,
+    latency analysis and passive timeout diagnostics.
+    Independent contract review: 0 blocker / 0 important / 5 minor; all owner-directed corrections
+    are implemented: concrete current-condition facts, natural activity classification, retained/
+    reconnect/post-restore evidence, INFO-log precondition and latency clock sanity. The accepted
+    runtime candidate stays `fa4d49e233927210260595143a0de01f12f05399`, distinct from the plan revision.
+  - **4E-D-B — RUNBOOK PREPARED / AWAITING OWNER EXECUTION.** The owner package is untracked
+    under `scratchpad/`: `stage-4e-d-ct109-runbook.sh`, `stage-4e-d-evidence.md` and supporting
+    read-only/validation helpers. Each action is separate; default invocation prints help.
+    Local fixture tests protect identity/counts, write gates, retained/continuity checks, latency
+    sanity and monotonic post-restore observation. No production operation was executed.
+  - **CT109 validation: NOT STARTED.** Initial owner execution is Phase 0 and Phase 1 only,
+    then STOP and return generated evidence for review. No Phase 2/3 POST before owner approval.
+  - W = 15 s remains provisional; final API freeze, whole-stage reviews, merge and Stage 4
+    completion remain pending. No Stage 5 work.
+
+## Stage 4D checkpoints (DONE)
 
 - **4D-A — contract freeze (accepted/closed):** architecture, API, knownness, storage, time, error
   and snapshot contracts; stale Stage 4C docs. Documentation only.
@@ -423,5 +558,9 @@ Stage 4E — isolated SET/control and final backend API, after Stage 4D. Within 
   1,440, settled 508, recorded 503, gap 5, future 932 and coverage 99.0%; `503 + 5 = 508` and
   `508 + 932 = 1440`. Deployment log evidence contained no traceback, schema failure, DB failure
   or report error. This deployment also first delivered the already-reviewed F2 correction.
-- **4D-D-C — whole-PR adversarial review (NEXT / NOT STARTED):** whole-PR review and owner merge
-  decision remain. Stage 4D-D and Stage 4D remain open.
+- **4D-D-C — whole-PR review and merge (DONE):**
+  - The final whole-PR Opus review supported the merge.
+  - The Codex durable-energy corruption hypothesis was classified TECHNICALLY TRUE BUT NOT A MERGE
+    FINDING. No supported application path creates that state, and no integrity framework or read
+    guard was added.
+  - The owner merged PR #9 at `890e4b0b882248130dbdecf0c412b5c1eac852ff`.

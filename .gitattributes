@@ -1,0 +1,4 @@
+# Verbatim upstream HeishaMon references (see docs/reference/heishamon/PROVENANCE.md).
+# Their trailing whitespace is upstream content and must stay byte-identical.
+docs/reference/heishamon/MQTT-Topics.md -whitespace
+docs/reference/heishamon/OptionalPCB.md -whitespace

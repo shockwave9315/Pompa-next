@@ -11,10 +11,12 @@ HeishaMon MQTT
   → React frontend
 ```
 
-Stages 1–3 and Stages 4A–4C are complete and merged. Stage 4C (PR #8) is owner-validated on
-CT109. **Stage 4D — reports and product analytics projections** is current. The backend records
+Stages 1–3 and Stages 4A–4D are complete and merged. Stage 4D (PR #9) is owner-validated on
+CT109. **Stage 4E — SET/control backend, final API freeze and runtime validation** is current. The
+backend records
 canonical and selected optional minutes from MQTT into MariaDB, maintains hourly rollups and
-durable activity segments, and serves live state, catalogs, status, history and activity resources;
+durable activity segments, and serves live state, catalogs, status, history, activity and report
+resources;
 see [backend/README.md](backend/README.md). Frontend work
 remains Stage 5; see [the roadmap](docs/ROADMAP.md).
 

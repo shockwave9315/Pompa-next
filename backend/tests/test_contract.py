@@ -12,7 +12,10 @@ from pompa.catalog import METRICS, RECORDED_KEYS
 
 PATHS = {"/health", "/api/v1/status", "/api/v1/live", "/api/v1/metrics", "/api/v1/history",
          "/api/v1/optional-history/selection", "/api/v1/optional-history/series",
-         "/api/v1/activity", "/api/v1/activity/live", "/api/v1/report"}  # Stage 4D-C-B addition
+         "/api/v1/activity", "/api/v1/activity/live", "/api/v1/report",  # Stage 4D-C-B addition
+         "/api/v1/controls", "/api/v1/controls/{key}"}  # Stage 4E-C addition
+POST_ONLY_PATHS = {"/api/v1/controls/{key}"}
+GET_PATHS = PATHS - POST_ONLY_PATHS
 RANGE = {"from": "2027-01-15T08:00:00Z", "to": "2027-01-15T08:05:00Z"}
 
 LIVE_KEYS = {"now", "mqtt", "metrics"}
@@ -63,7 +66,9 @@ def test_exactly_these_paths_exist(api):
 
 
 def test_every_documented_path_answers_get(api):
-    for path in PATHS:
+    spec = api.body("/openapi.json")["paths"]
+    assert {path for path in PATHS if set(spec[path]) == {"post"}} == POST_ONLY_PATHS
+    for path in GET_PATHS:
         params = RANGE if path.endswith(("/history", "/activity")) else {}
         if path == "/api/v1/report":
             params = {"period": "day", "date": "2027-01-15"}
@@ -224,7 +229,7 @@ def test_database_backed_paths_are_the_only_503s(api):
     assert api.get("/api/v1/optional-history/series").status_code == 503
     assert api.get("/api/v1/activity", None, **RANGE).status_code == 503
     assert api.get("/api/v1/report", period="day", date="2027-01-15").status_code == 503
-    for path in PATHS - DB_BACKED_PATHS:
+    for path in GET_PATHS - DB_BACKED_PATHS:
         assert api.get(path).status_code == 200, path
 
 

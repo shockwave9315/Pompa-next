@@ -37,6 +37,7 @@ The intended backend boundaries are conceptual, not a mandate for speculative ab
 | Storage | Own DDL and parameterized MariaDB queries; contain no domain calculations. |
 | Aggregation | Own `Stats`, buckets, derived series, energy, COP, coverage, and read-path composition. |
 | Activity | Interpret canonical minutes into activity, compressor runs and defrosts (Stage 4C, §25.3); pure. |
+| Control | Validate and encode semantic commands, publish them once, observe readback (Stage 4E, §25.5). The pure domain never imports `Recorder`. The runtime reads the existing live-readings observation and never changes recorder, queue, history or storage state. |
 | API | Validate requests and serialize domain results; contain no independent mathematics. |
 
 Dependencies flow inward toward the catalog and domain functions. Circular dependencies are not allowed. Live and history share the proven canonical metric definitions, not a generic storage abstraction. Stage 4A adds a reference-backed capability layer around them (§25).
@@ -359,7 +360,8 @@ Mean metrics expose average, minimum, maximum, and minutes. Last metrics expose 
 
 The current period summary is `bucket=total`; current daily history is `bucket=1d`. Stage 4D
 freezes one `/api/v1/report` projection resource for activity/event facts that numeric history
-cannot express (§25.4). It reuses existing energy, COP and coverage algebra.
+cannot express (§25.4). It reuses existing energy, COP and coverage algebra. Stage 4E freezes the
+only command resources, `GET /api/v1/controls` and `POST /api/v1/controls/{key}` (§25.5.12).
 
 Bad parameters return 400. Unrepresentable retained-history resolution or old partial-hour edges return 422. Database unavailability returns 503 for history while live may remain available.
 
@@ -391,15 +393,15 @@ A protected batch retried through a long outage can be older than any fixed repr
 ## 20. Control boundary
 
 All known SET identities enter the reference-backed capability model in Stage 4A as knowledge
-only. Actual MQTT SET publishing begins in Stage 4E through an isolated allowlisted path with
-validated values. Persistent command history is a Stage 4E decision, not a required table.
+only. Actual MQTT command publishing begins in Stage 4E through an isolated path that publishes
+only backend-validated semantic commands. Stage 4E-A decided that there is no persistent command
+history (§25.5.10).
 
 Recorder, storage, history, and aggregation have no dependency on control. Command results return through ordinary observed TOP topics. The recorder itself never publishes MQTT commands.
 
-Preferred command results are factual: `requested`, then `publish_failed` or
-`published_unconfirmed`, followed by `confirmed` or `confirmation_timeout` only where reliable
-readback exists. A timeout does not stop unrelated reads, history or controls. There is no
-automatic rollback, global failure state, speculative rejection or complex recovery workflow.
+Command results are factual and keep validation, publish, readback and physical execution apart
+(§25.5.8). A missing or late readback does not stop unrelated reads, history or controls. There is
+no automatic retry, rollback, global failure state, speculative rejection or recovery workflow.
 
 ## 21. Testing strategy
 
@@ -496,8 +498,8 @@ that window, not at the first paused second.
 
 ## 25. Stage 4 product-backend expansion
 
-**Current/frozen now:** Stages 1–3 and 4A–4C are complete; Stage 4D is current. CT109 runs the
-validated Stage 4C runtime head, while merged `main` also includes the reviewed F2 correction.
+**Current/frozen now:** Stages 1–3 and 4A–4D are complete and merged; Stage 4E is current. CT109
+runs the validated Stage 4D runtime head `3af4d8fc0e17bafe17cc669f694bb2d3652a9ac4`.
 Sections 3–24 specify the canonical 21-metric ingest, minute recorder, storage, aggregation and
 default API. Stage 4 adds product capability around them; Stage 5 is frontend and Stage 6 is
 cutover. Broad capability must use a lightweight implementation: one definition of each domain
@@ -1639,10 +1641,832 @@ cost/tariff and external SDM analytics, year/season reports and legacy migration
 
 ### 25.5 Stage 4E — isolated control and final backend API
 
-**Frozen direction:** The full known SET identity surface is catalog knowledge before execution;
-MQTT writes start only in 4E. Validate explicit requests against allowlisted commands. Keep
-publishing and its factual result independent of live reads, recorder, history and analytics.
-Reliable readback may confirm a request; its absence or timeout is factual. **Deferred to 4E:**
-which commands can be validated for the installed device, final command API shape, and whether
-in-memory state plus logs suffice or persistent command history has a real product need. Freeze
-the complete product API and validate it on CT109 before Stage 5 frontend work.
+**4E-A contract freeze (research and documentation only).** Stage 4E is the last backend stage
+before the Stage 5 frontend. It adds one isolated command path. Frontend code sends semantic
+commands and renders backend facts. It never sees MQTT topics, SET numbers, raw HeishaMon payloads
+or `SetCurves` JSON, and it performs no device validation. Items marked **(O)** are open owner
+decisions, not frozen facts. Each names the checkpoint that must resolve it. Checkpoint 4E-B
+resolved every 4E-B item from evidence (§25.5.14). Only the readback window `W` remains open,
+for 4E-D.
+
+**Owner decisions accepted in the 4E-A review (frozen):**
+
+- **Transport.** Publishing uses the existing shared paho MQTT client and connection, with QoS 0
+  and `retain=false`, and only while connected. One validated request makes at most one publish.
+  There is no automatic retry, replay or reconciliation (§25.5.4, §25.5.9).
+- **Persistence.** NO COMMAND PERSISTENCE (§25.5.10).
+- **Completeness.** The backend exposes the full evidenced HeishaMon control capability,
+  independent of Home Assistant's disabled-by-default registry flag (§25.5.3, §25.5.5).
+- **Service marker.** Service and high-impact is factual metadata only, not a backend safety
+  policy (§25.5.5).
+- **Curves.** The four semantic curve controls are the accepted curve model (§25.5.11).
+- **HA retained commands** are an operational issue owned by an external writer (§25.5.9):
+  - Pompa Next never publishes retained commands.
+  - Pompa Next does not fight, reconcile or automatically clear HA's retained commands.
+  - CT109 validation audits retained `commands/#` topics before any write.
+  - Any retained-topic cleanup is an explicit owner-approved operational action.
+
+#### 25.5.1 Evidence base
+
+The research used these pinned sources:
+
+- **Tracked references:** `docs/reference/heishamon/MQTT-Topics.md` (SET1–SET46) and the owner
+  device snapshot `realne_dane.md`.
+- **Upstream HeishaMon:** `heishamon/HeishaMon` (the historical `Egyras/HeishaMon` URL redirects
+  to the same repository), release v4.2.2, commit
+  `0de4f3c02598f542e7859a772e627e5c1ebc2ce3`. Files: `HeishaMon/commands.h`/`commands.cpp`
+  (command tables and encoders), `HeishaMon/HeishaMon.ino` (MQTT subscription, callback and serial
+  queue), `MQTT-Topics.md` and `OptionalPCB.md`.
+- **Home Assistant integration:** `kamaradclimber/heishamon-homeassistant` (domain `aquarea`,
+  shown as "HeishaMon") at `e206e023af5453e4fefbbf3545e9c60d5ca79fd5`, v2.10.1. The owner's HA
+  entity names match this integration. The installed version on the owner's system is not
+  recorded.
+- **paho-mqtt 2.1.0 source:** the version pinned in `backend/requirements.txt`.
+- **Legacy:** targeted product inspection of `shockwave9315/pompa` at
+  `d646615d8ac536684de644797be005e549b785db` (§25.5.6).
+- **Owner product evidence:** HA entities the owner actively uses, and entities that were disabled
+  by default, manually enabled and reported working on this K-series installation.
+
+This is research evidence. The runtime never fetches upstream files.
+
+#### 25.5.2 Tracked reference audit
+
+- **Heat-pump commands.** The tracked table has 46 SET rows. Upstream firmware `commands[]` has
+  48 heat-pump commands: those 46 plus `SetForceHeater` (upstream SET47, added in v4.2.0 by commit
+  `aa42c21`) and `SetReset` (upstream SET48). The `SetReset` encoder has existed since 2021; it was
+  documented in v4.2.1. All 46 tracked command names match the firmware dispatch names exactly.
+- **Optional PCB commands.** Firmware `optionalCommands[]` has 14 more commands. The tracked
+  reference contains none of them. Tracked OPT0–OPT6 are readable heat-pump→PCB outputs, not
+  commands.
+  - Upstream `OptionalPCB.md` names 13 of the 14 in its set-command table.
+  - `SetOptPCBByte9` exists only in the firmware: the table documents datagram byte 09 only as "?".
+  - This corrects the 4E-A wording "upstream documents them in `OptionalPCB.md`"; the model is
+    unchanged.
+- **Other drift.** Everything else is descriptive only: TOP15/16/38–41 warnings, and an upstream
+  XTOP0–XTOP5 table matching the XTOP identities Pompa Next already observes.
+- **Decision.** Do not edit the packaged reference in 4E-A. It is a startup runtime input
+  (§25.1). Adding SET47/SET48 changes `/metrics?include=capabilities` from 203 to 205 entries and
+  breaks pinned tests, which is production behavior. Checkpoint 4E-B refreshes `MQTT-Topics.md`
+  verbatim from the pinned upstream commit and adds a verbatim `OptionalPCB.md`. The parser, tests
+  and API counts change in the same reviewable checkpoint.
+- **Done in 4E-B.** Both files are verbatim copies at the pinned commit; their git blob ids equal
+  upstream's (`docs/reference/heishamon/PROVENANCE.md`). The catalog grew from 203 to 218 entries
+  (+SET47, +SET48, +13 PCB). The only change to earlier identities is the six upstream TOP15/16/38–41
+  warnings, which a regression test pins.
+
+#### 25.5.3 Home Assistant integration findings
+
+**Why entities are disabled by default.** The integration sets `entity_registry_enabled_default`
+to false on the cooling requests (SET6/SET8), SET19, SET21–SET23, SET27, the cooling-curve numbers,
+the cooling climates, SET30–SET33, SET43, Demand Control, Smart Grid Mode, Compressor State and the
+HeishaMon GPIO relays. Its source comments give the reasons:
+
+- less common setups: cooling, buffer, solar, pool;
+- the command comes from the optional PCB;
+- SET43 applies only to K/L All-In-One units;
+- Compressor State only acts when SET32 is on and a main-PCB DIP switch is set;
+- climate entities are shown for heating only.
+
+SET30–SET33 are disabled without a comment.
+
+**Disabled-by-default is not "unsupported".** The flag only sets the initial HA entity-registry
+enablement:
+
+- Command topic, payload mapping and state subscription are defined identically either way.
+- There is no model or series gate.
+- These entities define no availability property. HA availability is therefore independent of
+  both registry enablement and device capability.
+- Manual enablement instantiates the same entity. The owner confirmed that such entities operate
+  on this installation.
+
+Disabled-by-default is UX evidence only and never a negative capability signal.
+
+**HA defects and limits.** These are evidence, not authority:
+
+- **SET37/SET38 writes never reach the heat pump.** HA publishes to
+  `SetBivalentAStartTemp`/`SetBivalentAStopTemp` (since v1.15.x, January 2025). The firmware names
+  are `SetBivalentAPStartTemp`/`SetBivalentAPStopTemp`, and unknown names are ignored silently. HA
+  therefore never delivers these writes. The owner's use of these entities is not evidence that
+  the writes worked.
+- **Retained commands.** HA publishes SET36, Demand Control, Smart Grid Mode, Compressor State
+  and the relays with `retain=true`. HeishaMon subscribes to `commands/#`, so it re-executes a
+  retained command on every (re)connect. A later Pompa Next write to SET36 can therefore be
+  reverted by HA's retained value.
+- **HA PCB state is an echo.** HA's state for the optional-PCB entities is the echo of its own
+  retained command topic, not a heat-pump readback.
+- **Undocumented values.** The HA operating-mode select can write `7`/`8`; the firmware treats
+  these as "no change". HA quiet-mode "Scheduled" writes `4`, which upstream does not document.
+- **No write entity.** HA has none for SET14, SET46 (TOP78 is a read-only sensor there),
+  `SetHeatCoolMode`, the thermostat inputs, the PCB temperature inputs or PCB byte 9.
+- **Composite entities.** HA climate and water-heater entities combine SET1, SET9, SET17 and
+  request temperatures, with client-side mode guessing.
+- **Automatic retry.** HA re-publishes a command up to three times after about 10 s when the
+  state does not match.
+
+Pompa Next adopts neither the composite entities nor the automatic retry.
+
+#### 25.5.4 MQTT write transport (proved)
+
+- **Topic and payload.**
+  - Every command, heat-pump or Optional PCB, is published to
+    `{MQTT_TOPIC_PREFIX}/commands/{UpstreamName}`. HeishaMon strips the base and `commands/` and
+    dispatches by exact name; an unknown name is ignored silently.
+  - Payloads are UTF-8 text. Heat-pump commands and PCB enum/byte commands are parsed with Arduino
+    `String.toInt()`. PCB temperatures are parsed with `toFloat()`. `SetCurves` is a JSON document.
+- **The firmware does not validate.**
+  - Out-of-range integers wrap into a byte, and fractions truncate.
+  - Most two-state commands treat any value other than `1` as `0`, so `SetHeatpump=2` means off.
+  - Unmapped enum values fall back to "no change".
+  - Backend validation is therefore the only validation.
+- **HeishaMon delivery.**
+  - HeishaMon subscribes with PubSubClient's default QoS 0 and a clean session. Broker-to-HeishaMon
+    delivery is at most once.
+  - A command published while HeishaMon is offline is lost unless it is retained. A retained
+    command is re-executed at every reconnect.
+  - HeishaMon handles one MQTT callback at a time and drops a re-entrant one. It buffers at most
+    ten heat-pump commands and drops overflow with only a log line. It ignores commands in
+    listen-only mode.
+  - It publishes no acknowledgement topic. Its optional MQTT `log` text is diagnostics, not an
+    acknowledgement.
+  - After a heat-pump command, changed decoded values are published retained under `main/`.
+    HeishaMon polls every `waitTime` (default and minimum 5 s) and republishes all values every
+    `updateAllTime` (default 300 s).
+- **Optional PCB behavior.**
+  - A PCB command sends nothing on its own. It edits an in-memory datagram that HeishaMon sends
+    every second while its own Optional PCB emulation setting is on. HeishaMon saves this datagram
+    to flash every 5 minutes and restores it at boot. Without that setting, PCB commands are
+    ignored.
+  - The heat pump must also have Optional PCB = YES in its service settings (readable as TOP110).
+    Otherwise the command has no effect.
+  - If the heat pump has Optional PCB = YES and the datagram stops for about 40 s, the heat pump
+    raises error H74 and goes to standby.
+  - The emulated input values are never published back.
+- **paho 2.1.0 semantics.**
+  - A QoS 0 publish while disconnected returns `MQTT_ERR_NO_CONN` and queues nothing.
+  - While connected, `MQTT_ERR_SUCCESS` only means the packet was queued on the client's current
+    connection. There is no broker receipt.
+  - QoS ≥ 1 messages published while disconnected, or in flight at a disconnect, are kept and
+    (re)sent after reconnect, flagged as duplicates, even with a clean session. That could execute
+    a command long after the API answered, or twice.
+  - A QoS 1 broker acknowledgement would prove only broker receipt, not HeishaMon delivery,
+    because HeishaMon subscribes at QoS 0.
+- **Frozen transport:**
+  - QoS 0, `retain=false`, publish only while the MQTT adapter is connected.
+  - One validated request makes exactly one `publish()` call or none.
+  - Nothing is queued, retried or replayed after a disconnect, reconnect or restart.
+  - Publishing uses the existing shared paho client and connection (one process, one client id).
+    `publish()` is thread-safe. Accepted by the owner.
+- **Control/recorder boundary (frozen):**
+  - The pure control domain and definitions never import or call `Recorder`.
+  - The API/runtime layer obtains the existing immutable live-readings observation through the
+    already-existing live path, the same observation `/live?include=readings` uses. It passes
+    those facts into control validation and readback evaluation.
+  - Control never changes recorder state, the waiting or protected queues, history or
+    persistence. It never calls storage, history or aggregation code.
+  - The recorder never depends on control, and a control failure cannot affect ingest.
+  - 4E-A introduces no new live-state abstraction and no refactor.
+- **Command echoes.** Pompa Next subscribes to `{prefix}/#`. Its own command publications, and
+  HA's (including HA-retained command topics), therefore reach ingest as uncatalogued topics. They
+  carry no source life, are not readings and never confirm a command. Stage 4E adds only a generic
+  physical-readings reset generation to ingest, without changing its source or history semantics.
+
+#### 25.5.5 Complete command inventory and control definitions
+
+**Counts.** 62 upstream command names total = 48 heat-pump commands + 14 Optional PCB commands.
+Pompa Next defines 63 semantic controls = 51 heat-pump controls + 12 Optional PCB controls,
+because `SetCurves` becomes four curve controls and two Optional PCB commands have no validated
+meaning and are not exposed. `SetOptPCBByte9` is a raw byte that upstream documents only as "?".
+`SetHeatCoolMode` is a known catalog command whose bit polarity is undocumented (§25.5.14 O4). The
+following are not heat-pump commands and are out of scope:
+
+- `SendRawValue` (raw serial bytes);
+- `gpio/…` relays;
+- OpenTherm topics;
+- the HeishaMon HTTP `/command` interface;
+- HeishaMon reboot and settings.
+
+**One definition per control.** A 4E-B definition module is the single owner of:
+
+- the stable semantic `key`;
+- the Stage 4A capability `identity`;
+- the upstream name (and so the topic);
+- the class;
+- the value schema, validation and payload encoding;
+- the readback identity and its mapping;
+- documented prerequisites and restrictions.
+
+Nothing is duplicated in API, MQTT, frontend or test code. Tests derive from these definitions and
+check them against the tracked references: every tracked command is defined or explicitly excluded.
+
+**Identities.** Heat-pump controls reference the existing SET identities. Optional PCB commands
+have no upstream IDs. 4E-B adds them to the capability catalog with the family `PCB` and the
+upstream command name as identity (for example `SetSmartGridMode`). This is resolved in 4E-B.
+The name cannot match the `TOP|OPT|SET|XTOP<n>` grammar, is deterministic across restarts, is not
+a display string, and is the only representation. No numeric PCB id is invented.
+
+**Keys and values.** Keys and enum ids are language-neutral snake_case identifiers. Units are
+symbols (`°C`, `K`, `min`, `%`, `duty`). HA labels and legacy Polish labels are not identities, and
+the backend carries no display strings. Numeric heat-pump values are integers only, because the
+firmware truncates. PCB temperatures are finite numbers in −78..120 °C, the range firmware
+`temp2hex()` converts without clamping. The resulting NTC byte quantizes non-uniformly (about
+0.3 °C to 11 °C per step; −78 °C itself encodes as `0xFE`), so no step is claimed.
+
+**Classes.** Five classes, derived from firmware behavior:
+
+- `setting`: an absolute value that persists until changed. Idempotent. It has a state readback
+  where one exists; SET14 `pump_service_mode` has none.
+- `temporary`: an absolute state request that the heat pump ends by itself. Re-sending while active
+  is harmless; re-sending after it ended starts it again.
+- `trigger`: only "start" is meaningful, because firmware encodes `0` as "no change". Not
+  idempotent: every request triggers again.
+- `curve`: a structured `SetCurves` partial update.
+- `pcb_input`: a held Optional PCB emulated input with no readback.
+
+A separate `service` fact marks commands that upstream describes as service mode or menu, forced
+routines, emergency heater or fault reset. It is not a safety verdict and is not enforced.
+
+Legend for the tables below. **Owner:** `U` = actively used; `U*` = used through an HA entity whose
+writes cannot reach the firmware; `T` = disabled in HA, manually enabled, reported working;
+`–` = no owner HA-write evidence. The owner may still use a physical setting outside HA.
+**HA:** `on`/`off` = entity enabled/disabled by default; `none` = no HA write entity. Readback `=`
+means the readable TOP value equals the encoded value.
+
+| Key | Upstream | Class | Value → payload | Readback | Prerequisites / notes | Owner | HA |
+|---|---|---|---|---|---|---|---|
+| `heat_pump_power` | SET1 `SetHeatpump` | setting | bool → `0`/`1` | TOP0 = | — | U | on |
+| `holiday_mode` | SET2 `SetHolidayMode` | setting | bool | TOP19: off `0`; on `1` or `2` | — | U | on |
+| `quiet_mode` | SET3 `SetQuietMode` | setting | `off`,`level_1`,`level_2`,`level_3` → `0`–`3` | TOP18 = | HA-only `4` excluded | U | on |
+| `powerful_mode` | SET4 `SetPowerfulMode` | temporary | `off`,`min_30`,`min_60`,`min_90` → `0`–`3` | TOP17 = | ends by itself | U | on |
+| `zone1_heat_request` | SET5 | setting | int; TOP76=`0`: shift −5..5 K; `1`: direct 20..127 °C (max = protocol bound) | TOP27 = | range needs TOP76; device maximum undocumented; restriction `documented_direct_temperature_water_mode_only` (§25.5.7) | U | on |
+| `zone1_cool_request` | SET6 | setting | int; TOP81=`0`: shift −5..5 K; `1`: direct 5..20 °C | TOP28 = | range needs TOP81; direct range from the TOP28/TOP35 text (the SET6/SET8 rows repeat "20 to max"); restriction `documented_direct_temperature_water_mode_only` (§25.5.7) | T | off |
+| `zone2_heat_request` | SET7 | setting | as `zone1_heat_request` | TOP34 = | TOP76; restriction `documented_direct_temperature_water_mode_only` (§25.5.7) | U | on |
+| `zone2_cool_request` | SET8 | setting | as `zone1_cool_request` | TOP35 = | TOP81; restriction `documented_direct_temperature_water_mode_only` (§25.5.7) | T | off |
+| `operation_mode` | SET9 | setting | `heat`,`cool`,`auto`,`dhw`,`heat_dhw`,`cool_dhw`,`auto_dhw` → `0`–`6` | TOP4: `auto`→{2,7}, `auto_dhw`→{6,8}, else = | — | U | on |
+| `force_dhw` | SET10 | temporary | bool | TOP2 = | effective only if TOP4 ∈ {3,4,5,6,8}; `false` deasserts the force request and does not stop a running DHW cycle | U | on |
+| `dhw_target_temperature` | SET11 | setting | int 40..75 °C | TOP9 = | HA offers 40..65 | U | on |
+| `force_defrost` | SET12 | trigger, service | trigger → `1` | effect TOP26=1 | — | U | on |
+| `force_sterilization` | SET13 | trigger, service | trigger → `1` | effect TOP69=1 | — | U | on |
+| `pump_service_mode` | SET14 `SetPump` | setting, service | bool | none | service mode, max speed | – | none |
+| `max_pump_duty` | SET15 | setting, service | int 64..254 `duty` | TOP95 = | service-menu value | U | on |
+| `zone1_heat_curve` | SET16 `SetCurves` | curve | §25.5.11 → `zone1.heat` | TOP29–TOP32 | fields −127..127 °C (protocol bound) | U | on |
+| `zone1_cool_curve` | SET16 | curve | → `zone1.cool` | TOP72–TOP75 | fields −127..127 °C (protocol bound) | T | off |
+| `zone2_heat_curve` | SET16 | curve | → `zone2.heat` | TOP82–TOP85 | fields −127..127 °C (protocol bound) | U | on |
+| `zone2_cool_curve` | SET16 | curve | → `zone2.cool` | TOP86–TOP89 | fields −127..127 °C (protocol bound) | T | off |
+| `active_zones` | SET17 `SetZones` | setting | `zone1`,`zone2`,`zone1_zone2` → `0`–`2` | TOP94 = | — | U | on |
+| `heat_delta` | SET18 `SetFloorHeatDelta` | setting | int 1..15 K | TOP23 = | — | U | on |
+| `cool_delta` | SET19 `SetFloorCoolDelta` | setting | int 1..15 K | TOP24 = | — | T | off |
+| `dhw_heat_delta` | SET20 | setting | int −12..−2 K | TOP22 = | — | U | on |
+| `heater_delay_time` | SET21 | setting | int 0..254 `min` (protocol bound) | TOP96 = | MQTT-Topics "only J-series" vs ProtocolByteDecrypt "J/K/L"; snapshot 20 | T | off |
+| `heater_start_delta` | SET22 | setting | int −127..127 K (protocol bound) | TOP97 = | J-only vs J/K/L docs; snapshot −4 | T | off |
+| `heater_stop_delta` | SET23 | setting | int −127..127 K (protocol bound) | TOP98 = | J-only vs J/K/L docs; snapshot −1 | T | off |
+| `main_schedule` | SET24 | setting | bool | TOP13 = | — | U | on |
+| `alt_external_sensor` | SET25 | setting | bool | TOP108 = | — | U | on |
+| `external_pad_heater` | SET26 | setting | `disabled`,`type_a`,`type_b` → `0`–`2` | TOP114 = | — | U | on |
+| `buffer_delta` | SET27 | setting | int 0..10 K | TOP113 = | — | – | off |
+| `buffer_installed` | SET28 `SetBuffer` | setting | bool | TOP99 = | — | U | on |
+| `heating_off_outdoor_temperature` | SET29 `SetHeatingOffOutdoorTemp` | setting | int 5..35 °C | TOP77 = | HA name: heating cutoff | U | on |
+| `external_control` | SET30 | setting | bool | TOP119 = | — | T | off |
+| `external_error_signal` | SET31 `SetExternalError` | setting | bool | TOP121 = | — | T | off |
+| `external_compressor_control` | SET32 | setting | bool | TOP122 = | TOP122 doc: optional-PCB setting | T | off |
+| `external_heat_cool_control` | SET33 | setting | bool | TOP120 = | TOP120 doc: optional-PCB setting | T | off |
+| `bivalent_control` | SET34 | setting | bool | TOP129 = | — | U | on |
+| `bivalent_mode` | SET35 | setting | `alternative`,`parallel`,`advanced_parallel` → `0`–`2` | TOP130 = | — | U | on |
+| `bivalent_start_temperature` | SET36 | setting | int −15..35 °C | TOP131 = | HA publishes it retained | U | on |
+| `bivalent_advanced_start_temperature` | SET37 `SetBivalentAPStartTemp` | setting | int −15..35 °C | TOP134 = | HA topic name wrong | U* | on |
+| `bivalent_advanced_stop_temperature` | SET38 `SetBivalentAPStopTemp` | setting | int −15..35 °C | TOP135 = | HA topic name wrong | U* | on |
+| `heating_control` | SET39 | setting | `comfort`,`efficiency` → `0`/`1` | TOP139 = | — | U | on |
+| `smart_dhw` | SET40 | setting | `variable`,`standard` → `0`/`1` | TOP140 = | — | U | on |
+| `quiet_mode_priority` | SET41 | setting | `sound`,`capacity` → `0`/`1` | TOP141 = | — | U | on |
+| `pump_flowrate_mode` | SET42 | setting | `delta_t`,`max_duty` → `0`/`1` | TOP106 = | TOP106 "J-series only" vs ProtocolByteDecrypt "J/K/L" | U | on |
+| `dhw_sensor_selection` | SET43 | setting | `top`,`center` → `0`/`1` | TOP143 = | doc: K/L All-In-One only | – | off |
+| `dhw_heater_allowed` | SET44 `SetDHWHeaterState` | setting | `blocked`,`free` → `0`/`1` | TOP58 = | — | U | on |
+| `room_heater_allowed` | SET45 `SetRoomHeaterState` | setting | `blocked`,`free` → `0`/`1` | TOP59 = | — | U | on |
+| `heater_on_outdoor_temperature` | SET46 `SetHeaterOnOutdoorTemp` | setting | int −15..20 °C | TOP78 = | TOP78: outdoor threshold below which the backup heater is allowed; HA: TOP78 is read-only | – | none |
+| `force_heater` | SET47 `SetForceHeater` | setting, service | bool | TOP68 = | firmware ≥ v4.2.0 | U | on |
+| `fault_reset` | SET48 `SetReset` | trigger, service | trigger → `1` | none (TOP44 related) | — | – | on |
+
+Optional PCB controls. All are class `pcb_input`, have no readback, and share these
+prerequisites: HeishaMon Optional PCB emulation enabled (not observable over MQTT), and the heat
+pump's Optional PCB setting TOP110 = `1` (observable).
+
+| Key | Upstream | Value → payload | Notes | Owner | HA |
+|---|---|---|---|---|---|
+| `pcb_compressor_switch` | `SetCompressorState` | bool | prerequisite TOP122 = `1` (SET32 on); effect also needs a main-PCB DIP switch (HA source) | T | off |
+| `pcb_smart_grid_mode` | `SetSmartGridMode` | `normal`,`capacity_1`,`hp_dhw_off`,`capacity_2` → `0`–`3` | — | T | off |
+| `pcb_thermostat1_demand` | `SetExternalThermostat1State` | `none`,`cool`,`heat`,`heat_cool` → `0`–`3` | doc: H/J series only | – | none |
+| `pcb_thermostat2_demand` | `SetExternalThermostat2State` | as thermostat 1 | — | – | none |
+| `pcb_demand_control` | `SetDemandControl` | percent ∈ {5,25,50,75,100} → `43`,`82`,`133`,`184`,`235` | documented table points only; the firmware default byte 0xEB confirms 100 % | T | off |
+| `pcb_pool_temperature` | `SetPoolTemp` | number −78..120 °C | — | – | none |
+| `pcb_buffer_temperature` | `SetBufferTemp` | number −78..120 °C | doc: H/J series only | – | none |
+| `pcb_zone1_room_temperature` | `SetZ1RoomTemp` | number −78..120 °C | doc: H/J series only | – | none |
+| `pcb_zone1_water_temperature` | `SetZ1WaterTemp` | number −78..120 °C | — | – | none |
+| `pcb_zone2_room_temperature` | `SetZ2RoomTemp` | number −78..120 °C | — | – | none |
+| `pcb_zone2_water_temperature` | `SetZ2WaterTemp` | number −78..120 °C | — | – | none |
+| `pcb_solar_temperature` | `SetSolarTemp` | number −78..120 °C | — | – | none |
+
+`SetHeatCoolMode` (bit 7 of byte 06, "Heat/Cool SW") stays a known `PCB` catalog capability but
+is not a control: no pinned source says which bit value selects heat or cool (§25.5.14 O4).
+
+**Ranges.** They come from the upstream reference, where the tracked and upstream text agree.
+
+**Value questions.** 4E-B resolved all of them from evidence (§25.5.14). Where upstream documents no
+range, the control accepts exactly the encodable protocol range and reports `range_basis:
+"protocol"`. It never adopts a Home Assistant or integration-example range as protocol truth.
+
+#### 25.5.6 Owner K-series evidence and legacy
+
+**Device.** The owner snapshot identifies the unit only by TOP92 bytes
+`E2 D5 0B 08 95 02 D6 0F 68 95`. Neither the upstream nor the HA model table lists them; the
+nearest entries are split K-series units. The snapshot shows these settings:
+
+| Reading | Value |
+|---|---|
+| TOP110 (Optional PCB) | `0` |
+| TOP76, TOP81 (heating/cooling mode) | `0` (compensation curve) |
+| TOP94 (active zones) | `0` (zone 1) |
+| TOP96–TOP98 (heater delay/start/stop, documented J-series only) | 20 / −4 / −1 |
+| TOP143 (DHW sensor, documented All-In-One only) | `0` |
+
+**Genuinely unknown until CT109 or the owner resolves it:**
+
+- whether SET21–SET23, SET42 and SET43 change anything on this unit;
+- the HeishaMon firmware version (SET47 needs ≥ v4.2.0; it is readable from the retained
+  `{prefix}/stats` JSON, which Pompa Next does not parse);
+- whether HeishaMon Optional PCB emulation is on;
+- the physical effect of every PCB input. With TOP110 = `0` at snapshot time, upstream says they
+  have no effect. The owner's "works" in HA is HA's retained echo.
+
+**Proven inapplicable:** nothing. Undocumented values (HA's `7`/`8` operating modes, quiet `4`)
+are not commands. `SetOptPCBByte9` and `SetHeatCoolMode` are excluded because their value
+meaning is unknown, not because they are inapplicable.
+
+**Legacy product evidence.** Legacy never published a command. It exposed a read-only "disabled
+future" projection of ten control candidates: DHW temperature and delta, heat delta, Z1 heat
+request, quiet mode, heating-off outdoor temperature, Force DHW, Force Defrost, operation mode and
+heat-pump power.
+
+- **Useful product evidence:**
+  - the grouping DHW / heating / operation mode / advanced / service;
+  - the idea that a small everyday subset is shown prominently while the complete catalog remains
+    available;
+  - a confirmation step for high-impact actions, as a frontend concern.
+- **Legacy implementation debt, not adopted:**
+  - hand-assigned `safe/medium/high` risk verdicts with speculative rationales;
+  - a capability-catalog-driven mutation guard;
+  - read-only safety flags in the API.
+- **Not available from legacy:** command history, readback or acknowledgement experience, and
+  device discoveries. Legacy never wrote.
+
+#### 25.5.7 Applicability and executability
+
+`known` means defined in §25.5.5. At request time the API/runtime layer takes the existing live
+observation, the same one `/live?include=readings` uses, and passes it to the pure control domain.
+The control domain evaluates three observable facts from it (boundary: §25.5.4):
+
+1. **MQTT connected.** Required to publish.
+2. **Documented prerequisites with an observable state:**
+   - PCB controls need TOP110 = `1`;
+   - `force_dhw` needs TOP4 ∈ {3,4,5,6,8}, for both values (owner decision, §25.5.14).
+
+   A live reading of a documented state that proves the prerequisite false makes the control
+   non-executable (`409`). An absent, stale or retained reading, the documented unknown value `-1`,
+   or any other undocumented value (for example TOP110 = `2`), leaves it `unknown`:
+   the request proceeds, and the response reports the fact. `pcb_compressor_switch` also needs
+   TOP122 = `1`: external compressor control on, per the HA source comment and TOP122's
+   optional-PCB description.
+3. **Validation context.** Request temperatures need a live TOP76 (heat) or TOP81 (cool) reading
+   to choose the shift or direct range. Without one, the request is refused (`409`), because the
+   same number means different things in the two modes.
+
+Documented restrictions whose state cannot be observed reliably are reported as facts and never
+enforced: J-series only, All-In-One only, H/J only, firmware version, HeishaMon emulation, and the
+water-sensor-mode note on direct request temperatures (below).
+
+**Direct request temperature and zone sensor mode (owner decision, §25.5.14 F8).** Upstream
+`MQTT-Topics.md` says that in water sensor mode with direct temperature the request-temperature
+commands (SET5–SET8) set the absolute target. In internal/external thermostat or thermistor mode,
+the direct temperature is stored in the curve's high target and is changed through `SetCurves`.
+Upstream itself adds that newer heat-pump types may behave differently. The four request controls
+therefore carry the static restriction `documented_direct_temperature_water_mode_only`. It
+concerns the direct-temperature branch, not the command as a whole. It is metadata only: it is
+never a prerequisite or validation context, never produces a `409`, and never infers the
+installed model. The zone sensor-settings readings (TOP111/TOP112) are not read for it. Their
+zone names differ between the documented table and the firmware; the Stage 4A handling of that
+discrepancy is unchanged. There
+is no fake device, series or firmware detection.
+
+#### 25.5.8 Readback and confirmation
+
+A request's facts are kept separate:
+
+1. **Validation.** `400`/`404`/`409`/`422`, and nothing is published.
+2. **Publish attempted.** Only while connected; otherwise `503` and nothing is published.
+3. **Client accepted.** paho returns `MQTT_ERR_SUCCESS` (`publish.status = "sent"`). This proves
+   neither broker receipt nor HeishaMon delivery. Any other return code means nothing was sent:
+   `503`.
+4. **Readback.** Only for definitions with a readback. The backend polls the same in-memory
+   live-readings observation for up to `W` seconds. Only `mode="live"` readings count, never
+   retained ones. Outcomes:
+   - `unchanged_match` takes precedence when the whole requested state matched in the baseline
+     and no contradiction or relevant continuity loss was observed during the full window.
+     Same-value periodic re-publications do not change this outcome.
+   - Otherwise `matched` requires qualifying post-publish expected evidence for every requested
+     field (or the expected effect state). For a whole baseline match, a contradicted field needs
+     a later expected receipt.
+   - Otherwise `not_observed` reports the last observed live reading. It is a fact, not a failure.
+   - `not_applicable`: the definition has no readback, so it does not wait.
+   The exact baseline receipt always remains pre-publish, regardless of wall-clock corrections.
+   Disconnect, LWT Offline and normal clock-step invalidation break continuity and discard earlier
+   matches; later genuinely live post-publish evidence can qualify again. These rules apply to
+   scalar, effect and partial curve readbacks alike, using only requested fields.
+5. **Physical execution.** Never claimed. A matching TOP is the heat pump's reported state, not
+   proof of physical actuation.
+
+**Readback strength.** A script over the pinned firmware compared each encoder's written protocol
+byte with the byte decoded for its readback TOP:
+
+- All 43 `setting`/`temporary` pairs with a readback TOP write and decode the same byte. These are
+  true state readbacks. The curve fields have the same property.
+- `force_defrost` and `force_sterilization` write byte 8. TOP26/TOP69 decode bytes 111/117.
+  These TOPs are resulting machine states, not acknowledgements (readback kind `effect`).
+
+`W` is one backend constant, provisionally 15 s: above two default HeishaMon query intervals plus
+command queuing. The final `W` stays **(O)** until 4E-D measures the real latency on CT109. A
+configuration setting is added only if that measurement requires one. The request thread waits synchronously. There is no background
+task, job or command store. Trigger effects (TOP26/TOP69) may begin after the window.
+`not_observed` states only that the effect was not observed within the window.
+
+#### 25.5.9 Retry and idempotency
+
+- **One validated API request → at most one publish.** Proved by the transport (§25.5.4): QoS 0,
+  no retain, no paho queue.
+- **No backend retry.** The backend never retries, replays or reconciles. Disconnect → `503`,
+  never queued. Reconnect → nothing re-published. Backend restart → no pending command exists.
+- **Client retries.** `POST` is not idempotent for triggers and re-arms temporaries. Clients must
+  not retry a `POST` automatically. After a lost HTTP response, they read `GET /api/v1/controls`.
+  Re-issuing a setting is safe by definition; re-issuing a trigger is a new trigger.
+- **One in-flight request per key.** A second request for the same key while the first is within
+  its window returns `409 command_in_progress`. Other keys proceed. This is one in-memory set, not
+  a queue.
+- **HA coexists on the same broker.** Its retained commands and its automatic retries can override
+  Pompa Next writes. This is an operational issue owned by the external writer, not something
+  Pompa Next handles (frozen owner decision). Pompa Next never publishes retained commands, and it
+  never fights, reconciles or automatically clears retained topics. CT109 validation audits
+  retained `commands/#` topics before any write. Any cleanup is an explicit owner-approved
+  operational action.
+
+**External writers and state synchronization (frozen).**
+
+- **Ordinary controls with a TOP readback.** Pompa Next keeps no private desired-state copy.
+  - HA, the heat-pump panel or another writer may change a setting.
+  - HeishaMon then publishes the corresponding TOP, and the ordinary MQTT live-readings path
+    updates `GET /api/v1/controls`.
+  - HA coexistence therefore cannot make Pompa Next state stale.
+- **Retained HA commands.** A retained HA command can be replayed after a HeishaMon reconnect and
+  physically revert a Pompa Next write. When the corresponding TOP changes, Pompa Next observes and
+  reports the reverted state. There is no reconciliation.
+- **Optional PCB is the explicit exception.** Upstream publishes no readback of the emulated
+  inputs. Pompa Next reports no physical state for `pcb_input` controls. It never treats HA's
+  retained command echo, or any other `commands/…` topic, as physical state.
+
+#### 25.5.10 Persistence — NO COMMAND PERSISTENCE
+
+This is a frozen owner decision. No table, no command history and no pending-command recovery:
+
+- A pending command cannot survive restart meaningfully, because QoS 0 has already delivered it or
+  lost it.
+- The current device state is always re-readable from `/api/v1/controls` and `/live`.
+- Readback is bound to its own request window.
+- Neither legacy nor any owner workflow shows a use for command history.
+
+Each request writes one structured log line: key, requested value, publish result, readback outcome
+and elapsed time. That is the operational record.
+
+#### 25.5.11 Curve model
+
+- **Four controls.** `zone{1,2}_{heat,cool}_curve`. The value is a partial object of integer °C
+  fields `target_high`, `target_low`, `outside_high` and `outside_low`, with at least one field
+  and no unknown fields.
+- **Field meaning.** The TOP names give it, not the tracked descriptions: the descriptions of
+  TOP31/TOP32 and TOP84/TOP85 are swapped relative to their names. The owner snapshot is
+  consistent with the names (`target_high` 32 °C at `outside_low` −15 °C). For heating:
+  - `target_high` is the water target at the curve's lowest-outside point (`outside_low`);
+  - `target_low` is the water target at the curve's highest-outside point (`outside_high`).
+  - Cooling follows its own TOP names.
+- **Encoding.** The backend encodes only the given fields, as
+  `{"zoneN":{"heat|cool":{"target|outside":{"high|low":v}}}}`. The firmware leaves omitted
+  bytes unchanged. Unrestricted raw JSON is never accepted.
+- **Invariants.** No cross-field invariant is documented upstream, and none is enforced (resolved
+  in 4E-B). An ordering such as `outside_low < outside_high` would be HVAC policy, not protocol
+  validation.
+- **Readback.** Each field maps to its own TOP. The firmware writes and decodes the same protocol
+  byte:
+
+  | Field | zone1 heat | zone1 cool | zone2 heat | zone2 cool |
+  |---|---|---|---|---|
+  | `target_high` | TOP29 | TOP72 | TOP82 | TOP86 |
+  | `target_low` | TOP30 | TOP73 | TOP83 | TOP87 |
+  | `outside_high` | TOP31 | TOP74 | TOP84 | TOP88 |
+  | `outside_low` | TOP32 | TOP75 | TOP85 | TOP89 |
+- **Thermostat and thermistor modes.** Upstream notes that in these modes the direct room
+  temperature is stored in the curve's `target_high`, so it is set through the curve control.
+
+#### 25.5.12 Final control API (frozen in 4E-A, implemented in 4E-C)
+
+- `GET /api/v1/controls` returns every control definition with its current readback state,
+  prerequisites and executability, from one live observation without database I/O.
+- `POST /api/v1/controls/{key}` validates, encodes, publishes at most once and returns the factual
+  publish and readback result.
+
+There is no generic MQTT publish, raw payload, per-panel endpoint or command history. The exact
+shapes and errors are in `docs/API.md`.
+
+**Complete backend gap audit.** After Stage 4E control, the planned Stage 5 views map to existing
+resources:
+
+| Stage 5 view | Resource |
+|---|---|
+| Teraz | `/live`, `/activity/live` |
+| Historia | `/history` |
+| Statystyki | `/report` |
+| Cykle | `/activity` |
+| Status | `/status`, `/health` |
+| Capabilities and settings | `/metrics?include=…`, optional-history resources |
+| Sterowanie | `/controls` |
+
+Control is the only missing backend area. These are deliberately not added:
+
+- a HeishaMon version or `stats` resource;
+- a model-name table for TOP92;
+- semantic enums for read-only TOPs without a control;
+- command history;
+- any convenience or aggregate resource.
+
+A Stage 5 need for any of these requires new evidence. Accepted APIs are unchanged; 4E adds only the
+`/controls` resources and, in 4E-B, the additive SET47/SET48/PCB capability identities.
+
+#### 25.5.13 Remaining Stage 4E checkpoints
+
+| Checkpoint | Scope | Likely files | Gate |
+|---|---|---|---|
+| **4E-B** pure control domain + reference refresh (OWNER ACCEPTED/CLOSED, §25.5.14) | Refresh tracked `MQTT-Topics.md` (SET47/48) and add `OptionalPCB.md` verbatim at the pinned upstream commit. Extend the parser with the `PCB` family. Add the pure definition module: validation, encoding, readback mapping, prerequisite and context evaluation from a readings snapshot. No MQTT, no API. | `docs/reference/heishamon/*`, `pompa/capabilities.py`, new `pompa/control.py`, capability and control tests | Golden encoding table per command against the firmware encoders; boundary, enum and type rejection; readback mapping; curve JSON; definition ↔ reference coverage; updated capability counts. Adversarial review of definitions vs firmware source. No CT109. Owner gate resolves every open value, identity and invariant question (§25.5.2, §25.5.5, §25.5.11) before the executable definitions are frozen. |
+| **4E-C** publish path + API (OWNER ACCEPTED/CLOSED, §25.5.15) | Connected-only QoS 0 non-retained `publish` on the MQTT adapter; per-key in-flight guard; bounded readback observation; `GET`/`POST /api/v1/controls`; one log line per request | `pompa/mqtt.py`, `pompa/control.py` (or a small runtime module), `pompa/api.py`, `pompa/main.py`, tests | Fake-client tests: no publish on any refusal; exactly one publish per accepted request; disconnected `503`; no retry after reconnect; every readback outcome with an injected clock; `409` paths; recorder, history and report unaffected; earlier endpoints byte-identical. Adversarial review. No CT109. |
+| **4E-D** CT109 validation, API freeze, closeout (CURRENT) | Owner deploys; pre-checks; owner-approved write matrix in the validation contract; latency measurement fixes `W`; `docs/API.md` final freeze; whole-stage adversarial review; owner merge; Stage 4 DONE; Stage 5 ready | docs, `scripts/smoke.sh` only if needed | CT109 evidence accepted by the owner; review findings resolved; merge decision |
+
+**Stage 4E-D validation procedure.** The authoritative phase, gate, candidate, restore and
+measurement contract is [`STAGE_4E_D_VALIDATION.md`](STAGE_4E_D_VALIDATION.md). 4E-D-A is
+OWNER ACCEPTED/CLOSED at plan revision `f7bac4741d06b4328f99b660c1cbd74af7943922`.
+4E-D-B has prepared an untracked owner runbook/evidence template; CT109 validation is NOT STARTED.
+The initial owner execution covers Phase 0/1 only, then evidence review before any writes.
+The accepted 4E-C implementation candidate remains
+`fa4d49e233927210260595143a0de01f12f05399`.
+
+The procedure retains the original sample sets: ten safe reversible candidates and seven
+state-changing but restorable candidates, with all 63 definitions explicitly classified. It uses
+observed original/schema/context facts and bounded alternate selection instead of assumed live
+values. Service/disruptive and Optional PCB controls are excluded from real execution. The
+classification is a validation procedure, not new API safety policy.
+
+Deployment and read-only evidence require owner acceptance before the first write. Every change
+and restore is deliberate; operation_mode has a dedicated gate. Retained HA commands are audited,
+never automatically cleared. TOP44/activity are watched before, after and after restore. A
+not_observed result stops new writes; the optional 60-second total extension is passive evidence
+only, never another publish or a changed API response. Equal-value unchanged_match probes wait
+full W and do not count as latency samples. Final W, final API freeze and Stage 4 closure remain
+pending real evidence, independent reviews and the owner merge decision.
+
+#### 25.5.14 Checkpoint 4E-B — reference refresh and pure control domain
+
+**OWNER ACCEPTED/CLOSED.** There is no MQTT publish, control route, readback wait, in-flight
+guard, request logging, schema or storage change.
+
+**Owner decisions on the independent review.**
+
+- **F7 — Force DHW (no behavior change).** The TOP4 prerequisite applies to `force_dhw=true` and
+  `false` alike; executability stays per control. Owner K-series evidence: `true` immediately
+  starts or prioritizes a DHW run and TOP2 turns on. A later `false` clears the Force DHW request
+  state, but a DHW cycle already running is not aborted; the heat pump finishes it under its
+  ordinary DHW logic. `force_dhw=false` therefore means "deassert the force request", never
+  "stop or cancel DHW". This is one installation's evidence, not a claim about every series. The
+  control stays `temporary` with TOP2 state readback.
+- **F8 — direct request temperature (informational restriction).** SET5–SET8 carry
+  `documented_direct_temperature_water_mode_only`, never enforced (§25.5.7).
+
+**Reference and catalog.**
+
+- `MQTT-Topics.md` and `OptionalPCB.md` are verbatim copies at `heishamon/HeishaMon@0de4f3c`;
+  `PROVENANCE.md` records their blob ids. The backend image packages `OptionalPCB.md` too.
+- `pompa/capabilities.py` changes:
+  - it parses the PCB set-command table (family `PCB`, identity = upstream name, document order);
+  - it cross-checks the documented XTOP table against the observed identities and verified topics
+    (XTOP provenance stays `observed`);
+  - it has one `Capability.readable` definition, which ingest also uses. SET and PCB command topics
+    therefore never become physical readings: a `commands/…` echo, including HA's retained PCB
+    commands, stays an uncatalogued topic.
+- The catalog now holds 218 entries (TOP 144, OPT 7, SET 48, PCB 13, XTOP 6). The 157 readable
+  slots are unchanged.
+
+**Control domain (`pompa/control.py`).**
+
+- **Definitions.** 63 definitions (51 heat-pump, 12 Optional PCB). They are verified at load
+  against the catalog: identity, family, upstream name, and readable readback, context and
+  prerequisite TOPs. Every catalog command is defined or explicitly excluded, and no excluded
+  command is defined. The exclusions are `SetHeatCoolMode` (in the catalog) and the firmware-only
+  `SetOptPCBByte9`.
+- **`prepare(key, value, facts)`** returns the catalog topic, the exact payload, the validated
+  value, the expected readback semantic and the evaluated prerequisites. Otherwise it raises
+  `unknown_control`, `invalid_request`, `validation_context_unavailable`, `invalid_value` or
+  `prerequisite_not_met`, in that order.
+- **Input facts** are `ReadingFact(raw, mode, available)` values, the `/live?include=readings`
+  entry shape. Only `mode="live"` and `available` facts count as current evidence.
+- **Readback.** `current_state` decodes readbacks. Optional PCB controls have no readback, and
+  command echoes are never state.
+
+**Resolved 4E-B questions (evidence priority: firmware, upstream docs, protocol, HA, snapshot).**
+
+| # | Question | Resolution |
+|---|---|---|
+| O1 | Direct heat request maximum | No upstream source gives it: "20 to max". The integration examples conflict (HA YAML 40, openHAB 65). Accepted 20..127 °C: documented minimum, and the maximum is the `value+128` byte bound (−128 would encode byte 0, "no change"). `range_basis: "protocol"`. The device limit can only be seen through readback. |
+| O2 | Curve ranges | Upstream documents none; the firmware encodes `value+128`. Every field accepts −127..127 °C, `protocol` basis. HA ranges are recorded as secondary evidence only. |
+| O3 | SET21–SET23 ranges | Upstream gives units only. Encoders: delay `value+1` → 0..254 min; start/stop delta `value+128` → −127..127 K; all `protocol` basis. MQTT-Topics says J-series only, but ProtocolByteDecrypt says J/K/L, and the owner K snapshot reports values, so no series restriction is reported. |
+| O4 | `SetHeatCoolMode` polarity | Firmware sets bit 7 of PCB byte 06 to `toInt()==1`. OptionalPCB.md says only "1st bit = Heat/Cool" ("Heat/Cool SW"); no pinned source, upstream history or HA entity documents which value selects heat or cool, or even which switch contact state a bit value means. A boolean would publish a raw bit whose physical meaning is a heat/cool choice nobody can state. Not a control: the command stays a known `PCB` capability, excluded with a reason until polarity evidence exists. |
+| O5 | Demand Control mapping | The firmware writes the raw `toInt()` byte, and its default datagram byte 14 is 0xEB. The OptionalPCB.md table (2B/52/85/B8/EB = 5/25/50/75/100 %) matches that default. The range text ("234") and HA's linear formula do not. Frozen: only the five documented points, mapped to `43`/`82`/`133`/`184`/`235`. |
+| O6 | Curve invariants | Nothing authoritative exists; none is enforced. |
+| O7 | PCB identity scheme | Family `PCB`, identity = upstream command name. |
+| O8 | Reference refresh timing | Done in 4E-B. Verbatim upstream copies with recorded blob ids are the reference strategy; upstream is never hand-edited here. |
+
+**Protocol-range review (O1–O3).** The independent 4E-B review re-examined each `protocol` range.
+Firmware encodability alone does not prove a device operating range, and no pinned source,
+firmware comment or upstream history narrows these values. A documented subset does not exist,
+an HA or integration-example range would be invented protocol truth, and refusing the controls
+would withdraw documented capability (owner decision: completeness, §25.5). The exposed bound is
+therefore the narrowest truthful executable model. `range_basis: "protocol"` tells clients it is
+not a device limit, and the device's accepted value appears only through readback.
+
+**Other upstream discrepancies found (documentation only; firmware is authoritative).**
+
+- ProtocolByteDecrypt.md labels bytes 80/81/82 as TOP84/TOP83/TOP85 and bytes 67/68 as
+  TOP135/TOP136. The firmware decodes TOP83 from byte 80, TOP85 from byte 81, TOP84 from byte 82,
+  TOP136 from byte 67 and TOP135 from byte 68. That matches the `SetCurves` and
+  `SetBivalentAPStopTemp` encoders.
+- ProtocolByteDecrypt documents quiet "scheduled" as byte-7 pattern `0b10001`. HA's quiet `4`
+  encodes `0b00101`, so it is not that state and stays excluded.
+
+**Independent evidence.** An untracked probe extracted the command tables, `topicBytes` and
+`topicFunctions` from the pinned firmware sources and transcribed every encoder. It then checked:
+
+- that the catalog SET names equal firmware `commands[]` (48);
+- that the catalog PCB names plus the exclusion equal `optionalCommands[]` (14);
+- for 245 sampled requests: payload → firmware encoder → protocol byte → firmware decoder at the
+  readback TOP → readback semantic.
+
+Every sample matched the definition, with no discrepancy. The probe also confirmed:
+
+- every curve field writes only its own byte;
+- trigger payloads write the documented byte-8 values;
+- the PCB enums land on the documented bits;
+- the Demand Control bytes match the table;
+- PCB temperature payloads parse back exactly.
+
+`backend/tests/test_control.py` keeps literal firmware-derived expectations: golden payloads,
+ranges, enums, triggers, curves, contexts, prerequisites and readback maps.
+
+#### 25.5.15 Checkpoint 4E-C — control runtime and API
+
+**OWNER ACCEPTED/CLOSED at `fa4d49e233927210260595143a0de01f12f05399`.**
+No schema, storage, command persistence, retry, replay or
+reconciliation was added. The 63 Stage 4E-B definitions are unchanged.
+
+**Runtime shape (the smallest correct one).**
+
+- `pompa/mqtt.py` — `MqttAdapter.publish_command(topic, payload)` is the only write:
+  - it accepts only an already prepared relative `commands/…` topic and publishes
+    `{prefix}/{topic}` on the existing shared paho client and connection, with QoS 0 and
+    `retain=False`;
+  - it returns `True` only if `is_connected()` held and paho returned `MQTT_ERR_SUCCESS`;
+  - a disconnected client, another return code, or a paho `ValueError`/`OSError` returns
+    `False`;
+  - it never retries, and there is no generic publish.
+- `pompa/recorder.py` gains two generic, control-unaware facilities:
+  - `readings_observation(clock)` is the `/live?include=readings` entries (same serializer, same
+    lock), plus the exact float receipt instants, immutable latest receipt identities, a generic
+    physical-readings reset generation and a change sequence number;
+  - `wait_for_change(seq, timeout)` is a `threading.Condition` on the recorder lock, notified
+    after every applied MQTT event. `Condition.wait` releases the lock, so a waiting request
+    never delays ingest. Recorder and ingest import nothing from control (a test enforces this).
+- `pompa/control_runtime.py` holds everything runtime:
+  - `ControlRuntime.controls()` is the GET projection;
+  - `ControlRuntime.execute()` handles POST coordination, the per-key in-flight guard and the
+    readback observation;
+  - the API maps its `ControlRequestError(code)` to status and `{detail, code}`;
+  - `pompa/control.py` stays pure and remains the only validation, encoding and readback-mapping
+    authority.
+- **Wiring.** `main.py` builds `ControlRuntime(recorder, adapter)` and passes it to
+  `create_app`. Without an injected runtime, the app has no publisher and POST answers `503`.
+- **Limiter.** POST waits run through `anyio.to_thread.run_sync` on a dedicated
+  `CapacityLimiter` (63 tokens, one per key), so up to 15 s readback waits never consume the
+  default threadpool tokens that serve every synchronous endpoint.
+
+**POST order.** Every refusal publishes nothing:
+
+1. The body must be one JSON object with only `value`. Duplicate keys at any depth and
+   `NaN`/`Infinity` are `400 invalid_request`.
+2. An unknown key is `404`.
+3. The in-flight guard: `409 command_in_progress`.
+4. `control.prepare()` on one baseline observation: `400`/`409`/`422`.
+5. `publish_command`: a `False` result is `503 mqtt_unavailable`.
+6. An accepted publish is immediately recorded as `sent`. Normal readback returns 200; an
+   unexpected exception may produce 500, but never changes the accepted publish fact or retries.
+
+**Request log line (§25.5.10).** Every POST writes exactly one line, through the shared
+`control_runtime.log_request`.
+
+- Requests that reach the runtime log from its `finally`, including unexpected exceptions.
+- Known refusals log their factual error code. An unexpected pre-acceptance exception logs
+  `publish=error`: acceptance or refusal is not established. Immediately after the publisher
+  returns `True`, the log result becomes `sent` and stays so even if readback later raises.
+- A body refused before validation has no trustworthy value. It is logged by the API with
+  `requested=<invalid_request>`, and the raw body is never logged.
+- A path key that is not an identifier is logged with `repr`, so it stays on one line.
+
+**In-flight guard.**
+
+- It is a set of keys under a `threading.Lock`: the check and the add are one atomic claim.
+- A `finally` releases it on success, validation failure, publish failure, timeout or exception.
+- Different keys never contend, and there is no global lock.
+- It lives in process memory only, so a restart has no pending command.
+
+**Readback evidence.**
+
+- **Qualifying reading.** Only `mode="live"` and `available` readings count.
+- **Baseline identity.** The immutable receipt object already present in the baseline is always
+  pre-publish. A wall-clock correction cannot reclassify it. Other receipts must be timestamped
+  at or after `publish.at` to qualify as post-publish matches; time comparisons can still
+  conservatively under-report new evidence after a backward step.
+- **Whole-request precedence.** If all requested fields matched in the baseline and no
+  contradictory evidence or continuity loss is observed, the outcome is `unchanged_match`
+  after full W, even with repeated same-value publications. Otherwise, every requested field
+  needs qualifying post-publish expected evidence for `matched`, which can return early.
+  For a whole baseline match, a contradicted field needs a later expected receipt. Anything
+  else is `not_observed`.
+- **Curves and effects.** Only requested curve fields participate; they may arrive separately.
+  Mixed baseline curves still match once every requested field has qualifying post evidence,
+  without requiring simultaneous values.
+  An already-active effect repeatedly published true remains `unchanged_match`; an observed
+  false then true transition can match. TOP26/TOP69 are effect readings, not acknowledgements.
+- **Continuity.** Ingest's generic physical-readings reset generation changes on connect,
+  disconnect, LWT Offline and normal clock-step invalidation. Recorder exposes it atomically
+  with the latest immutable receipt objects. A changed generation discards earlier matches and
+  prevents `unchanged_match`; a qualifying new live receipt can match afterward. Observed loss
+  of relevant availability also prevents `unchanged_match`. Neither component knows control
+  keys or expectations, and no event journal or additional receipt history exists.
+- **What is ignored.** Retained, stale, disconnected-epoch and `commands/…` topics never qualify.
+- **Timing and waiting.** W uses `time.monotonic` and recorder change notifications. Waiting
+  releases the recorder lock; wall-clock corrections cannot extend W.
+- **Missed intermediates.** Overwritten intermediate values can prevent a factual match. The
+  old timestamp-only implementation could also falsely claim unchanged after invalidation;
+  the reset generation now prevents that claim even if the intermediate value was missed.
+  No causal claim is made for any matching observation.
+- **No readback.** `not_applicable` returns immediately after publish without entering the wait.
+
+**Why no replay is possible (paho 2.1.0 source).**
+
+- A QoS 0 `publish()` without a socket returns `MQTT_ERR_NO_CONN` and queues nothing.
+- QoS 0 packets never enter `_out_messages`, the store that is resent after reconnect.
+- `reconnect()` clears the unsent packet queue.
+- An accepted packet that the socket never wrote is therefore dropped, not sent later.
+
+**Response details the 4E-A contract left open** (now in `docs/API.md`):
+
+- a curve's `readback` has `identity: null` and a `fields` map;
+- its `state` carries `value` plus per-field reading facts;
+- a `not_applicable` readback has `kind: null` and `waited_seconds: 0.0`;
+- `mqtt.connected` in GET is the ingest connection fact of the same observation. POST checks
+  the adapter's own `is_connected()` at publish time.
+
+**`W`.** `READBACK_WINDOW_SECONDS = 15.0` is a module constant, reported as
+`readback_window_seconds`. Tests inject a short window through the `ControlRuntime` constructor.
+It is not a setting and stays provisional until 4E-D measures CT109 latency.
+
+**Evidence.**
+
+- `backend/tests/test_control_api.py` uses a counting fake publisher and real recorder entry
+  points. It covers:
+  - every error class with zero publishes;
+  - no retry after a paho refusal;
+  - every readback outcome, including external writers, retained/stale/echo readings, curves
+    and effects;
+  - disconnect after publish and reconnect during the window;
+  - same-key, simultaneous and different-key concurrency;
+  - guard release on every path;
+  - no database access;
+  - an unblocked ingest while a request waits;
+  - one log line per request;
+  - adapter QoS 0, `retain=False` and connected-only behavior.
+- Runtime/API/adapter mutations (retry, retained or stale confirmation, guard leak, no guard,
+  extra fields or duplicate keys accepted, QoS 1/retain, publish while disconnected, an extra
+  publish, always-executable) are all killed by these tests.
+- A disposable local Mosquitto probe on CT112 exercised the real adapter end to end: 18/18
+  checks, including exactly one QoS 0 non-retained publication, no retained command for a later
+  subscriber, a retained TOP not confirming after an unclean reconnect, `503` while
+  disconnected, no replay on reconnect, and Optional PCB `not_applicable`.
