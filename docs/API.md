@@ -7,7 +7,7 @@ optional-history policy. Checkpoint C adds internal raw minute recording. Checkp
 persisted optional-series discovery and explicit optional history selectors; default responses
 remain canonical. The owner validated these Stage 4B endpoints on CT109. Stage 4C checkpoint C adds
 one range activity resource and one current activity resource; every earlier response is unchanged.
-Stage 4D-A freezes the future `GET /api/v1/report` contract below; it is not implemented yet.
+Stage 4D-A froze the `GET /api/v1/report` contract below; Stage 4D-C-B implements it.
 
 Domain rules behind it are in [`ARCHITECTURE.md`](ARCHITECTURE.md). This file describes only what
 the HTTP surface promises.
@@ -28,8 +28,7 @@ the HTTP surface promises.
 | `GET /api/v1/activity/live` | Current activity from the in-memory live observation | no | no |
 | `GET /api/v1/report` (Stage 4D-C) | Day/week/month/custom Warsaw calendar report | no | yes |
 
-The application currently exposes the first ten product API endpoints above; the report endpoint
-is a frozen Stage 4D-C addition. FastAPI may additionally
+The application exposes all eleven product API endpoints above. FastAPI may additionally
 expose its standard documentation/OpenAPI routes (`/docs`, `/redoc`, `/openapi.json`). `/api/v1` is
 a fresh namespace, not inherited legacy versioning.
 

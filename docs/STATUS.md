@@ -5,9 +5,9 @@
 **Current stage: Stage 4D — Reports and product analytics projections.** Checkpoint 4D-A's
 contract freeze is owner-accepted. Checkpoint 4D-B's pure report domain and targeted hardening
 are owner accepted and closed at `5de43b88f632a7069a4f579ff7a26302624e2855`.
-Checkpoint 4D-C-A's behavior-preserving history/activity extraction refactor is independently
-reviewed, its sole minor regression-test gap is closed, and owner acceptance is pending.
-4D-C-B report read-model orchestration has not started. Stage 4C is DONE and merged to `main`
+Checkpoint 4D-C-A's behavior-preserving extraction refactor is owner accepted and closed at
+`33b1e0472d818502079bea20fb7034b7cdc1c33c`. Checkpoint 4D-C-B's report read model and API are
+implemented and await owner review. Stage 4D-D has not started. Stage 4C is DONE and merged to `main`
 in PR #8 (merge commit `8c3bccbcf6ba305bbf547c59ef3f6167471442e8`). Its A–D
 checkpoints and whole-PR review are complete. Frontend work starts after Stage 4.
 
@@ -319,8 +319,8 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
 
 ## Out of scope
 
-- Stage 4D-C-B report orchestration, report-specific SQL, HTTP handlers and CT109 deployment in
-  the 4D-C-A extraction checkpoint; frontend throughout Stage 4D.
+- Stage 4D-D runtime/deployment and adversarial closeout in the 4D-C-B checkpoint; frontend
+  throughout Stage 4D.
 - Stage 4E SET/control, Stage 5 frontend, cooling/heater/cost/external-meter analytics and year or
   season reports.
 - Legacy compatibility or historical migration.
@@ -330,7 +330,7 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
 ## Next
 
 Stage 4E — isolated SET/control and final backend API, after Stage 4D. Within Stage 4D, owner
-acceptance of the 4D-C-A refactor precedes 4D-C-B report orchestration; 4D-D follows (§25.4).
+review of the 4D-C-B report read model precedes 4D-D runtime/adversarial closeout (§25.4).
 
 ## Stage 4D checkpoints
 
@@ -358,7 +358,8 @@ acceptance of the 4D-C-A refactor precedes 4D-C-B report orchestration; 4D-D fol
   alongside the literal and deterministic randomized minute oracles. Sixty-five report tests pass;
   focused report/activity/aggregation/timegrid suites: 259 passed. Full no-DB backend: 990 passed,
   278 skipped (MariaDB-gated), one dependency deprecation warning.
-- **4D-C-A — behavior-preserving extraction refactor (independently reviewed; awaiting owner acceptance):**
+- **4D-C-A — behavior-preserving extraction refactor (owner accepted/closed at
+  `33b1e0472d818502079bea20fb7034b7cdc1c33c`):**
   `history.canonical_partials()` loads canonical and requested optional facts inside a caller-owned
   session and folds them over supplied edges with the existing algebra. `activity_history.load_timeline()`
   loads and widens Stage 4C evidence inside that same caller-owned session. The public history and
@@ -369,10 +370,19 @@ acceptance of the 4D-C-A refactor precedes 4D-C-B report orchestration; 4D-D fol
   production behavior was already correct. An HTTP regression with recorded activity starting
   at timestamp 0 now pins `evidence.from` and the first event/run's `outside_evidence` boundary.
   Removing the wrapper's `left_floor=0` argument in scratch makes that regression fail.
-- **4D-C-B — read model + API (not started):** one-snapshot loading, report-local current edge,
-  consistency guard and `/api/v1/report`. Gate: byte-identical `/history` and `/activity`, report API and MariaDB tests,
-  including a concurrency race.
-- **4D-D — runtime/adversarial closeout:** raw/rollup, raw/durable and post-purge equality; DST,
+- **4D-C-B — report read model + API (implemented; awaiting owner review):**
+  `report_read.py` extracts the 13 required canonical series and one widened Stage 4C timeline in
+  the same consistent snapshot, proves recorded-minute equality per UTC hour/partial hour,
+  closes the session and invokes the unchanged pure composer. `GET /api/v1/report` validates the
+  actual parameter multimap, resolves the frozen Warsaw calendar and samples the recorder's
+  settled frontier once before DB I/O. Its opt-in raw activity edge uses only raw minutes below
+  a mid-hour frontier; complete earlier hours retain durable priority. Reports have no Unix-0
+  floor, while `/activity` keeps its accepted floor and source policy. Missing history is ordinary
+  gaps; unavailable detail, corrupt durable evidence and per-hour mismatches fail closed.
+  Integration tests cover calendar forms, knownness, events, current/unacknowledged tails,
+  source/purge equality, errors, bounded range reads and a deterministic two-connection MariaDB
+  snapshot race. Stage 4D-C as a whole is not yet closed.
+- **4D-D — runtime/adversarial closeout (not started):** raw/rollup, raw/durable and post-purge equality; DST,
   F2 current tail, snapshot races, bounded performance, CT109 smoke and whole-PR adversarial
   review. This deployment also first delivers F2. Gate: owner-accepted runtime evidence,
   whole-PR review and owner merge decision.

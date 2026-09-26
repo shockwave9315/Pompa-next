@@ -51,8 +51,9 @@ class ActivityUnavailable(Exception):
 class _Evidence:
     """Hour-by-hour activity evidence loaded from one session."""
 
-    def __init__(self, session: Session, closed_until: int):
+    def __init__(self, session: Session, closed_until: int, *, raw_edge: bool = False):
         self.session, self.closed_until = session, closed_until
+        self.raw_edge_hour = floor_hour(closed_until) if raw_edge and closed_until % HOUR else None
         self.segments: dict[int, list[ActivitySegment]] = {}
         self.unavailable: set[int] = set()
 
@@ -60,7 +61,12 @@ class _Evidence:
         if lo >= hi:
             return
         s = self.session
-        records = s.read_activity_segments(lo, hi)
+        durable_hi = hi if self.raw_edge_hour is None else max(lo, min(hi, self.raw_edge_hour))
+        records = s.read_activity_segments(lo, durable_hi)
+        if self.raw_edge_hour is not None and lo <= self.raw_edge_hour < hi:
+            purged = s.first_purged_hour(self.raw_edge_hour, self.closed_until)
+            if purged is not None:
+                self.unavailable.add(purged)
         durable: dict[int, list[ActivitySegment]] = {}
         for record, segment in zip(records, decode_segments(records), strict=True):
             if segment_record(segment) != tuple(record):
@@ -87,7 +93,7 @@ class _Evidence:
                 self.segments[hour] = durable[hour]
             elif hour in raw:
                 self.segments[hour] = build_segments(raw[hour])
-            elif hour in recorded:
+            elif hour in recorded and hour != self.raw_edge_hour:
                 self.unavailable.add(hour)
 
     def timeline(self, lo: int, end: int):
@@ -133,20 +139,26 @@ class LoadedTimeline:
 
 
 def load_timeline(session: Session, start: int, end: int, closed_until: int,
-                  *, left_floor: int | None = None) -> LoadedTimeline:
+                  *, left_floor: int | None = None, raw_edge: bool = False) -> LoadedTimeline:
     """Load and widen Stage 4C evidence inside the caller's existing snapshot.
 
     ``left_floor`` is the public activity resource's Unix-0 evidence boundary.
     Other callers may examine earlier settled gaps without changing that resource.
+    ``raw_edge`` opts reports into raw evidence below a mid-hour frontier; complete
+    earlier hours retain the normal source priority. The public activity path leaves it off.
     """
     cap = ceil_hour(closed_until)  # no closed minute lies at or beyond it
-    evidence = _Evidence(session, closed_until)
+    evidence = _Evidence(session, closed_until, raw_edge=raw_edge)
     lo = floor_hour(start - MINUTE if left_floor is None else max(left_floor, start - MINUTE))
     hi = max(lo, min(ceil_hour(end + MINUTE), cap))
     evidence.load(lo, hi)
     lost = [h for h in sorted(evidence.unavailable)
             if h < min(end, closed_until) and h + HOUR > start]
     if lost:
+        if lost[0] == evidence.raw_edge_hour:
+            raise Unrepresentable(
+                f"report current edge needs raw activity from {iso_utc(lost[0])}, but its raw"
+                " evidence was purged")
         raise ActivityUnavailable(lost[0])
     step = HOUR
     while True:
