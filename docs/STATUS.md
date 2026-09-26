@@ -6,10 +6,12 @@
 contract freeze is owner-accepted. Checkpoint 4D-B's pure report domain and targeted hardening
 are owner accepted and closed at `5de43b88f632a7069a4f579ff7a26302624e2855`.
 Checkpoint 4D-C-A's behavior-preserving extraction refactor is owner accepted and closed at
-`33b1e0472d818502079bea20fb7034b7cdc1c33c`. Checkpoint 4D-C-B's report read model and API are
-implemented, independently adversarially reviewed and await owner acceptance. Stage 4D-D has not
-started. Stage 4C is DONE and merged to `main`
-in PR #8 (merge commit `8c3bccbcf6ba305bbf547c59ef3f6167471442e8`). Its A–D
+`33b1e0472d818502079bea20fb7034b7cdc1c33c`. Checkpoint 4D-C-B's report read model and API and
+Stage 4D-C as a whole are owner accepted and closed at
+`4b20bdefee451e59b292181e4aa0c75cf9e2bde6`. Stage 4D-D-A CT112 closeout preparation is complete
+and awaits owner review; 4D-D-B CT109 runtime validation and 4D-D-C whole-PR adversarial review
+have not started. Stage 4C is DONE and merged to `main` in PR #8 (merge commit
+`8c3bccbcf6ba305bbf547c59ef3f6167471442e8`). Its A–D
 checkpoints and whole-PR review are complete. Frontend work starts after Stage 4.
 
 The already-reviewed F2 hardening commit `b81d680eecda67e7d2d80facd4b79ba08472c824` is in
@@ -320,8 +322,8 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
 
 ## Out of scope
 
-- Stage 4D-D runtime/deployment and adversarial closeout in the 4D-C-B checkpoint; frontend
-  throughout Stage 4D.
+- CT109 connection/deployment and whole-PR review in the 4D-D-A preparation checkpoint;
+  frontend throughout Stage 4D.
 - Stage 4E SET/control, Stage 5 frontend, cooling/heater/cost/external-meter analytics and year or
   season reports.
 - Legacy compatibility or historical migration.
@@ -331,7 +333,8 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
 ## Next
 
 Stage 4E — isolated SET/control and final backend API, after Stage 4D. Within Stage 4D, owner
-acceptance of the 4D-C-B report read model precedes 4D-D runtime/adversarial closeout (§25.4).
+review of CT112 closeout preparation precedes owner-executed CT109 validation, then whole-PR
+adversarial review and the owner merge decision (§25.4).
 
 ## Stage 4D checkpoints
 
@@ -371,7 +374,8 @@ acceptance of the 4D-C-B report read model precedes 4D-D runtime/adversarial clo
   production behavior was already correct. An HTTP regression with recorded activity starting
   at timestamp 0 now pins `evidence.from` and the first event/run's `outside_evidence` boundary.
   Removing the wrapper's `left_floor=0` argument in scratch makes that regression fail.
-- **4D-C-B — report read model + API (implemented; awaiting owner acceptance):**
+- **4D-C-B — report read model + API (owner accepted/closed at
+  `4b20bdefee451e59b292181e4aa0c75cf9e2bde6`):**
   `report_read.py` extracts the 13 required canonical series and one widened Stage 4C timeline in
   the same consistent snapshot, proves recorded-minute equality per UTC hour/partial hour,
   closes the session and invokes the unchanged pure composer. `GET /api/v1/report` validates the
@@ -385,8 +389,23 @@ acceptance of the 4D-C-B report read model precedes 4D-D runtime/adversarial clo
   snapshot race. Independent 4D-C-B adversarial review found 0 blocker / 0 important / 1 minor.
   The sole MINOR was stale API documentation describing the already-implemented report route as
   future/unimplemented. The stale wording is corrected; no production code changed.
-  Stage 4D-C as a whole is not yet closed. Stage 4D-D has not started.
-- **4D-D — runtime/adversarial closeout (not started):** raw/rollup, raw/durable and post-purge equality; DST,
-  F2 current tail, snapshot races, bounded performance, CT109 smoke and whole-PR adversarial
-  review. This deployment also first delivers F2. Gate: owner-accepted runtime evidence,
-  whole-PR review and owner merge decision.
+  Stage 4D-C as a whole is owner accepted and closed at the same SHA.
+- **4D-D-A — CT112 closeout + runtime smoke preparation (complete; awaiting owner review):**
+  Audited existing committed representation, DST, waiting/protected F2, snapshot race, corruption
+  and compatibility evidence.
+  The added full-response byte equality sequence covers all seven classes, technical knownness,
+  rolled history with raw activity, real backfill and real purge. CT112 MariaDB measurements of
+  a 745-hour mixed report and 10,080-segment minute flapping each use 9 SELECTs (14 SQL statements
+  including connection/transaction setup and commit), with no timing SLA.
+  `scripts/smoke.sh` now checks the current Warsaw day's report from `/status.now`;
+  `--json` remains status only. No production Python changes.
+  Local smoke tests cover existing invocation modes, Warsaw date selection and non-200 refusal.
+  The deterministic committed MariaDB snapshot race passes; 23 accepted-base old-endpoint
+  comparisons match exact statuses and response bytes. Focused no-DB: 549 passed / 149 skipped;
+  full no-DB: 1,065 passed / 303 MariaDB-gated skips; affected MariaDB: 800 passed;
+  full MariaDB: 1,368 passed. CT109 runbook prepared; no connection or deployment performed.
+- **4D-D-B — CT109 runtime validation (NOT STARTED / OWNER ACTION REQUIRED):** owner deploys the
+  exact reviewed 4D-D-A SHA and returns factual smoke, persistence, current-tail and log evidence.
+  This deployment also first delivers the already-reviewed F2 correction.
+- **4D-D-C — whole-PR adversarial review (NOT STARTED):** whole-PR review and owner merge decision
+  follow runtime evidence. Stage 4D-D and Stage 4D remain open.

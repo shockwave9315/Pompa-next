@@ -166,7 +166,7 @@ cd /opt/pompa-next
 git checkout main
 cp .env.example .env && chmod 600 .env   # set MQTT_HOST, credentials, DB passwords
 docker compose up -d --build
-scripts/smoke.sh                         # health, status, last-hour gaps, per-topic table
+scripts/smoke.sh                         # health, status, last-hour gaps, Warsaw-day report, per-topic table
 ```
 
 Update:
@@ -181,6 +181,10 @@ scripts/smoke.sh
 
 Run exactly one backend container. The `db-data` volume must normally survive updates — do not run
 `docker compose down -v`.
+
+The smoke report date comes from `/api/v1/status.now` in `Europe/Warsaw`, independent of the host
+timezone. It prints the report period, settled frontier, effective endpoint and coverage counts
+without thresholds. `scripts/smoke.sh --json` still emits only raw status for freshness measurement.
 
 ## Freshness re-measurement procedure
 
