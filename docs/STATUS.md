@@ -8,17 +8,19 @@ are owner accepted and closed at `5de43b88f632a7069a4f579ff7a26302624e2855`.
 Checkpoint 4D-C-A's behavior-preserving extraction refactor is owner accepted and closed at
 `33b1e0472d818502079bea20fb7034b7cdc1c33c`. Checkpoint 4D-C-B's report read model and API and
 Stage 4D-C as a whole are owner accepted and closed at
-`4b20bdefee451e59b292181e4aa0c75cf9e2bde6`. Stage 4D-D-A CT112 closeout preparation is complete
-and awaits owner review; 4D-D-B CT109 runtime validation and 4D-D-C whole-PR adversarial review
-have not started. Stage 4C is DONE and merged to `main` in PR #8 (merge commit
+`4b20bdefee451e59b292181e4aa0c75cf9e2bde6`. Stage 4D-D-A is owner accepted and closed at
+`3af4d8fc0e17bafe17cc669f694bb2d3652a9ac4`; Stage 4D-D-B is owner accepted and closed after
+CT109 runtime validation of that exact SHA. Stage 4D-D-C whole-PR adversarial review is next,
+not started. Stage 4D remains open pending whole-PR review and the owner merge decision.
+Stage 4C is DONE and merged to `main` in PR #8 (merge commit
 `8c3bccbcf6ba305bbf547c59ef3f6167471442e8`). Its A–D
 checkpoints and whole-PR review are complete. Frontend work starts after Stage 4.
 
 The already-reviewed F2 hardening commit `b81d680eecda67e7d2d80facd4b79ba08472c824` is in
 that merge. It makes `/activity` hold the unacknowledged recorder tail `open` until its historical
 outcome settles, preventing transient false gaps before a tick or during a write backlog. CT109
-still runs Stage 4C runtime head `7d6757028ff56065631263ac765565d30887817d`; the first Stage
-4D deployment will also deploy the F2 correction.
+now runs owner-validated Stage 4D head `3af4d8fc0e17bafe17cc669f694bb2d3652a9ac4`;
+this first Stage 4D deployment also delivered the F2 correction.
 
 Stage 4B — DONE and merged to `main` (PR #7, merge commit
 `dfd225d2a8fe35563cd1f684efb81cf91b532a2f`).
@@ -322,7 +324,7 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
 
 ## Out of scope
 
-- CT109 connection/deployment and whole-PR review in the 4D-D-A preparation checkpoint;
+- CT109 connection/deployment and whole-PR review in this runtime bookkeeping checkpoint;
   frontend throughout Stage 4D.
 - Stage 4E SET/control, Stage 5 frontend, cooling/heater/cost/external-meter analytics and year or
   season reports.
@@ -332,9 +334,8 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
 
 ## Next
 
-Stage 4E — isolated SET/control and final backend API, after Stage 4D. Within Stage 4D, owner
-review of CT112 closeout preparation precedes owner-executed CT109 validation, then whole-PR
-adversarial review and the owner merge decision (§25.4).
+Stage 4E — isolated SET/control and final backend API, after Stage 4D. Within Stage 4D,
+4D-D-C whole-PR adversarial review is next, followed by the owner merge decision (§25.4).
 
 ## Stage 4D checkpoints
 
@@ -390,7 +391,8 @@ adversarial review and the owner merge decision (§25.4).
   The sole MINOR was stale API documentation describing the already-implemented report route as
   future/unimplemented. The stale wording is corrected; no production code changed.
   Stage 4D-C as a whole is owner accepted and closed at the same SHA.
-- **4D-D-A — CT112 closeout + runtime smoke preparation (complete; awaiting owner review):**
+- **4D-D-A — CT112 closeout + runtime smoke preparation (OWNER ACCEPTED/CLOSED at
+  `3af4d8fc0e17bafe17cc669f694bb2d3652a9ac4`):**
   Audited existing committed representation, DST, waiting/protected F2, snapshot race, corruption
   and compatibility evidence.
   The added full-response byte equality sequence covers all seven classes, technical knownness,
@@ -403,9 +405,23 @@ adversarial review and the owner merge decision (§25.4).
   The deterministic committed MariaDB snapshot race passes; 23 accepted-base old-endpoint
   comparisons match exact statuses and response bytes. Focused no-DB: 549 passed / 149 skipped;
   full no-DB: 1,065 passed / 303 MariaDB-gated skips; affected MariaDB: 800 passed;
-  full MariaDB: 1,368 passed. CT109 runbook prepared; no connection or deployment performed.
-- **4D-D-B — CT109 runtime validation (NOT STARTED / OWNER ACTION REQUIRED):** owner deploys the
-  exact reviewed 4D-D-A SHA and returns factual smoke, persistence, current-tail and log evidence.
-  This deployment also first delivers the already-reviewed F2 correction.
-- **4D-D-C — whole-PR adversarial review (NOT STARTED):** whole-PR review and owner merge decision
-  follow runtime evidence. Stage 4D-D and Stage 4D remain open.
+  full MariaDB: 1,368 passed. Owner CT109 runbook prepared for the exact accepted SHA.
+- **4D-D-B — CT109 runtime validation (OWNER ACCEPTED/CLOSED):** the owner's real runtime
+  evidence validates deployed SHA `3af4d8fc0e17bafe17cc669f694bb2d3652a9ac4`, exactly one
+  backend and running source hashes matching the reviewed checkout. The existing MariaDB
+  volume/data survived; pre-deployment oldest/newest/rolled state remained valid, and a
+  pre-existing historical query was byte-identical after deployment. `/health`, `/history`,
+  `/activity` and `/report` returned 200. Report coverage partitions held, the current partial
+  hour separated settled/future correctly, and activity kept the post-frontier minute `open`
+  rather than a false gap. The initial retained-only interval after restart was not written as
+  history. After live MQTT resumed: `alive=True`,
+  `last_live_message_at=2026-09-26T06:28:31.971Z`,
+  `last_closed_minute=last_written_minute=2026-09-26T06:27:00Z`,
+  `rows_closed=rows_written=2`, `protected_rows=waiting_rows=0`, DB error none.
+  The expected restart interval `[06:21,06:26)` UTC on 2026-09-26 remained a truthful five-minute
+  gap: retained MQTT values are not historical facts. At 06:28 UTC the day report had calendar
+  1,440, settled 508, recorded 503, gap 5, future 932 and coverage 99.0%; `503 + 5 = 508` and
+  `508 + 932 = 1440`. Deployment log evidence contained no traceback, schema failure, DB failure
+  or report error. This deployment also first delivered the already-reviewed F2 correction.
+- **4D-D-C — whole-PR adversarial review (NEXT / NOT STARTED):** whole-PR review and owner merge
+  decision remain. Stage 4D-D and Stage 4D remain open.
