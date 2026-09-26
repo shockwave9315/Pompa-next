@@ -4,7 +4,10 @@
 
 **Current stage: Stage 4E — SET/control backend, final API freeze and runtime validation.**
 Checkpoint 4E-A (control research, contract freeze and the full Stage 4E plan) is committed on
-branch `stage-4e-control` and awaits owner review. It changes documentation only. No production
+branch `stage-4e-control` (draft PR #10). The owner review accepted the direction and the
+checkpoint plan, and froze the transport, no-persistence, completeness, service-metadata, curve and
+HA-retained decisions. A documentation correction pass followed. 4E-A remains open, awaiting final
+owner review. It changes documentation only. No production
 code, schema, CT109 connection or MQTT command publication is part of 4E-A. The frozen control
 contract is `docs/ARCHITECTURE.md` §25.5 and the Stage 4E section of `docs/API.md`. Frontend work
 starts after Stage 4.
@@ -344,7 +347,7 @@ Owner review of 4E-A: the contract, the evidence and the open **(O)** decisions 
 
 ## Stage 4E checkpoints
 
-- **4E-A — control research, contract freeze and full plan (CURRENT, awaiting owner review):**
+- **4E-A — control research, contract freeze and full plan (CURRENT, owner-review corrections applied, awaiting final owner review):**
   - Docs only.
   - Reconciles the tracked SET1–SET46 reference with upstream HeishaMon v4.2.2 firmware: 48
     heat-pump commands plus 14 Optional PCB commands.

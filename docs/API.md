@@ -837,9 +837,17 @@ returned. `identity` links a control to the Stage 4A capability catalog, for ref
 
 ### `GET /api/v1/controls`
 
-Returns every control definition with its current state. The response is built from one
-recorder-locked live observation (the same one `/live?include=readings` uses). It performs no
-database I/O and never publishes.
+Returns every control definition with its current state. The API layer obtains the existing
+immutable live-readings observation through the already-existing live path, the same one
+`/live?include=readings` uses. It passes those facts to the pure control domain, which never
+imports or calls the recorder. The request never changes recorder, queue, history or storage
+state, performs no database I/O and never publishes.
+
+`state` always comes from heat-pump-published TOP readings. A change made by Home Assistant, the
+heat-pump panel or any other writer therefore appears here as soon as HeishaMon publishes the
+TOP. Pompa Next keeps no private desired-state copy. `optional_pcb` controls have `state: null`:
+upstream publishes no readback of the emulated inputs, and `commands/…` echoes are never state.
+`readback_window_seconds` is provisional until the 4E-D CT109 measurement.
 
 ```json
 {
