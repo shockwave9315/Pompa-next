@@ -43,7 +43,7 @@ Domain rules are in [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 
 ## API
 
-The Stage 3 default API shapes and the additive Stage 4A–4C forms are specified in
+The Stage 3 default API shapes and the additive Stage 4A–4D forms are specified in
 [`docs/API.md`](../docs/API.md); this section is the operator's summary.
 
 - `GET /health` — process liveness only: `{"status": "ok"}`.
@@ -67,6 +67,8 @@ The Stage 3 default API shapes and the additive Stage 4A–4C forms are specifie
   reference-backed TOP/OPT/SET/XTOP capabilities.
 - `GET /api/v1/metrics?include=history_profiles` — the unchanged default catalog plus the
   history-eligible optional profiles.
+- `GET /api/v1/report` — MariaDB-backed Warsaw day/week/month/custom reports with backend-owned
+  report facts. The detailed contract remains in [`docs/API.md`](../docs/API.md).
 - `GET /api/v1/history?from=…&to=…[&bucket=…][&series=a,b]` — exact `[from, to)`, never rounded.
 - `GET`/`PUT /api/v1/optional-history/selection` — factual active/pending selection and an
   explicit update; `GET /api/v1/optional-history/series` discovers persisted series meanings.
