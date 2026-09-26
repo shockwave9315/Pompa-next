@@ -2,7 +2,7 @@
 
 ## 1. Authority, candidate and execution boundary
 
-**4E-D-A: IMPLEMENTED / AWAITING REVIEW.** This document defines production validation;
+**4E-D-A: IMPLEMENTED / AWAITING OWNER FINAL REVIEW.** This document defines production validation;
 no phase below has been executed in this checkpoint. Independent review and owner acceptance
 of this document precede generation of the 4E-D-B execution runbook. CT109 validation is
 **NOT STARTED**. Stage 4E-C is **OWNER ACCEPTED/CLOSED** at:
@@ -12,6 +12,9 @@ of this document precede generation of the 4E-D-B execution runbook. CT109 valid
 That exact SHA is the **candidate under test**. A documentation-only checkpoint does not
 silently replace it with the branch tip. Any replacement candidate needs an explicit reviewed
 SHA and owner decision before deployment; record both candidate and accepted plan revision.
+The runtime candidate stays `fa4d49e233927210260595143a0de01f12f05399`; the validation-plan
+revision is the separate documentation commit containing the owner-accepted version of this
+file. 4E-D-B must consume both identities, never deploy the plan revision implicitly.
 
 This is the authoritative **validation procedure** for Stage 4E-D. Product semantics remain
 in [ARCHITECTURE.md §25.5](ARCHITECTURE.md#255-stage-4e--isolated-control-and-final-backend-api),
@@ -114,6 +117,26 @@ only subscribes and records. A software/Proxmox rollback does **not** restore he
 post-snapshot historical minutes may also be lost on snapshot rollback. Device restore evidence
 and the owner's rollback decision are separate.
 
+#### Application INFO-log availability (Phase 0/1 precondition)
+
+`control_runtime.log_request()` emits INFO; `config.py` also accepts WARNING and ERROR, which
+suppress it. Prove application INFO actually reaches the captured backend logs, for example the
+current process's `INFO pompa: process start ...` startup line from `main.py` (correlate its time
+with `/status.recorder.process_start`). A generic HTTP access line or the configured string
+alone is insufficient. Capture effective LOG_LEVEL privately without printing `.env` or secrets.
+
+If INFO is suppressed or its emission cannot be established, **Gate 1 cannot approve writes**.
+The owner must explicitly choose either a temporary LOG_LEVEL=INFO configuration change, or
+stop and obtain a reviewed plan correction for the evidence requirement. No automatic waiver
+or silent `.env` edit is authorized. An approved change records the original setting (including
+unset/default), the exact change and owner approval, restarts only the required backend,
+preserves candidate SHA/configuration/data, and repeats running identity, health, MQTT and all
+Phase 1 read-only checks, including the retained audit, for the new process before Gate 1.
+Restoration of the original log level after validation is a separate owner decision, recorded
+with any resulting controlled restart and affected read-only checks. No such action occurs here.
+Every real POST still requires its one structured control log; loss of log availability stops
+further writes.
+
 ### Phase 1 — read-only pre-check
 
 Save timestamped status codes and response bodies for:
@@ -150,9 +173,24 @@ from stats if exposed, otherwise from passive TOP receipts; do not change Heisha
 
 Before writes use a read-only subscriber with a unique client id, never the backend's or HA's id,
 on the privately observed `{prefix}/commands/#`. It must publish nothing, including no LWT.
-Record subscription acknowledgement, audit start/end, broker/ACL access success, retain flags
-and every retained delivery. The later runbook uses a bounded collection window, at least 5 s
-after subscription acknowledgement; incomplete access or collection cannot establish absence.
+Record successful connection, SUBACK/result, audit start/end, retain flags and **all** received
+`commands/#` topics/payloads, identifying retained deliveries separately. The bounded window is
+at least 5 s after SUBACK. **SUBACK alone is not proof of complete read visibility**: ACL/broker
+behavior can limit delivery despite subscription acceptance; no probe publication or destructive
+permission test is allowed.
+
+Cross-check with `/status.mqtt.uncatalogued_topics` after backend startup and at audit end.
+The backend subscribes to `{prefix}/#`; ingest records relative `commands/...` names there.
+Normalize the passive observer's prefix before comparing command-topic sets. Save the full
+status list and observation times. This is a process-lifetime set of names, capped at 500 total
+uncatalogued topics; it has no payloads, retain flags or per-topic timestamps. Older backend-only
+names need explanation, not an assertion that those commands are still retained. A saturated
+set or missing/misaligned observation weakens the cross-check.
+
+Agreement strengthens the bounded audit; disagreement makes visibility **UNKNOWN** until owner
+resolution at Gate 1. Zero/zero remains bounded absence, not proof that no writer can publish
+later. Unresolved ACL/broker behavior or cross-check limitations cannot be treated as a complete
+audit. Do not publish a probe to overcome the uncertainty.
 
 For each retained topic record full topic, payload, candidate catalog command/semantic control
 mapping, apparent or owner-confirmed HA ownership and overlap with a planned target. Unknown
@@ -165,10 +203,20 @@ SET37/38 names differ from `SetBivalentAPStartTemp`/`SetBivalentAPStopTemp`; ins
 approval; this plan provides no cleanup action. Absence during the audit is a bounded fact, not
 proof that HA will never publish later. Keep a passive observer during each approved mutation
 and restore; distinguish retained startup deliveries from new forwarded publications.
+Re-audit retained state immediately before every POST (including restore) and after the
+post-restore window. A forwarded retain flag alone does not reveal stored retained state;
+re-audit any overlapping command traffic whose retention is unclear.
 
-**OWNER GATE 1:** owner reviews identity, health, firmware, schemas, TOP44/activity, restoration
-values and retained conflicts. Approve a specific Phase 2 subset, safe alternate choices and
-restore actions, or resolve/skip affected rows. No write begins before that decision.
+**Approval invalidation after Gate 1:** a new retained command or changed retained payload
+that overlaps a still-planned control invalidates that control's approval. STOP testing it,
+re-audit payload/current TOP/schema/context/prerequisites/HA and external writers, then require
+explicit owner re-approval before any mutation. Do not automatically update the approved value
+or continue because the retained payload equals the planned restore. An unresolved overlap or
+a failed re-audit likewise cannot authorize the next POST.
+
+**OWNER GATE 1:** owner reviews identity, health, INFO-log emission, firmware, schemas,
+TOP44/activity, restoration values, retained visibility/conflicts and the §5 post-restore window.
+Approve a specific Phase 2 subset, safe alternate choices and restore actions, or resolve/skip affected rows. No write begins before that decision.
 
 ## 4. Shared real-write protocol and selection rules
 
@@ -181,7 +229,8 @@ Every A/B row inherits these requirements:
 1. Capture its complete GET entry, live original semantic value/raw TOP/receipt, schema,
    prerequisite/context facts, retained audit, TOP44 and `/activity/live` immediately before write.
    Confirm owner-approved consequences and an exact original restoration value before mutation.
-2. Validate both original and selected alternate against the current schema. Never clamp,
+2. Present the exact §4 current-condition fact sets and evaluate preferred/fallback directions
+   separately. Validate both original and selected alternate against the current schema. Never clamp,
    substitute a default, reinterpret a context or select an undocumented enum. Skip if either
    value is unmapped/out of schema or a small safe alternate is not obvious to the owner.
 3. One deliberately approved semantic POST; save full request/response, transport status and
@@ -195,6 +244,8 @@ Every A/B row inherits these requirements:
    TOP44/activity and retained/external-writer observations. A restore may be `matched`, or
    `unchanged_match` if the original was already restored with continuous evidence. Final live
    state must independently equal the original; a `sent` result alone is never restore proof.
+   Complete the read-only post-restore window in §5 before marking the test complete. An equal-value
+   probe with no restore uses the same final-state observation window after its response.
 6. The owner accounts for every changed setting and approves proceeding. Skips/aborts are evidence,
    not permission to fill the sample count with another command automatically.
 
@@ -205,7 +256,49 @@ Selection notation used by the tables:
 - **E**: the other member of the stated two-value enum.
 - Each rule additionally needs the owner's current-condition safety check. If its proposed step
   would cross an active operating threshold or create an unwanted consequence, skip; no extra
-  target is invented. The original and alternate use JSON integer/boolean/enum types exactly.
+  target is invented. Evaluate the preferred direction and the schema-forced fallback independently
+  for every A/B ±1 rule: a valid fallback is not automatically acceptable. Present both candidates
+  (mark any out-of-schema direction invalid) and record the owner's consequence assessment.
+  If current facts do not make the selected change clearly acceptable: **SKIP**. Do not switch
+  to the other direction merely to bypass an unsafe preferred step. Schema validity alone is
+  insufficient. The original and alternate use JSON integer/boolean/enum types exactly.
+
+#### Required current-condition fact sets
+
+Collect the following together from `/live?include=readings` immediately before selection and
+again before restore, in addition to TOP44, `/activity/live`, context/prerequisite and original
+readback evidence. Show raw/value, mode, available and received_at; an unavailable required fact
+cannot silently be replaced by an assumed value. Missing/unclear context means SKIP until resolved.
+These are procedural observations, not added API prerequisites or backend safety mathematics.
+
+- **SET20 dhw_heat_delta and SET11 dhw_target_temperature:** TOP9 `DHW_Target_Temp` (target),
+  TOP10 `DHW_Temp` (actual tank temperature), TOP22 `DHW_Heat_Delta` (current negative heating
+  delta), and shared TOP4/current activity. Present target, actual and delta together with both
+  proposed ±1 alternatives. Owner evaluates whether each alters present DHW reheat/trigger
+  eligibility. Assess SET20's preferred +1 and fallback −1 and SET11's preferred −1 and
+  fallback +1 independently; none is safe solely by schema.
+  The tracked reference does not specify a complete DHW hysteresis algorithm; do not invent
+  an exact trigger equation or use these facts to guarantee cycle behavior.
+- **SET46 heater_on_outdoor_temperature:** TOP14 `Outside_Temp`; TOP78
+  `Heater_On_Outdoor_Temp` (below this threshold backup heat is allowed by heating logic);
+  TOP59 `Room_Heater_State` (permission: 0=disabled, 1=enabled); TOP60
+  `Internal_Heater_State` (actual internal backup activity: 0=inactive, 1=active); TOP61
+  `External_Heater_State` (actual external backup/booster activity: 0=inactive, 1=active).
+  Permission is not activity. Keep I− preferred; if original is the lower bound and forces +1,
+  owner evaluates whether raising the threshold changes present heater eligibility, using all
+  five facts plus shared TOP4/activity. Do not equate eligibility with heater activation.
+- **SET18 heat_delta:** TOP23 `Heat_Delta`; TOP1 `Pump_Flow` (l/min); TOP5 `Main_Inlet_Temp`,
+  TOP6 `Main_Outlet_Temp`, TOP7 `Main_Target_Temp` (water inlet/outlet/target, °C); TOP8
+  `Compressor_Freq` (Hz); TOP4 `Operating_Mode_State`; TOP14 `Outside_Temp`; TOP76 `Heating_Mode`
+  (compensation/direct); TOP94 `Zones_State`, together with `/activity/live`. This fixed set
+  shows current water conditions, flow, target, compressor activity and heating context for
+  the ±1 K judgment. The reference documents floor heating delta but no exact controller or
+  safe-threshold formula. Do not derive a safe range or a guaranteed outcome from water delta.
+  Owner assesses both preferred +1 and fallback −1; unresolved consequences mean SKIP.
+
+The existing row-specific facts remain required for SET29 (TOP14/TOP77), bivalent thresholds
+(TOP129/TOP130 plus target TOP), curves (full TOP29–32) and requests (TOP27/TOP76). The independent
+preferred/fallback assessment applies to them too; the runbook never substitutes a safety rule.
 
 ### A — SAFE REVERSIBLE VALIDATION CANDIDATE (Phase 2)
 
@@ -218,10 +311,10 @@ HA audit applies to **every** row; the notes identify particular known conflicts
 | `quiet_mode_priority` | SET41 | setting | TOP141 | enum: sound, capacity | E | Confirm a brief priority change is acceptable; audit actual HA writes |
 | `heating_control` | SET39 | setting | TOP139 | enum: comfort, efficiency | E | Brief control-policy change approved in current activity |
 | `smart_dhw` | SET40 | setting | TOP140 | enum: variable, standard | E | Brief DHW-policy change approved; do not force a cycle |
-| `heat_delta` | SET18 | setting | TOP23 | integer 1..15 K | I+ | Small delta only; current heating consequences approved |
-| `dhw_heat_delta` | SET20 | setting | TOP22 | integer -12..-2 K | I+ | Small delta only; current DHW consequences approved |
+| `heat_delta` | SET18 | setting | TOP23 | integer 1..15 K | I+ | Collect the SET18 fact set in §4; assess both ±1 directions; no undocumented safety formula |
+| `dhw_heat_delta` | SET20 | setting | TOP22 | integer -12..-2 K | I+ | Collect TOP9/TOP10/TOP22 together; assess both ±1 directions against current DHW demand |
 | `heating_off_outdoor_temperature` | SET29 | setting | TOP77 | integer 5..35 °C | I+ | Observe current outside TOP14; do not cross an active heating cutoff |
-| `heater_on_outdoor_temperature` | SET46 | setting | TOP78 | integer -15..20 °C | I− | Observe TOP14/current heater state; no unintended heater activation; no owner HA-write evidence assumed |
+| `heater_on_outdoor_temperature` | SET46 | setting | TOP78 | integer -15..20 °C | I− | Collect TOP14/TOP78/TOP59/TOP60/TOP61; distinguish permission/activity; independently approve fallback +1 eligibility; no owner HA-write evidence assumed |
 | `bivalent_start_temperature` | SET36 | setting | TOP131 | integer -15..35 °C | I− | Require live TOP129=0 (bivalent off); observe TOP130; HA may retain SetBivalentStartTemp |
 | `bivalent_advanced_start_temperature` | SET37 | setting | TOP134 | integer -15..35 °C | I− | Require live TOP129=0; capture TOP130; actual correct AP command versus HA's historical wrong name |
 | `bivalent_advanced_stop_temperature` | SET38 | setting | TOP135 | integer -15..35 °C | I− | Require live TOP129=0; capture TOP130; actual correct AP command versus HA's historical wrong name |
@@ -264,7 +357,7 @@ Expected changed readback is the requested semantic value, not proof of physical
 
 | Control key | Identity | Class | Readback | Value schema | API prerequisite / context | Selection, impact, restore and skip |
 |---|---|---|---|---|---|---|
-| `dhw_target_temperature` | SET11 | setting | TOP9 | integer 40..75 °C | None | Prefer I− (±1 °C inside live schema); may change DHW demand. Owner confirms acceptable tank/operation conditions. Restore exact original; skip an unsafe/unknown target |
+| `dhw_target_temperature` | SET11 | setting | TOP9 | integer 40..75 °C | None | Prefer I− (±1 °C inside live schema); may change DHW demand. Present TOP9/TOP10/TOP22 together; independently evaluate preferred −1 and fallback +1 against current DHW demand. Restore exact original; skip an unsafe/unknown target |
 | `zone1_heat_curve` | SET16 | curve | TOP29,TOP30,TOP31,TOP32 | curve fields integer -127..127 °C, protocol | None | Capture full curve; change only outside_low at TOP32 using I+. Preserve other fields, restore only exact original outside_low. May change heating target; skip unclear curve meaning or unsafe current thermal consequence |
 | `zone1_heat_request` | SET5 | setting | TOP27 | request_temperature: shift -5..5 K; direct 20..127 °C, protocol | Context TOP76 | Observe active shift/direct from live TOP76 (0/1). Use I+ only in that active range and if small safe change is obvious. Never change context for testing. Direct water-sensor restriction is informational, not enforced. Restore exact original under unchanged context; otherwise stop |
 | `quiet_mode` | SET3 | setting | TOP18 | enum: off, level_1, level_2, level_3 | None | Owner approves a brief neighboring level: off↔level_1, level_2→level_1, level_3→level_2. May alter capacity/noise. Restore exact original, not an assumed off; skip invalid state or unsafe capacity reduction |
@@ -371,11 +464,67 @@ as a broker acknowledgement. Do not induce reconnects or an outage to exercise r
 **TOP44 and current activity:** capture live TOP44 and `/activity/live` before write, after the
 response and after restore, including raw/mode/available/receipt and activity inputs. Compare
 with the initial error state and owner-approved expected consequences. Do not universally decode
-all TOP44 strings or automatically reset faults. Any new/unexpected error or activity transition
-outside those consequences aborts the phase. Initially abnormal/unknown errors or inadequate
-live classifier evidence require owner resolution before a write; `unknown` is a factual class,
-not a guessed off state. Final activity need not equal the original when an approved temporary
-started a naturally completing cycle; explain the difference and obtain owner acceptance.
+all TOP44 strings or automatically reset faults. New/unexpected errors abort. Initially abnormal/
+unknown errors or inadequate live classifier evidence require owner resolution before a write;
+`unknown` is a factual class, not a guessed off state.
+
+Record every observed activity transition during mutation, restore and final observation,
+including off/idle/co/dhw/transition/defrost/unknown, its time and supporting TOP/status facts.
+The **owner**, not the runbook, classifies each transition:
+
+1. **EXPECTED / TEST-ATTRIBUTABLE:** a consequence explicitly approved for this control/test.
+2. **INDEPENDENT NATURAL OPERATION:** consistent with ordinary heat-pump operation, not attributed
+   to the test (for example a supported natural compressor transition or defrost).
+3. **UNEXPLAINED / UNAPPROVED:** cannot confidently be placed in 1 or 2.
+
+Abort progression for category 3 or a test-attributable effect exceeding approval. Natural
+operation is evidence, not an automatic defect/abort; classification must be recorded before
+proceeding. Never auto-classify every defrost as natural. Final activity need not equal initial
+activity for **any** control, including settings: restoring a setting does not rewind physical
+operation. Final proof requires restored target setting, acceptable TOP44, understood/classified
+final activity and no unresolved consequence.
+
+#### Connection/LWT watch and attribution reset
+
+During every mutation/restore/final-observation interval capture timestamped `/status` snapshots
+before, during and after, plus passive LWT receipts. Record exact fields:
+`mqtt.connected`, `mqtt.epoch`, `mqtt.connects`, `mqtt.disconnects`, `mqtt.connected_at`,
+`mqtt.disconnected_at`, `mqtt.lwt.state`, `mqtt.lwt.retained`, `mqtt.lwt.received_at`,
+`mqtt.lwt.messages`, `mqtt.alive`, `mqtt.last_live_message_at`, `mqtt.clock_steps`,
+`mqtt.last_clock_step_at` and `recorder.process_start`. Compare counters/times across snapshots,
+not only final connected=true or the final LWT string.
+
+Any connection epoch/reconnect/disconnect, LWT state/receipt/count or process-start change means
+**POSSIBLE RETAINED REPLAY / ATTRIBUTION RESET**. STOP progression for that control and return
+to owner analysis. A retained command can be delivered specifically to reconnecting HeishaMon
+without a new publication visible to the passive observer. Changed context is not proof that
+HA replay occurred; factual API TOP readback remains recorded, but later-state attribution and
+latency eligibility are uncertain. Do not induce a reconnect or ignore a brief event because
+the final connection is healthy again.
+
+#### Post-restore read-only observation window
+
+Use **POST_RESTORE_OBSERVE_SECONDS = 45 s minimum**, measured monotonically from final live
+restore confirmation (or final original-state confirmation after an equal-value probe). Gate 1
+records this duration; the owner may choose longer for observed installed HA behavior, never
+silently shorten it. Continuous passive commands/TOP/LWT collection and timestamped read-only
+status/activity snapshots continue through this window; collect before/after snapshots and
+snapshots on observed changes. Finish with fresh target/TOP44/activity/status and retained audit.
+No extra POST is automatic.
+
+Evidence: pinned `kamaradclimber/heishamon-homeassistant@e206e023af5453e4fefbbf3545e9c60d5ca79fd5`,
+`custom_components/aquarea/retry_mixin.py`, has RETRY_TIMEOUT=10 s, jitter ±1 s and MAX_RETRIES=3;
+number/select callbacks re-register the same command while preserving retry count. This is
+**three retries after the initial publish**, not three total attempts: approximately 9–11,
+18–22 and 27–33 s, plus a later check that ends the pending command. Forty-five seconds covers
+that nominal retry/check sequence with margin. Scheduling can delay it and the installed HA
+version/settings are not assumed; this is a validation minimum, not a bound on all external
+writers or a product timing guarantee. Record actual observation start/end/duration and limits.
+
+Any external overwrite during this window invalidates test completion even if later restored
+by another writer. New/changed overlapping retained commands require re-approval; connection/LWT
+changes trigger attribution reset; activity uses the three-way classification above. Stop and
+return to owner analysis without an automatic corrective POST or restarted observation loop.
 
 ## 6. Canonical one-write / one-restore evidence record
 
@@ -388,16 +537,16 @@ record with restore marked not needed only after unchanged final state is verifi
 |---|---|
 | Identity | Test id, phase, owner approval, candidate SHA, accepted plan revision, control key, SET/PCB identity, class, service flag |
 | Original | Original semantic value and raw TOP, mode/available/received_at; all requested curve fields and full curve snapshot |
-| Validation | Full value schema/range_basis; prerequisite results and raw TOPs; context/active range; intended impact and skip decision |
-| Coexistence | Retained-topic audit, overlap/HA ownership confidence, observer interval, subsequent external-writer observations |
-| Watch before | TOP44 and current activity/inputs, MQTT/LWT/clock state |
+| Validation | Full value schema/range_basis; prerequisite results and raw TOPs; context/active range; required current-condition fact set; separate preferred/fallback assessments; intended impact and skip decision |
+| Coexistence | Connection/SUBACK, all passive topics/retain flags, backend uncatalogued cross-check/visibility, retained payload revisions, approvals, HA ownership confidence, external-writer observations |
+| Watch before | TOP44 and current activity/inputs; exact §5 MQTT/LWT/clock/process-start fields; INFO-log availability proof |
 | Request | Exact semantic request value, owner request wall time and response receipt time, HTTP status and full response |
 | Publish | publish.status, publish.at; exactly one structured request log (error/sent/error code as applicable); passive command evidence and attribution limits |
 | Readback | identity/fields, kind, expected, outcome, observed raw/value, observed.received_at for each requested field, window_seconds, waited_seconds |
 | Latency | Applicable calculation in §7, sample inclusion/exclusion reason; distinct passive late observation if any |
-| Watch after | Fresh control/TOP state, TOP44, activity/inputs and MQTT/LWT/clock facts |
+| Watch after | Fresh control/TOP state, TOP44; every observed activity transition with three-way owner classification; §5 connection/LWT/clock facts and attribution reset if any |
 | Restore | Original value reconfirmed within current schema/context; owner approval; exact restore request/time, HTTP/full response and corresponding log |
-| Final | Final live restored semantic TOP and raw/receipt, untouched curve-field observations, final TOP44/activity, retained audit and later external state changes |
+| Final | Final live restored semantic TOP and raw/receipt, untouched curve fields, acceptable TOP44, classified final activity; post-restore duration/start/end, retained audit, connection/LWT facts and external overwrites |
 | Conclusion | Verdict: observed-and-restored / equal-value-observed / skipped / aborted / unresolved; anomalies, abort notes, outstanding device state and owner decision |
 
 For a curve keep per-field qualifying timestamps and calculate only over requested fields.
@@ -409,12 +558,27 @@ proves reported state, not reversal of all physical effects or an active timer's
 
 W remains **15 s provisional**. There is no environment setting for it and no change in this
 checkpoint. Qualifying latency samples require accepted publish, `matched`, qualifying
-post-publish expected receipt(s), stable comparable wall clocks and no ambiguous attribution.
+post-publish expected receipt(s), no continuity/reconnect/LWT ambiguity, no conflicting
+external-writer attribution and a passing clock sanity check below.
 Baseline receipts remain PRE even if numerically newer after a clock correction.
 
 - Scalar latency = `observed.received_at - publish.at`.
 - Curve completion latency = latest qualifying **requested-field** `received_at - publish.at`.
 - `waited_seconds` is monotonic request-window elapsed time, not a substitute for receipt latency.
+  For every otherwise eligible `matched` sample calculate **wall_latency** using the scalar receipt
+  or last required qualifying curve-field receipt above, and
+  **clock_difference = abs(wall_latency - waited_seconds)**. If wall_latency < 0 or
+  clock_difference > **1.0 s**, classify **DIAGNOSTIC ONLY — CLOCK/ATTRIBUTION UNCERTAIN**.
+  Exclude it from min/median/max/p95 and successful-latency evidence for W. Save both numbers,
+  the difference and classification in the record; do not round before the comparison beyond
+  the precision already exposed by the API.
+- The 1.0 s tolerance is a validation sanity threshold, not a product timing guarantee.
+  `publish.at` is sampled just before publish; the monotonic window begins after acceptance and
+  initial readback setup. Small publish/setup, observation scheduling and millisecond serialization
+  differences are expected. Larger discrepancies are conservatively excluded even if caused by
+  scheduling. Recorder detects sufficiently large **backward** corrections, not forward steps;
+  unchanged clock_steps cannot establish clock sanity. This comparison can expose forward
+  distortion but cannot prove the absence of every small or offsetting clock movement.
 - `unchanged_match`, `not_observed` and `not_applicable` are excluded as successful samples.
   Same-value probes and ignored retained receipts do not measure successful command latency.
 - Clock correction, inconsistent/negative deltas or indistinguishable concurrent external writes
@@ -443,8 +607,8 @@ restore. Temporaries and triggers are never automatically retried. A lost respon
 unexpected 500 may follow accepted publication: inspect state/logs before any new action.
 
 The owner decides final W from eligible samples **and** timeouts/late observations/uncertainty,
-not just fast matches. Keeping 15 s is valid; reduction is not predetermined. Insufficient
-coverage must be stated, and any further sample requires owner approval. A W change requires a
+not just fast matches. Increasing, reducing or keeping 15 s must be evidence-based; no direction
+is predetermined. Insufficient coverage must be stated, and any further sample requires owner approval. A W change requires a
 separately reviewed implementation/doc correction and regression validation before API freeze;
 this document does not authorize changing W or adding a setting.
 
@@ -453,12 +617,16 @@ this document does not authorize changing W or adding a setting.
 Stop the current phase with **no next matrix item** on:
 
 - Intended-write 503, unexpected HTTP 500, lost/ambiguous response or unexpected documented refusal.
-- MQTT disconnect/LWT Offline/clock correction during mutation, or relevant readback availability loss.
+- Any §5 connection/LWT/process-start attribution reset, clock correction or relevant readback
+  availability loss during mutation/restore/final observation.
 - Unexpected `not_observed`, intended-change `unchanged_match`, mismatch or unexplained state
   that leaves the final value ambiguous (passive diagnostics are allowed as in §7, not more writes).
 - Failure to restore/prove the exact original semantic value.
-- New/unexpected TOP44 error or activity transition outside the approved consequence.
-- HA/external overwrite that makes restoration ambiguous.
+- New/unexpected TOP44 error, UNEXPLAINED / UNAPPROVED activity, or a test-attributable effect
+  exceeding approval; independent natural operation is recorded, not automatically aborted.
+- New/changed overlapping retained command after Gate 1 (invalidates that control approval),
+  unresolved audit visibility, or external overwrite during post-restore observation.
+- Missing/suppressed structured INFO request logs or loss of their capture.
 - Original/alternate/restore outside the live schema, changed context, or false/unknown
   prerequisite where this procedure requires true.
 - Deployed checkout/running identity mismatch, more or fewer than one backend, unexplained

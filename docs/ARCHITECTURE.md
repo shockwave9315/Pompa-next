@@ -2215,8 +2215,8 @@ A Stage 5 need for any of these requires new evidence. Accepted APIs are unchang
 
 **Stage 4E-D validation procedure.** The authoritative phase, gate, candidate, restore and
 measurement contract is [`STAGE_4E_D_VALIDATION.md`](STAGE_4E_D_VALIDATION.md). 4E-D-A materializes
-that document only; it awaits independent review and owner acceptance. 4E-D-B runbook preparation
-and CT109 validation are NOT STARTED. The accepted 4E-C implementation candidate is
+that document only; its corrected contract awaits owner final review and acceptance.
+4E-D-B runbook preparation and CT109 validation are NOT STARTED. The accepted 4E-C implementation candidate is
 `fa4d49e233927210260595143a0de01f12f05399`.
 
 The procedure retains the original sample sets: ten safe reversible candidates and seven

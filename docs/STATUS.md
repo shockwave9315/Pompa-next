@@ -7,7 +7,7 @@ Checkpoint 4E-A is owner accepted and closed at `1a7826655aefb5f79daf337b7aa5fe6
 Checkpoint 4E-B (reference refresh and pure control domain) is OWNER ACCEPTED/CLOSED on branch
 `stage-4e-control` in draft PR #10 at `dc157beb3c1fdf58c7b23c7075b8cfbb508fd1c4`. Checkpoint 4E-C
 (control runtime and API) is OWNER ACCEPTED/CLOSED at `fa4d49e233927210260595143a0de01f12f05399`.
-**Stage 4E-D is CURRENT.** 4E-D-A validation contract is IMPLEMENTED / AWAITING REVIEW;
+**Stage 4E-D is CURRENT.** 4E-D-A validation contract is IMPLEMENTED / AWAITING OWNER FINAL REVIEW;
 4E-D-B and CT109 validation are NOT STARTED. The tracked plan is
 [`STAGE_4E_D_VALIDATION.md`](STAGE_4E_D_VALIDATION.md). The frozen control contract is
 `docs/ARCHITECTURE.md` §25.5
@@ -344,7 +344,7 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
 
 ## Next
 
-Independent review and owner acceptance of the tracked 4E-D-A validation contract, then
+Owner final review and acceptance of the corrected 4E-D-A validation contract, then
 4E-D-B runbook preparation and owner-executed deployment/pre-checks. Phase 0/1 owner acceptance
 precedes any real write. The readback window `W` remains provisional at 15 s; CT109 validation,
 final API freeze and Stage 4 closure have not happened.
@@ -451,11 +451,15 @@ final API freeze and Stage 4 closure have not happened.
     - No journal, persistence, transport, clock-policy or storage change. Owner accepted/closed
       the corrected implementation at the SHA above.
 - **4E-D — CT109 validation, API freeze, whole-stage review and closeout: CURRENT.**
-  - **4E-D-A — validation contract: IMPLEMENTED / AWAITING REVIEW.**
+  - **4E-D-A — validation contract: IMPLEMENTED / AWAITING OWNER FINAL REVIEW.**
     [`STAGE_4E_D_VALIDATION.md`](STAGE_4E_D_VALIDATION.md) defines deployment/identity, read-only
     pre-checks, owner gates, 10 safe reversible and 7 state-changing candidates, 46 controls
     excluded from real execution, exact restore evidence, HA audit, TOP44/activity watches,
     latency analysis and passive timeout diagnostics. No executable CT109 runbook yet.
+    Independent contract review: 0 blocker / 0 important / 5 minor; all owner-directed corrections
+    are implemented: concrete current-condition facts, natural activity classification, retained/
+    reconnect/post-restore evidence, INFO-log precondition and latency clock sanity. Owner final
+    review remains pending; runtime candidate stays `fa4d49e233927210260595143a0de01f12f05399`.
   - **4E-D-B — execution runbook / owner validation: NOT STARTED.**
   - **CT109 validation: NOT STARTED.** Independent plan review and owner acceptance precede
     runbook generation; owner acceptance of Phase 0/1 evidence precedes writes.
