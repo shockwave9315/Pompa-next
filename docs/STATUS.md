@@ -7,8 +7,9 @@ Checkpoint 4E-A is owner accepted and closed at `1a7826655aefb5f79daf337b7aa5fe6
 Checkpoint 4E-B (reference refresh and pure control domain) is OWNER ACCEPTED/CLOSED on branch
 `stage-4e-control` in draft PR #10 at `dc157beb3c1fdf58c7b23c7075b8cfbb508fd1c4`. Checkpoint 4E-C
 (control runtime and API) is OWNER ACCEPTED/CLOSED at `fa4d49e233927210260595143a0de01f12f05399`.
-**Stage 4E-D is CURRENT.** 4E-D-A validation contract is IMPLEMENTED / AWAITING OWNER FINAL REVIEW;
-4E-D-B and CT109 validation are NOT STARTED. The tracked plan is
+**Stage 4E-D is CURRENT.** 4E-D-A validation contract is OWNER ACCEPTED/CLOSED at plan revision
+`f7bac4741d06b4328f99b660c1cbd74af7943922`. 4E-D-B is RUNBOOK PREPARED / AWAITING OWNER EXECUTION;
+CT109 validation is NOT STARTED. The tracked plan is
 [`STAGE_4E_D_VALIDATION.md`](STAGE_4E_D_VALIDATION.md). The frozen control contract is
 `docs/ARCHITECTURE.md` §25.5
 and the Stage 4E section of `docs/API.md`. Frontend work starts after Stage 4.
@@ -333,8 +334,8 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
 
 ## Out of scope
 
-- In 4E-D-A: CT109 contact/deployment, production MQTT/credentials or heat-pump commands,
-  execution runbooks, production Python changes, final W/API freeze and later closeout execution.
+- In 4E-D-B preparation: agent CT109 contact/deployment, production MQTT/credentials or
+  heat-pump commands, production Python changes, final W/API freeze and later closeout execution.
 - Throughout Stage 4E: command persistence or history, generic MQTT publish, automatic retry or
   reconciliation, Stage 5 frontend, cooling/heater/cost/external-meter analytics, and year or
   season reports.
@@ -344,10 +345,10 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
 
 ## Next
 
-Owner final review and acceptance of the corrected 4E-D-A validation contract, then
-4E-D-B runbook preparation and owner-executed deployment/pre-checks. Phase 0/1 owner acceptance
-precedes any real write. The readback window `W` remains provisional at 15 s; CT109 validation,
-final API freeze and Stage 4 closure have not happened.
+Owner executes PHASE 0 and PHASE 1 only using the locally prepared untracked runbook and evidence
+template, then stops and returns evidence for review. No Phase 2/3 control POST is authorized by
+this handoff. Phase 0/1 owner acceptance precedes any real write. The readback window `W` remains
+provisional at 15 s; CT109 validation, final API freeze and Stage 4 closure have not happened.
 
 ## Stage 4E checkpoints
 
@@ -451,18 +452,23 @@ final API freeze and Stage 4 closure have not happened.
     - No journal, persistence, transport, clock-policy or storage change. Owner accepted/closed
       the corrected implementation at the SHA above.
 - **4E-D — CT109 validation, API freeze, whole-stage review and closeout: CURRENT.**
-  - **4E-D-A — validation contract: IMPLEMENTED / AWAITING OWNER FINAL REVIEW.**
+  - **4E-D-A — validation contract: OWNER ACCEPTED/CLOSED at
+    `f7bac4741d06b4328f99b660c1cbd74af7943922`.**
     [`STAGE_4E_D_VALIDATION.md`](STAGE_4E_D_VALIDATION.md) defines deployment/identity, read-only
     pre-checks, owner gates, 10 safe reversible and 7 state-changing candidates, 46 controls
     excluded from real execution, exact restore evidence, HA audit, TOP44/activity watches,
-    latency analysis and passive timeout diagnostics. No executable CT109 runbook yet.
+    latency analysis and passive timeout diagnostics.
     Independent contract review: 0 blocker / 0 important / 5 minor; all owner-directed corrections
     are implemented: concrete current-condition facts, natural activity classification, retained/
-    reconnect/post-restore evidence, INFO-log precondition and latency clock sanity. Owner final
-    review remains pending; runtime candidate stays `fa4d49e233927210260595143a0de01f12f05399`.
-  - **4E-D-B — execution runbook / owner validation: NOT STARTED.**
-  - **CT109 validation: NOT STARTED.** Independent plan review and owner acceptance precede
-    runbook generation; owner acceptance of Phase 0/1 evidence precedes writes.
+    reconnect/post-restore evidence, INFO-log precondition and latency clock sanity. The accepted
+    runtime candidate stays `fa4d49e233927210260595143a0de01f12f05399`, distinct from the plan revision.
+  - **4E-D-B — RUNBOOK PREPARED / AWAITING OWNER EXECUTION.** The owner package is untracked
+    under `scratchpad/`: `stage-4e-d-ct109-runbook.sh`, `stage-4e-d-evidence.md` and supporting
+    read-only/validation helpers. Each action is separate; default invocation prints help.
+    Local fixture tests protect identity/counts, write gates, retained/continuity checks, latency
+    sanity and monotonic post-restore observation. No production operation was executed.
+  - **CT109 validation: NOT STARTED.** Initial owner execution is Phase 0 and Phase 1 only,
+    then STOP and return generated evidence for review. No Phase 2/3 POST before owner approval.
   - W = 15 s remains provisional; final API freeze, whole-stage reviews, merge and Stage 4
     completion remain pending. No Stage 5 work.
 

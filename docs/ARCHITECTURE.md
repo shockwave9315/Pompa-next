@@ -2214,9 +2214,11 @@ A Stage 5 need for any of these requires new evidence. Accepted APIs are unchang
 | **4E-D** CT109 validation, API freeze, closeout (CURRENT) | Owner deploys; pre-checks; owner-approved write matrix in the validation contract; latency measurement fixes `W`; `docs/API.md` final freeze; whole-stage adversarial review; owner merge; Stage 4 DONE; Stage 5 ready | docs, `scripts/smoke.sh` only if needed | CT109 evidence accepted by the owner; review findings resolved; merge decision |
 
 **Stage 4E-D validation procedure.** The authoritative phase, gate, candidate, restore and
-measurement contract is [`STAGE_4E_D_VALIDATION.md`](STAGE_4E_D_VALIDATION.md). 4E-D-A materializes
-that document only; its corrected contract awaits owner final review and acceptance.
-4E-D-B runbook preparation and CT109 validation are NOT STARTED. The accepted 4E-C implementation candidate is
+measurement contract is [`STAGE_4E_D_VALIDATION.md`](STAGE_4E_D_VALIDATION.md). 4E-D-A is
+OWNER ACCEPTED/CLOSED at plan revision `f7bac4741d06b4328f99b660c1cbd74af7943922`.
+4E-D-B has prepared an untracked owner runbook/evidence template; CT109 validation is NOT STARTED.
+The initial owner execution covers Phase 0/1 only, then evidence review before any writes.
+The accepted 4E-C implementation candidate remains
 `fa4d49e233927210260595143a0de01f12f05399`.
 
 The procedure retains the original sample sets: ten safe reversible candidates and seven

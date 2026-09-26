@@ -89,8 +89,10 @@ backend on CT109 before frontend work. Checkpoints:
 - C: publish path and `/api/v1/controls` (owner accepted/closed at
   `fa4d49e233927210260595143a0de01f12f05399`);
 - D: CT109 validation, API freeze, whole-stage review and the owner merge (CURRENT).
-  D-A's corrected tracked validation contract is implemented and awaits owner final review;
-  D-B execution runbook and CT109 validation have not started. W remains provisional at 15 s.
+  D-A's validation contract is owner accepted/closed at plan revision
+  `f7bac4741d06b4328f99b660c1cbd74af7943922`. D-B's untracked owner runbook/evidence template
+  are prepared and await execution. CT109 validation has not started: Phase 0/1 only, then
+  evidence review before writes. W remains provisional at 15 s.
 
 The phase/gate/evidence contract is [`STAGE_4E_D_VALIDATION.md`](STAGE_4E_D_VALIDATION.md).
 Stage 4 is not complete and the complete backend API is not finally frozen yet.
