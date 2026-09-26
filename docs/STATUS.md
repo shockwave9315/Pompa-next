@@ -4,9 +4,9 @@
 
 **Current stage: Stage 4E — SET/control backend, final API freeze and runtime validation.**
 Checkpoint 4E-A is owner accepted and closed at `1a7826655aefb5f79daf337b7aa5fe6e5418ab3c`.
-Checkpoint 4E-B (reference refresh and pure control domain) is implemented on branch
-`stage-4e-control` in draft PR #10. Its independent adversarial review and corrective pass are
-done, and it awaits owner review. 4E-C has not started. The frozen control contract is `docs/ARCHITECTURE.md` §25.5
+Checkpoint 4E-B (reference refresh and pure control domain) is OWNER ACCEPTED/CLOSED on branch
+`stage-4e-control` in draft PR #10, at the commit that records this closure. 4E-C is next and has
+not started. The frozen control contract is `docs/ARCHITECTURE.md` §25.5
 and the Stage 4E section of `docs/API.md`. Frontend work starts after Stage 4.
 
 Stage 4D — DONE and merged to `main` (PR #9, merge commit
@@ -339,7 +339,7 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
 
 ## Next
 
-Owner review of 4E-B (`docs/ARCHITECTURE.md` §25.5.14). No 4E-C work starts before owner approval.
+Stage 4E-C: the publish path and `/api/v1/controls` (`docs/ARCHITECTURE.md` §25.5.13).
 The readback window `W` stays provisional until the 4E-D CT109 measurement.
 
 ## Stage 4E checkpoints
@@ -357,7 +357,7 @@ The readback window `W` stays provisional until the 4E-D CT109 measurement.
   - Freezes 64 semantic controls (63 after the 4E-B review) with readback mapping, a factual readback model, no command
     persistence and the `/api/v1/controls` contract.
   - Plans 4E-B–4E-D and the later CT109 write matrix.
-- **4E-B — reference refresh and pure control domain (implemented, AWAITING OWNER REVIEW):**
+- **4E-B — reference refresh and pure control domain (OWNER ACCEPTED/CLOSED):**
   - Tracked `MQTT-Topics.md` is refreshed and `OptionalPCB.md` added, both verbatim from
     `heishamon/HeishaMon@0de4f3c`, with blob-id provenance.
   - The capability catalog grows from 203 to 218 entries (+SET47/48, +13 PCB). PCB identities are
@@ -381,10 +381,12 @@ The readback window `W` stays provisional until the 4E-D CT109 measurement.
       `invalid_value`; an undocumented live prerequisite value (for example TOP110 = `2`) proved a
       prerequisite false instead of leaving it unknown; documentation of the cool direct range
       source, NTC quantization, ProtocolByteDecrypt mislabels and the backend module table.
-    - MINOR, reported for the owner, unchanged: `force_dhw=false` is also refused while a live
-      TOP4 is not a DHW mode (executability is per control); the upstream note that SET5–SET8 do
-      not set the direct temperature in thermostat/thermistor zone modes (observable as
-      TOP111/TOP112) is not reported as a restriction.
+    - F7, OWNER DECIDED — no behavior change: `force_dhw` keeps its per-control TOP4
+      prerequisite for both values. `false` deasserts the force request; on the owner's K-series
+      it does not abort a DHW cycle already running. A regression test pins both values.
+    - F8, OWNER DECIDED — SET5–SET8 carry the informational, never-enforced restriction
+      `documented_direct_temperature_water_mode_only` (upstream water-sensor-mode note, with its
+      own "newer types may differ" caveat). No prerequisite, context or `409` path was added.
     - Confirmed from the pinned firmware: the 43 state pairs, 16 curve bytes, two effect
       readbacks, the Demand Control table points, PCB bit layout, verbatim reference blob ids,
       preserved 203 earlier identities (only six upstream descriptions changed) and the unchanged
@@ -393,7 +395,10 @@ The readback window `W` stays provisional until the 4E-D CT109 measurement.
       skips; full suite on MariaDB 11.4.13: 1,631 passed, 0 skipped. The backend image built and
       its packaged references and catalog (218 / 157 readable / 63 controls) were probed in an
       offline container.
-- **4E-C — publish path and control API:** planned.
+  - Closure (F7/F8 decisions): focused 317 passed; full no-DB 1,330 passed, 303
+    MariaDB-gated skips; full suite on MariaDB 11.4.13: 1,633 passed, 0 skipped. No packaging
+    change, so no image rebuild.
+- **4E-C — publish path and control API:** NEXT, not started.
 - **4E-D — CT109 validation, API freeze, whole-stage review and closeout:** planned.
 
 ## Stage 4D checkpoints (DONE)

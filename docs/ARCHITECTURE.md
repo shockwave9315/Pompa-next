@@ -1897,12 +1897,12 @@ means the readable TOP value equals the encoded value.
 | `holiday_mode` | SET2 `SetHolidayMode` | setting | bool | TOP19: off `0`; on `1` or `2` | — | U | on |
 | `quiet_mode` | SET3 `SetQuietMode` | setting | `off`,`level_1`,`level_2`,`level_3` → `0`–`3` | TOP18 = | HA-only `4` excluded | U | on |
 | `powerful_mode` | SET4 `SetPowerfulMode` | temporary | `off`,`min_30`,`min_60`,`min_90` → `0`–`3` | TOP17 = | ends by itself | U | on |
-| `zone1_heat_request` | SET5 | setting | int; TOP76=`0`: shift −5..5 K; `1`: direct 20..127 °C (max = protocol bound) | TOP27 = | range needs TOP76; device maximum undocumented | U | on |
-| `zone1_cool_request` | SET6 | setting | int; TOP81=`0`: shift −5..5 K; `1`: direct 5..20 °C | TOP28 = | range needs TOP81; direct range from the TOP28/TOP35 text (the SET6/SET8 rows repeat "20 to max") | T | off |
-| `zone2_heat_request` | SET7 | setting | as `zone1_heat_request` | TOP34 = | TOP76 | U | on |
-| `zone2_cool_request` | SET8 | setting | as `zone1_cool_request` | TOP35 = | TOP81 | T | off |
+| `zone1_heat_request` | SET5 | setting | int; TOP76=`0`: shift −5..5 K; `1`: direct 20..127 °C (max = protocol bound) | TOP27 = | range needs TOP76; device maximum undocumented; restriction `documented_direct_temperature_water_mode_only` (§25.5.7) | U | on |
+| `zone1_cool_request` | SET6 | setting | int; TOP81=`0`: shift −5..5 K; `1`: direct 5..20 °C | TOP28 = | range needs TOP81; direct range from the TOP28/TOP35 text (the SET6/SET8 rows repeat "20 to max"); restriction `documented_direct_temperature_water_mode_only` (§25.5.7) | T | off |
+| `zone2_heat_request` | SET7 | setting | as `zone1_heat_request` | TOP34 = | TOP76; restriction `documented_direct_temperature_water_mode_only` (§25.5.7) | U | on |
+| `zone2_cool_request` | SET8 | setting | as `zone1_cool_request` | TOP35 = | TOP81; restriction `documented_direct_temperature_water_mode_only` (§25.5.7) | T | off |
 | `operation_mode` | SET9 | setting | `heat`,`cool`,`auto`,`dhw`,`heat_dhw`,`cool_dhw`,`auto_dhw` → `0`–`6` | TOP4: `auto`→{2,7}, `auto_dhw`→{6,8}, else = | — | U | on |
-| `force_dhw` | SET10 | temporary | bool | TOP2 = | effective only if TOP4 ∈ {3,4,5,6,8} | U | on |
+| `force_dhw` | SET10 | temporary | bool | TOP2 = | effective only if TOP4 ∈ {3,4,5,6,8}; `false` deasserts the force request and does not stop a running DHW cycle | U | on |
 | `dhw_target_temperature` | SET11 | setting | int 40..75 °C | TOP9 = | HA offers 40..65 | U | on |
 | `force_defrost` | SET12 | trigger, service | trigger → `1` | effect TOP26=1 | — | U | on |
 | `force_sterilization` | SET13 | trigger, service | trigger → `1` | effect TOP69=1 | — | U | on |
@@ -2026,7 +2026,7 @@ The control domain evaluates three observable facts from it (boundary: §25.5.4)
 1. **MQTT connected.** Required to publish.
 2. **Documented prerequisites with an observable state:**
    - PCB controls need TOP110 = `1`;
-   - `force_dhw` needs TOP4 ∈ {3,4,5,6,8}.
+   - `force_dhw` needs TOP4 ∈ {3,4,5,6,8}, for both values (owner decision, §25.5.14).
 
    A live reading of a documented state that proves the prerequisite false makes the control
    non-executable (`409`). An absent, stale or retained reading, the documented unknown value `-1`,
@@ -2039,7 +2039,20 @@ The control domain evaluates three observable facts from it (boundary: §25.5.4)
    same number means different things in the two modes.
 
 Documented restrictions whose state cannot be observed reliably are reported as facts and never
-enforced: J-series only, All-In-One only, H/J only, firmware version, and HeishaMon emulation. There
+enforced: J-series only, All-In-One only, H/J only, firmware version, HeishaMon emulation, and the
+water-sensor-mode note on direct request temperatures (below).
+
+**Direct request temperature and zone sensor mode (owner decision, §25.5.14 F8).** Upstream
+`MQTT-Topics.md` says that in water sensor mode with direct temperature the request-temperature
+commands (SET5–SET8) set the absolute target. In internal/external thermostat or thermistor mode,
+the direct temperature is stored in the curve's high target and is changed through `SetCurves`.
+Upstream itself adds that newer heat-pump types may behave differently. The four request controls
+therefore carry the static restriction `documented_direct_temperature_water_mode_only`. It
+concerns the direct-temperature branch, not the command as a whole. It is metadata only: it is
+never a prerequisite or validation context, never produces a `409`, and never infers the
+installed model. The zone sensor-settings readings (TOP111/TOP112) are not read for it. Their
+zone names differ between the documented table and the firmware; the Stage 4A handling of that
+discrepancy is unchanged. There
 is no fake device, series or firmware detection.
 
 #### 25.5.8 Readback and confirmation
@@ -2192,7 +2205,7 @@ A Stage 5 need for any of these requires new evidence. Accepted APIs are unchang
 
 | Checkpoint | Scope | Likely files | Gate |
 |---|---|---|---|
-| **4E-B** pure control domain + reference refresh (implemented, §25.5.14; awaiting owner review) | Refresh tracked `MQTT-Topics.md` (SET47/48) and add `OptionalPCB.md` verbatim at the pinned upstream commit. Extend the parser with the `PCB` family. Add the pure definition module: validation, encoding, readback mapping, prerequisite and context evaluation from a readings snapshot. No MQTT, no API. | `docs/reference/heishamon/*`, `pompa/capabilities.py`, new `pompa/control.py`, capability and control tests | Golden encoding table per command against the firmware encoders; boundary, enum and type rejection; readback mapping; curve JSON; definition ↔ reference coverage; updated capability counts. Adversarial review of definitions vs firmware source. No CT109. Owner gate resolves every open value, identity and invariant question (§25.5.2, §25.5.5, §25.5.11) before the executable definitions are frozen. |
+| **4E-B** pure control domain + reference refresh (OWNER ACCEPTED/CLOSED, §25.5.14) | Refresh tracked `MQTT-Topics.md` (SET47/48) and add `OptionalPCB.md` verbatim at the pinned upstream commit. Extend the parser with the `PCB` family. Add the pure definition module: validation, encoding, readback mapping, prerequisite and context evaluation from a readings snapshot. No MQTT, no API. | `docs/reference/heishamon/*`, `pompa/capabilities.py`, new `pompa/control.py`, capability and control tests | Golden encoding table per command against the firmware encoders; boundary, enum and type rejection; readback mapping; curve JSON; definition ↔ reference coverage; updated capability counts. Adversarial review of definitions vs firmware source. No CT109. Owner gate resolves every open value, identity and invariant question (§25.5.2, §25.5.5, §25.5.11) before the executable definitions are frozen. |
 | **4E-C** publish path + API | Connected-only QoS 0 non-retained `publish` on the MQTT adapter; per-key in-flight guard; bounded readback observation; `GET`/`POST /api/v1/controls`; one log line per request | `pompa/mqtt.py`, `pompa/control.py` (or a small runtime module), `pompa/api.py`, `pompa/main.py`, tests | Fake-client tests: no publish on any refusal; exactly one publish per accepted request; disconnected `503`; no retry after reconnect; every readback outcome with an injected clock; `409` paths; recorder, history and report unaffected; earlier endpoints byte-identical. Adversarial review. No CT109. |
 | **4E-D** CT109 validation, API freeze, closeout | Owner deploys; pre-checks; owner-approved write matrix (below); latency measurement fixes `W`; `docs/API.md` final freeze; whole-stage adversarial review; owner merge; Stage 4 DONE; Stage 5 ready | docs, `scripts/smoke.sh` only if needed | CT109 evidence accepted by the owner; review findings resolved; merge decision |
 
@@ -2252,8 +2265,20 @@ proved by 4E-B/4E-C tests:
 
 #### 25.5.14 Checkpoint 4E-B — reference refresh and pure control domain
 
-**Implemented, awaiting owner review.** There is no MQTT publish, control route, readback wait,
-in-flight guard, request logging, schema or storage change.
+**OWNER ACCEPTED/CLOSED.** There is no MQTT publish, control route, readback wait, in-flight
+guard, request logging, schema or storage change.
+
+**Owner decisions on the independent review.**
+
+- **F7 — Force DHW (no behavior change).** The TOP4 prerequisite applies to `force_dhw=true` and
+  `false` alike; executability stays per control. Owner K-series evidence: `true` immediately
+  starts or prioritizes a DHW run and TOP2 turns on. A later `false` clears the Force DHW request
+  state, but a DHW cycle already running is not aborted; the heat pump finishes it under its
+  ordinary DHW logic. `force_dhw=false` therefore means "deassert the force request", never
+  "stop or cancel DHW". This is one installation's evidence, not a claim about every series. The
+  control stays `temporary` with TOP2 state readback.
+- **F8 — direct request temperature (informational restriction).** SET5–SET8 carry
+  `documented_direct_temperature_water_mode_only`, never enforced (§25.5.7).
 
 **Reference and catalog.**
 

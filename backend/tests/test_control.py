@@ -481,6 +481,45 @@ def test_force_dhw_operation_mode_prerequisite():
     assert results(prep("force_dhw", True, {})) == {"dhw_operation_mode": None}
 
 
+def test_force_dhw_prerequisite_applies_to_both_values():
+    # Owner decision (4E-B review F7): force_dhw=false deasserts the Force DHW request; it does not
+    # cancel a running DHW cycle, and it stays gated by the same per-control TOP4 prerequisite.
+    for mode in (0, 1, 2, 7):  # heat, cool, auto(heat), auto(cool): no DHW
+        for value in (True, False):
+            refused("prerequisite_not_met", "force_dhw", value, {"TOP4": live(mode)})
+    for mode in (3, 4, 5, 6, 8):
+        prepared = prep("force_dhw", False, {"TOP4": live(mode)})
+        assert (prepared.payload, prepared.expected) == ("0", False)
+        assert results(prepared) == {"dhw_operation_mode": True}
+    assert control.definitions()["force_dhw"].klass == "temporary"
+
+
+REQUEST_KEYS = ("zone1_heat_request", "zone1_cool_request", "zone2_heat_request", "zone2_cool_request")
+
+
+def test_direct_temperature_water_mode_restriction_is_metadata_only():
+    # Owner decision (4E-B review F8): upstream says direct request temperatures apply in water
+    # sensor mode and that newer types may differ. Reported, never enforced.
+    defs = control.definitions()
+    for key in REQUEST_KEYS:
+        assert defs[key].restrictions == ("documented_direct_temperature_water_mode_only",)
+        assert defs[key].prerequisites == ()
+    # Zone sensor settings "1" (external thermostat) and "2" (internal thermostat or thermistor)
+    # on both sensor-settings readings neither refuse nor add a prerequisite.
+    for sensor in (live(1), live(2)):
+        thermostat = {"TOP111": sensor, "TOP112": sensor}
+        for key, context, direct in (("zone1_heat_request", "TOP76", 35), ("zone2_heat_request", "TOP76", 35),
+                                     ("zone1_cool_request", "TOP81", 18), ("zone2_cool_request", "TOP81", 18)):
+            shift = prep(key, -2, {**thermostat, context: live(0)})
+            assert (shift.payload, shift.prerequisites) == ("-2", ())
+            absolute = prep(key, direct, {**thermostat, context: live(1)})
+            assert (absolute.payload, absolute.prerequisites) == (str(direct), ())
+            # The only 409 remains the unchanged missing validation context.
+            refused("validation_context_unavailable", key, 0, thermostat)
+    assert not any(p.identity in ("TOP111", "TOP112") for c in control.CONTROLS for p in c.prerequisites)
+    assert all(c.context_identity in (None, "TOP76", "TOP81") for c in control.CONTROLS)
+
+
 def test_optional_pcb_prerequisites():
     enabled = {"TOP110": live(1)}
     assert results(prep("pcb_smart_grid_mode", "normal", enabled)) == {
@@ -520,7 +559,10 @@ def test_restrictions_are_reported_not_enforced():
         assert defs[key].restrictions == ()  # upstream docs disagree (J-only vs J/K/L)
     assert prep("dhw_sensor_selection", "center", {}).payload == "1"
     assert prep("pcb_thermostat1_demand", "heat", {}).payload == "2"
-    assert sum(bool(c.restrictions) for c in control.CONTROLS) == 5
+    assert {c.key for c in control.CONTROLS if c.restrictions} == {
+        "dhw_sensor_selection", "force_heater", "pcb_thermostat1_demand", "pcb_buffer_temperature",
+        "pcb_zone1_room_temperature", *REQUEST_KEYS,
+    }
 
 
 def test_service_marker():

@@ -888,7 +888,7 @@ upstream publishes no readback of the emulated inputs, and `commands/…` echoes
 | `readback` | `{identity, kind}`, where `kind` is `state` (the same protocol byte) or `effect` (a resulting machine state); `null` without readback. |
 | `state` | The current readback reading mapped to the control's semantic value. `raw` is the decoded payload. `value` is `null` when `raw` does not map. For example, TOP18=`4` is undocumented upstream and has no `quiet_mode` value. `mode` and `available` follow the Stage 4A reading rules. `state` is `null` without readback. A curve's `state.value` is an object of its four fields. |
 | `prerequisites` | Each entry is `{id, identity, satisfied}`. `satisfied` is `true` or `false` from a live reading of a documented state, or `null` when the reading is absent, retained or stale, or cannot be observed (`identity: null`). A live `-1` (the documented "unknown" state value) or any other undocumented value is also `null`. Ids: `heat_pump_optional_pcb` (TOP110), `heishamon_optional_pcb_emulation` (not observable), `dhw_operation_mode` (TOP4) and `external_compressor_control` (TOP122, `pcb_compressor_switch` only). |
-| `restrictions` | Documented applicability notes that are never enforced: `documented_all_in_one_only`, `documented_h_j_series_only`, `firmware_min_4_2_0`. |
+| `restrictions` | Documented applicability notes that are never enforced and never make a control non-executable: `documented_all_in_one_only`, `documented_h_j_series_only`, `firmware_min_4_2_0`, `documented_direct_temperature_water_mode_only` (the four zone request temperatures: upstream says their direct-temperature branch applies in water sensor mode, while thermostat/thermistor modes use the curve's high target, and that newer types may differ). |
 | `executable` / `not_executable_because` | `false` with codes `mqtt_disconnected`, `prerequisite_not_met` or `validation_context_unavailable`. A `null` prerequisite never makes a control non-executable. |
 
 **Value types.**
@@ -906,6 +906,10 @@ upstream publishes no readback of the emulated inputs, and `commands/…` echoes
 
 For `request_temperature`, `active` is `shift`, `direct` or `null`. It comes from a live
 TOP76/TOP81 reading.
+
+`force_dhw` `false` deasserts the Force DHW request. It is not a stop or cancel of a DHW cycle
+already running, which the heat pump finishes under its ordinary DHW logic. Its TOP4 prerequisite
+applies to both values.
 
 ### `POST /api/v1/controls/{key}`
 

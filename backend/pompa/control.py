@@ -38,6 +38,10 @@ ErrorCode = Literal[
 DOCUMENTED_ALL_IN_ONE_ONLY = "documented_all_in_one_only"
 DOCUMENTED_H_J_SERIES_ONLY = "documented_h_j_series_only"
 FIRMWARE_MIN_4_2_0 = "firmware_min_4_2_0"
+# MQTT-Topics.md: request temperatures set an absolute direct temperature in water sensor mode; in
+# thermostat/thermistor modes the direct temperature is the curve's high target instead. Upstream
+# itself says newer heat-pump types may differ.
+DOCUMENTED_DIRECT_TEMPERATURE_WATER_MODE_ONLY = "documented_direct_temperature_water_mode_only"
 
 # Upstream command names that are known but deliberately not exposed as semantic controls.
 EXCLUDED_COMMANDS: Mapping[str, str] = {
@@ -507,14 +511,18 @@ CONTROLS: tuple[Control, ...] = (
     _hp("powerful_mode", 4, "SetPowerfulMode", "temporary", EnumValue(POWERFUL),
         _state("TOP17", _enum_decode(POWERFUL))),
     _hp("zone1_heat_request", 5, "SetZ1HeatRequestTemperature", "setting",
-        RequestTemperatureValue("TOP76", _int(20, SIGNED_BYTE[1], "°C", "protocol")), _state("TOP27")),
+        RequestTemperatureValue("TOP76", _int(20, SIGNED_BYTE[1], "°C", "protocol")), _state("TOP27"),
+        restrictions=(DOCUMENTED_DIRECT_TEMPERATURE_WATER_MODE_ONLY,)),
     # Direct cool 5..20 °C is the TOP28/TOP35 readback text; the SET6/SET8 rows repeat "20 to max".
     _hp("zone1_cool_request", 6, "SetZ1CoolRequestTemperature", "setting",
-        RequestTemperatureValue("TOP81", _int(5, 20, "°C")), _state("TOP28")),
+        RequestTemperatureValue("TOP81", _int(5, 20, "°C")), _state("TOP28"),
+        restrictions=(DOCUMENTED_DIRECT_TEMPERATURE_WATER_MODE_ONLY,)),
     _hp("zone2_heat_request", 7, "SetZ2HeatRequestTemperature", "setting",
-        RequestTemperatureValue("TOP76", _int(20, SIGNED_BYTE[1], "°C", "protocol")), _state("TOP34")),
+        RequestTemperatureValue("TOP76", _int(20, SIGNED_BYTE[1], "°C", "protocol")), _state("TOP34"),
+        restrictions=(DOCUMENTED_DIRECT_TEMPERATURE_WATER_MODE_ONLY,)),
     _hp("zone2_cool_request", 8, "SetZ2CoolRequestTemperature", "setting",
-        RequestTemperatureValue("TOP81", _int(5, 20, "°C")), _state("TOP35")),
+        RequestTemperatureValue("TOP81", _int(5, 20, "°C")), _state("TOP35"),
+        restrictions=(DOCUMENTED_DIRECT_TEMPERATURE_WATER_MODE_ONLY,)),
     # TOP4 reports Auto as Auto(Heat)=2 or Auto(Cool)=7, and Auto+DHW as 6 or 8.
     _hp("operation_mode", 9, "SetOperationMode", "setting", EnumValue(OPERATION),
         _state("TOP4", _enum_decode(OPERATION, {7: "auto", 8: "auto_dhw"}))),
