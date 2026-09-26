@@ -13,4 +13,5 @@ docs/reference/**
 !docs/reference/heishamon/
 docs/reference/heishamon/**
 !docs/reference/heishamon/MQTT-Topics.md
+!docs/reference/heishamon/OptionalPCB.md
 !docs/reference/heishamon/realne_dane.md

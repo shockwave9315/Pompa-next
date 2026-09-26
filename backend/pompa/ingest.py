@@ -100,8 +100,8 @@ class Ingest:
         self._physical_by_topic: dict[str, str] = {}
         for capability in effective_capabilities():
             reference = capability.reference
-            if reference.family == "SET":
-                continue
+            if not capability.readable:
+                continue  # SET/PCB command topics are never physical readings
             # Documented topics, core Source paths, and exact verified XTOP overrides
             # are resolved once by the effective capability model.
             topic = capability.topic

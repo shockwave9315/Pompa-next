@@ -83,8 +83,8 @@ QoS 0, non-retained, connected-only path that makes at most one publish per requ
 factual readback, with no command persistence. Freeze the complete product API and validate the
 backend on CT109 before frontend work. Checkpoints:
 
-- A: research and contract freeze (current);
-- B: reference refresh and pure control domain;
+- A: research and contract freeze (done);
+- B: reference refresh and pure control domain (implemented, awaiting owner review);
 - C: publish path and `/api/v1/controls`;
 - D: CT109 validation, API freeze, whole-stage review and the owner merge.
 

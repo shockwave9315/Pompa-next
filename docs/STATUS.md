@@ -3,14 +3,10 @@
 ## Current stage
 
 **Current stage: Stage 4E — SET/control backend, final API freeze and runtime validation.**
-Checkpoint 4E-A (control research, contract freeze and the full Stage 4E plan) is committed on
-branch `stage-4e-control` (draft PR #10). The owner review accepted the direction and the
-checkpoint plan, and froze the transport, no-persistence, completeness, service-metadata, curve and
-HA-retained decisions. A documentation correction pass followed. 4E-A remains open, awaiting final
-owner review. It changes documentation only. No production
-code, schema, CT109 connection or MQTT command publication is part of 4E-A. The frozen control
-contract is `docs/ARCHITECTURE.md` §25.5 and the Stage 4E section of `docs/API.md`. Frontend work
-starts after Stage 4.
+Checkpoint 4E-A is owner accepted and closed at `1a7826655aefb5f79daf337b7aa5fe6e5418ab3c`.
+Checkpoint 4E-B (reference refresh and pure control domain) is implemented on branch
+`stage-4e-control` in draft PR #10 and awaits owner review. 4E-C has not started. The frozen control contract is `docs/ARCHITECTURE.md` §25.5
+and the Stage 4E section of `docs/API.md`. Frontend work starts after Stage 4.
 
 Stage 4D — DONE and merged to `main` (PR #9, merge commit
 `890e4b0b882248130dbdecf0c412b5c1eac852ff`). The closure facts:
@@ -331,8 +327,8 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
 
 ## Out of scope
 
-- In 4E-A: production Python, schema, frontend, CT109 connection or deployment, any MQTT command
-  publish, and edits to the packaged HeishaMon reference (deferred to 4E-B, §25.5.2).
+- In 4E-B: any MQTT publish path, the control HTTP API, readback waiting, in-flight guards,
+  request logging, schema or storage changes, frontend and CT109.
 - Throughout Stage 4E: command persistence or history, generic MQTT publish, automatic retry or
   reconciliation, Stage 5 frontend, cooling/heater/cost/external-meter analytics, and year or
   season reports.
@@ -342,12 +338,13 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
 
 ## Next
 
-Owner review of 4E-A: the contract, the evidence and the open **(O)** decisions in
-`docs/ARCHITECTURE.md` §25.5. No 4E-B work starts before owner approval.
+Owner review of 4E-B (`docs/ARCHITECTURE.md` §25.5.14). No 4E-C work starts before owner approval.
+The readback window `W` stays provisional until the 4E-D CT109 measurement.
 
 ## Stage 4E checkpoints
 
-- **4E-A — control research, contract freeze and full plan (CURRENT, owner-review corrections applied, awaiting final owner review):**
+- **4E-A — control research, contract freeze and full plan (OWNER ACCEPTED/CLOSED at
+  `1a7826655aefb5f79daf337b7aa5fe6e5418ab3c`):**
   - Docs only.
   - Reconciles the tracked SET1–SET46 reference with upstream HeishaMon v4.2.2 firmware: 48
     heat-pump commands plus 14 Optional PCB commands.
@@ -359,7 +356,22 @@ Owner review of 4E-A: the contract, the evidence and the open **(O)** decisions 
   - Freezes 64 semantic controls with readback mapping, a factual readback model, no command
     persistence and the `/api/v1/controls` contract.
   - Plans 4E-B–4E-D and the later CT109 write matrix.
-- **4E-B — reference refresh and pure control domain:** planned (§25.5.13).
+- **4E-B — reference refresh and pure control domain (implemented, AWAITING OWNER REVIEW):**
+  - Tracked `MQTT-Topics.md` is refreshed and `OptionalPCB.md` added, both verbatim from
+    `heishamon/HeishaMon@0de4f3c`, with blob-id provenance.
+  - The capability catalog grows from 203 to 218 entries (+SET47/48, +13 PCB). PCB identities are
+    upstream command names; command topics are never readings.
+  - New pure `pompa/control.py`: 64 semantic controls (51 heat-pump, 13 Optional PCB), with
+    validation, payload encoding, readback metadata, prerequisites and restrictions.
+    `SetOptPCBByte9` is explicitly excluded.
+  - The 4E-B open questions are resolved from evidence (§25.5.14).
+  - An independent firmware probe matched 245 of 245 encode→decode samples.
+  - Tests:
+    - focused control/capability/physical-reading tests: 316 passed;
+    - full no-DB suite: 1,329 passed, 303 MariaDB-gated skips (baseline at the 4E-A head: 1,065
+      passed, 303 skipped);
+    - full suite against a local MariaDB 10.11 server: 1,632 passed. MariaDB 11.4 was unavailable
+      in the execution environment (Docker Hub blocked), so the 11.4 target run is still owed.
 - **4E-C — publish path and control API:** planned.
 - **4E-D — CT109 validation, API freeze, whole-stage review and closeout:** planned.
 

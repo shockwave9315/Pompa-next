@@ -1645,7 +1645,9 @@ cost/tariff and external SDM analytics, year/season reports and legacy migration
 before the Stage 5 frontend. It adds one isolated command path. Frontend code sends semantic
 commands and renders backend facts. It never sees MQTT topics, SET numbers, raw HeishaMon payloads
 or `SetCurves` JSON, and it performs no device validation. Items marked **(O)** are open owner
-decisions, not frozen facts. Each names the checkpoint that must resolve it.
+decisions, not frozen facts. Each names the checkpoint that must resolve it. Checkpoint 4E-B
+resolved every 4E-B item from evidence (§25.5.14). Only the readback window `W` remains open,
+for 4E-D.
 
 **Owner decisions accepted in the 4E-A review (frozen):**
 
@@ -1693,17 +1695,24 @@ This is research evidence. The runtime never fetches upstream files.
   48 heat-pump commands: those 46 plus `SetForceHeater` (upstream SET47, added in v4.2.0 by commit
   `aa42c21`) and `SetReset` (upstream SET48). The `SetReset` encoder has existed since 2021; it was
   documented in v4.2.1. All 46 tracked command names match the firmware dispatch names exactly.
-- **Optional PCB commands.** Firmware `optionalCommands[]` has 14 more commands; upstream documents
-  them in `OptionalPCB.md`. The tracked reference contains none of them. Tracked OPT0–OPT6 are
-  readable heat-pump→PCB outputs, not commands.
+- **Optional PCB commands.** Firmware `optionalCommands[]` has 14 more commands. The tracked
+  reference contains none of them. Tracked OPT0–OPT6 are readable heat-pump→PCB outputs, not
+  commands.
+  - Upstream `OptionalPCB.md` names 13 of the 14 in its set-command table.
+  - `SetOptPCBByte9` exists only in the firmware: the table documents datagram byte 09 only as "?".
+  - This corrects the 4E-A wording "upstream documents them in `OptionalPCB.md`"; the model is
+    unchanged.
 - **Other drift.** Everything else is descriptive only: TOP15/16/38–41 warnings, and an upstream
   XTOP0–XTOP5 table matching the XTOP identities Pompa Next already observes.
 - **Decision.** Do not edit the packaged reference in 4E-A. It is a startup runtime input
   (§25.1). Adding SET47/SET48 changes `/metrics?include=capabilities` from 203 to 205 entries and
   breaks pinned tests, which is production behavior. Checkpoint 4E-B refreshes `MQTT-Topics.md`
   verbatim from the pinned upstream commit and adds a verbatim `OptionalPCB.md`. The parser, tests
-  and API counts change in the same reviewable checkpoint. The timing stays **(O)** until the
-  4E-B owner gate.
+  and API counts change in the same reviewable checkpoint.
+- **Done in 4E-B.** Both files are verbatim copies at the pinned commit; their git blob ids equal
+  upstream's (`docs/reference/heishamon/PROVENANCE.md`). The catalog grew from 203 to 218 entries
+  (+SET47, +SET48, +13 PCB). The only change to earlier identities is the six upstream TOP15/16/38–41
+  warnings, which a regression test pins.
 
 #### 25.5.3 Home Assistant integration findings
 
@@ -1850,8 +1859,9 @@ check them against the tracked references: every tracked command is defined or e
 
 **Identities.** Heat-pump controls reference the existing SET identities. Optional PCB commands
 have no upstream IDs. 4E-B adds them to the capability catalog with the family `PCB` and the
-upstream command name as identity (for example `SetSmartGridMode`). This naming stays **(O)**
-until the 4E-B owner gate.
+upstream command name as identity (for example `SetSmartGridMode`). This is resolved in 4E-B.
+The name cannot match the `TOP|OPT|SET|XTOP<n>` grammar, is deterministic across restarts, is not
+a display string, and is the only representation. No numeric PCB id is invented.
 
 **Keys and values.** Keys and enum ids are language-neutral snake_case identifiers. Units are
 symbols (`°C`, `K`, `min`, `%`, `duty`). HA labels and legacy Polish labels are not identities, and
@@ -1885,7 +1895,7 @@ means the readable TOP value equals the encoded value.
 | `holiday_mode` | SET2 `SetHolidayMode` | setting | bool | TOP19: off `0`; on `1` or `2` | — | U | on |
 | `quiet_mode` | SET3 `SetQuietMode` | setting | `off`,`level_1`,`level_2`,`level_3` → `0`–`3` | TOP18 = | HA-only `4` excluded | U | on |
 | `powerful_mode` | SET4 `SetPowerfulMode` | temporary | `off`,`min_30`,`min_60`,`min_90` → `0`–`3` | TOP17 = | ends by itself | U | on |
-| `zone1_heat_request` | SET5 | setting | int; TOP76=`0`: shift −5..5 K; `1`: direct 20..? °C | TOP27 = | range needs TOP76; direct max undocumented **(O)** | U | on |
+| `zone1_heat_request` | SET5 | setting | int; TOP76=`0`: shift −5..5 K; `1`: direct 20..127 °C (max = protocol bound) | TOP27 = | range needs TOP76; device maximum undocumented | U | on |
 | `zone1_cool_request` | SET6 | setting | int; TOP81=`0`: shift −5..5 K; `1`: direct 5..20 °C | TOP28 = | range needs TOP81 | T | off |
 | `zone2_heat_request` | SET7 | setting | as `zone1_heat_request` | TOP34 = | TOP76 | U | on |
 | `zone2_cool_request` | SET8 | setting | as `zone1_cool_request` | TOP35 = | TOP81 | T | off |
@@ -1896,17 +1906,17 @@ means the readable TOP value equals the encoded value.
 | `force_sterilization` | SET13 | trigger, service | trigger → `1` | effect TOP69=1 | — | U | on |
 | `pump_service_mode` | SET14 `SetPump` | setting, service | bool | none | service mode, max speed | – | none |
 | `max_pump_duty` | SET15 | setting, service | int 64..254 `duty` | TOP95 = | service-menu value | U | on |
-| `zone1_heat_curve` | SET16 `SetCurves` | curve | §25.5.11 → `zone1.heat` | TOP29–TOP32 | ranges **(O)** | U | on |
-| `zone1_cool_curve` | SET16 | curve | → `zone1.cool` | TOP72–TOP75 | ranges **(O)** | T | off |
-| `zone2_heat_curve` | SET16 | curve | → `zone2.heat` | TOP82–TOP85 | ranges **(O)** | U | on |
-| `zone2_cool_curve` | SET16 | curve | → `zone2.cool` | TOP86–TOP89 | ranges **(O)** | T | off |
+| `zone1_heat_curve` | SET16 `SetCurves` | curve | §25.5.11 → `zone1.heat` | TOP29–TOP32 | fields −127..127 °C (protocol bound) | U | on |
+| `zone1_cool_curve` | SET16 | curve | → `zone1.cool` | TOP72–TOP75 | fields −127..127 °C (protocol bound) | T | off |
+| `zone2_heat_curve` | SET16 | curve | → `zone2.heat` | TOP82–TOP85 | fields −127..127 °C (protocol bound) | U | on |
+| `zone2_cool_curve` | SET16 | curve | → `zone2.cool` | TOP86–TOP89 | fields −127..127 °C (protocol bound) | T | off |
 | `active_zones` | SET17 `SetZones` | setting | `zone1`,`zone2`,`zone1_zone2` → `0`–`2` | TOP94 = | — | U | on |
 | `heat_delta` | SET18 `SetFloorHeatDelta` | setting | int 1..15 K | TOP23 = | — | U | on |
 | `cool_delta` | SET19 `SetFloorCoolDelta` | setting | int 1..15 K | TOP24 = | — | T | off |
 | `dhw_heat_delta` | SET20 | setting | int −12..−2 K | TOP22 = | — | U | on |
-| `heater_delay_time` | SET21 | setting | int `min`, range undocumented **(O)** | TOP96 = | doc "only J-series"; snapshot 20 | T | off |
-| `heater_start_delta` | SET22 | setting | int K, range undocumented **(O)** | TOP97 = | doc "only J-series"; snapshot −4 | T | off |
-| `heater_stop_delta` | SET23 | setting | int K, range undocumented **(O)** | TOP98 = | doc "only J-series"; snapshot −1 | T | off |
+| `heater_delay_time` | SET21 | setting | int 0..254 `min` (protocol bound) | TOP96 = | MQTT-Topics "only J-series" vs ProtocolByteDecrypt "J/K/L"; snapshot 20 | T | off |
+| `heater_start_delta` | SET22 | setting | int −127..127 K (protocol bound) | TOP97 = | J-only vs J/K/L docs; snapshot −4 | T | off |
+| `heater_stop_delta` | SET23 | setting | int −127..127 K (protocol bound) | TOP98 = | J-only vs J/K/L docs; snapshot −1 | T | off |
 | `main_schedule` | SET24 | setting | bool | TOP13 = | — | U | on |
 | `alt_external_sensor` | SET25 | setting | bool | TOP108 = | — | U | on |
 | `external_pad_heater` | SET26 | setting | `disabled`,`type_a`,`type_b` → `0`–`2` | TOP114 = | — | U | on |
@@ -1925,7 +1935,7 @@ means the readable TOP value equals the encoded value.
 | `heating_control` | SET39 | setting | `comfort`,`efficiency` → `0`/`1` | TOP139 = | — | U | on |
 | `smart_dhw` | SET40 | setting | `variable`,`standard` → `0`/`1` | TOP140 = | — | U | on |
 | `quiet_mode_priority` | SET41 | setting | `sound`,`capacity` → `0`/`1` | TOP141 = | — | U | on |
-| `pump_flowrate_mode` | SET42 | setting | `delta_t`,`max_duty` → `0`/`1` | TOP106 = | TOP106 doc "J-series only" | U | on |
+| `pump_flowrate_mode` | SET42 | setting | `delta_t`,`max_duty` → `0`/`1` | TOP106 = | TOP106 "J-series only" vs ProtocolByteDecrypt "J/K/L" | U | on |
 | `dhw_sensor_selection` | SET43 | setting | `top`,`center` → `0`/`1` | TOP143 = | doc: K/L All-In-One only | – | off |
 | `dhw_heater_allowed` | SET44 `SetDHWHeaterState` | setting | `blocked`,`free` → `0`/`1` | TOP58 = | — | U | on |
 | `room_heater_allowed` | SET45 `SetRoomHeaterState` | setting | `blocked`,`free` → `0`/`1` | TOP59 = | — | U | on |
@@ -1939,12 +1949,12 @@ pump's Optional PCB setting TOP110 = `1` (observable).
 
 | Key | Upstream | Value → payload | Notes | Owner | HA |
 |---|---|---|---|---|---|
-| `pcb_heat_cool_switch` | `SetHeatCoolMode` | bool → `0`/`1` | emulated Heat/Cool switch; heat/cool polarity undocumented **(O)** | – | none |
-| `pcb_compressor_switch` | `SetCompressorState` | bool | effect needs SET32 on and a main-PCB DIP switch (HA source) | T | off |
+| `pcb_heat_cool_switch` | `SetHeatCoolMode` | bool → `0`/`1` (bit 7 of byte 06) | emulated Heat/Cool switch bit; which mode `1` selects is undocumented, so no heat/cool names | – | none |
+| `pcb_compressor_switch` | `SetCompressorState` | bool | prerequisite TOP122 = `1` (SET32 on); effect also needs a main-PCB DIP switch (HA source) | T | off |
 | `pcb_smart_grid_mode` | `SetSmartGridMode` | `normal`,`capacity_1`,`hp_dhw_off`,`capacity_2` → `0`–`3` | — | T | off |
 | `pcb_thermostat1_demand` | `SetExternalThermostat1State` | `none`,`cool`,`heat`,`heat_cool` → `0`–`3` | doc: H/J series only | – | none |
 | `pcb_thermostat2_demand` | `SetExternalThermostat2State` | as thermostat 1 | — | – | none |
-| `pcb_demand_control` | `SetDemandControl` | percent → byte; mapping unresolved **(O)**, candidate: only the five documented points | upstream table vs HA's linear formula differ by 1 | T | off |
+| `pcb_demand_control` | `SetDemandControl` | percent ∈ {5,25,50,75,100} → `43`,`82`,`133`,`184`,`235` | documented table points only; the firmware default byte 0xEB confirms 100 % | T | off |
 | `pcb_pool_temperature` | `SetPoolTemp` | number −78..120 °C | — | – | none |
 | `pcb_buffer_temperature` | `SetBufferTemp` | number −78..120 °C | doc: H/J series only | – | none |
 | `pcb_zone1_room_temperature` | `SetZ1RoomTemp` | number −78..120 °C | doc: H/J series only | – | none |
@@ -1955,21 +1965,9 @@ pump's Optional PCB setting TOP110 = `1` (observable).
 
 **Ranges.** They come from the upstream reference, where the tracked and upstream text agree.
 
-**Open value questions.** The items below remain **(O)**. Their evidence status is stated
-explicitly, and 4E-B must resolve each one at its owner gate, before the executable definitions
-are frozen. Until then no definition may assume an answer.
-
-- **Direct heat request maximum** (SET5/SET7, TOP76=`1`). Upstream says only "20 to max". The only
-  candidate is HA's climate range of 20..55 °C, which is HA evidence and not protocol truth.
-- **Curve ranges.** Upstream documents none. HA-only candidates: heat target 15..75, heat outside
-  −20..30, cool target 5..20, cool outside 15..30 °C.
-- **SET21/SET22/SET23 ranges.** Upstream gives only the units. HA-only candidates: delay
-  10..60 min, start delta −10..−2 K, stop delta −8..0 K.
-- **`SetHeatCoolMode` polarity.** Upstream documents `0`/`1` without saying which means heat. No
-  evidence exists yet.
-- **Demand Control mapping.** The upstream table (`2B`=5 %, `52`=25 %, `85`=50 %, `B8`=75 %,
-  `EB`=100 %, while its range text says "43 … 234") and HA's linear formula differ by 1 at several
-  points. The firmware writes the raw byte it receives, so the percent→byte mapping is unresolved.
+**Value questions.** 4E-B resolved all of them from evidence (§25.5.14). Where upstream documents no
+range, the control accepts exactly the encodable protocol range and reports `range_basis:
+"protocol"`. It never adopts a Home Assistant or integration-example range as protocol truth.
 
 #### 25.5.6 Owner K-series evidence and legacy
 
@@ -2027,8 +2025,10 @@ The control domain evaluates three observable facts from it (boundary: §25.5.4)
    - `force_dhw` needs TOP4 ∈ {3,4,5,6,8}.
 
    A live reading that proves the prerequisite false makes the control non-executable (`409`). An
-   absent, stale or retained reading leaves it `unknown`: the request proceeds, and the response
-   reports the fact.
+   absent, stale or retained reading, or the documented unknown value `-1`, leaves it `unknown`:
+   the request proceeds, and the response reports the fact. `pcb_compressor_switch` also needs
+   TOP122 = `1`: external compressor control on, per the HA source comment and TOP122's
+   optional-PCB description.
 3. **Validation context.** Request temperatures need a live TOP76 (heat) or TOP81 (cool) reading
    to choose the shift or direct range. Without one, the request is refused (`409`), because the
    same number means different things in the two modes.
@@ -2134,8 +2134,9 @@ and elapsed time. That is the operational record.
 - **Encoding.** The backend encodes only the given fields, as
   `{"zoneN":{"heat|cool":{"target|outside":{"high|low":v}}}}`. The firmware leaves omitted
   bytes unchanged. Unrestricted raw JSON is never accepted.
-- **Invariants.** No cross-field invariant is documented upstream. Whether to enforce one stays
-  **(O)**, to be resolved at the 4E-B owner gate. None is enforced by default.
+- **Invariants.** No cross-field invariant is documented upstream, and none is enforced (resolved
+  in 4E-B). An ordering such as `outside_low < outside_high` would be HVAC policy, not protocol
+  validation.
 - **Readback.** Each field maps to its own TOP. The firmware writes and decodes the same protocol
   byte:
 
@@ -2186,7 +2187,7 @@ A Stage 5 need for any of these requires new evidence. Accepted APIs are unchang
 
 | Checkpoint | Scope | Likely files | Gate |
 |---|---|---|---|
-| **4E-B** pure control domain + reference refresh | Refresh tracked `MQTT-Topics.md` (SET47/48) and add `OptionalPCB.md` verbatim at the pinned upstream commit. Extend the parser with the `PCB` family. Add the pure definition module: validation, encoding, readback mapping, prerequisite and context evaluation from a readings snapshot. No MQTT, no API. | `docs/reference/heishamon/*`, `pompa/capabilities.py`, new `pompa/control.py`, capability and control tests | Golden encoding table per command against the firmware encoders; boundary, enum and type rejection; readback mapping; curve JSON; definition ↔ reference coverage; updated capability counts. Adversarial review of definitions vs firmware source. No CT109. Owner gate resolves every open value, identity and invariant question (§25.5.2, §25.5.5, §25.5.11) before the executable definitions are frozen. |
+| **4E-B** pure control domain + reference refresh (implemented, §25.5.14; awaiting owner review) | Refresh tracked `MQTT-Topics.md` (SET47/48) and add `OptionalPCB.md` verbatim at the pinned upstream commit. Extend the parser with the `PCB` family. Add the pure definition module: validation, encoding, readback mapping, prerequisite and context evaluation from a readings snapshot. No MQTT, no API. | `docs/reference/heishamon/*`, `pompa/capabilities.py`, new `pompa/control.py`, capability and control tests | Golden encoding table per command against the firmware encoders; boundary, enum and type rejection; readback mapping; curve JSON; definition ↔ reference coverage; updated capability counts. Adversarial review of definitions vs firmware source. No CT109. Owner gate resolves every open value, identity and invariant question (§25.5.2, §25.5.5, §25.5.11) before the executable definitions are frozen. |
 | **4E-C** publish path + API | Connected-only QoS 0 non-retained `publish` on the MQTT adapter; per-key in-flight guard; bounded readback observation; `GET`/`POST /api/v1/controls`; one log line per request | `pompa/mqtt.py`, `pompa/control.py` (or a small runtime module), `pompa/api.py`, `pompa/main.py`, tests | Fake-client tests: no publish on any refusal; exactly one publish per accepted request; disconnected `503`; no retry after reconnect; every readback outcome with an injected clock; `409` paths; recorder, history and report unaffected; earlier endpoints byte-identical. Adversarial review. No CT109. |
 | **4E-D** CT109 validation, API freeze, closeout | Owner deploys; pre-checks; owner-approved write matrix (below); latency measurement fixes `W`; `docs/API.md` final freeze; whole-stage adversarial review; owner merge; Stage 4 DONE; Stage 5 ready | docs, `scripts/smoke.sh` only if needed | CT109 evidence accepted by the owner; review findings resolved; merge decision |
 
@@ -2243,3 +2244,77 @@ proved by 4E-B/4E-C tests:
   SET21–23;
 - every PCB input. On this unit they are refused while TOP110 = `0`. If the heat pump's Optional PCB
   setting is enabled without HeishaMon emulation, error H74 follows.
+
+#### 25.5.14 Checkpoint 4E-B — reference refresh and pure control domain
+
+**Implemented, awaiting owner review.** There is no MQTT publish, control route, readback wait,
+in-flight guard, request logging, schema or storage change.
+
+**Reference and catalog.**
+
+- `MQTT-Topics.md` and `OptionalPCB.md` are verbatim copies at `heishamon/HeishaMon@0de4f3c`;
+  `PROVENANCE.md` records their blob ids. The backend image packages `OptionalPCB.md` too.
+- `pompa/capabilities.py` changes:
+  - it parses the PCB set-command table (family `PCB`, identity = upstream name, document order);
+  - it cross-checks the documented XTOP table against the observed identities and verified topics
+    (XTOP provenance stays `observed`);
+  - it has one `Capability.readable` definition, which ingest also uses. SET and PCB command topics
+    therefore never become physical readings: a `commands/…` echo, including HA's retained PCB
+    commands, stays an uncatalogued topic.
+- The catalog now holds 218 entries (TOP 144, OPT 7, SET 48, PCB 13, XTOP 6). The 157 readable
+  slots are unchanged.
+
+**Control domain (`pompa/control.py`).**
+
+- **Definitions.** 64 definitions (51 heat-pump, 13 Optional PCB). They are verified at load
+  against the catalog: identity, family, upstream name, and readable readback, context and
+  prerequisite TOPs. Every catalog command is covered; `SetOptPCBByte9` is the one explicit
+  exclusion.
+- **`prepare(key, value, facts)`** returns the catalog topic, the exact payload, the validated
+  value, the expected readback semantic and the evaluated prerequisites. Otherwise it raises
+  `unknown_control`, `invalid_request`, `validation_context_unavailable`, `invalid_value` or
+  `prerequisite_not_met`, in that order.
+- **Input facts** are `ReadingFact(raw, mode, available)` values, the `/live?include=readings`
+  entry shape. Only `mode="live"` and `available` facts count as current evidence.
+- **Readback.** `current_state` decodes readbacks. Optional PCB controls have no readback, and
+  command echoes are never state.
+
+**Resolved 4E-B questions (evidence priority: firmware, upstream docs, protocol, HA, snapshot).**
+
+| # | Question | Resolution |
+|---|---|---|
+| O1 | Direct heat request maximum | No upstream source gives it: "20 to max". The integration examples conflict (HA YAML 40, openHAB 65). Accepted 20..127 °C: documented minimum, and the maximum is the `value+128` byte bound (−128 would encode byte 0, "no change"). `range_basis: "protocol"`. The device limit can only be seen through readback. |
+| O2 | Curve ranges | Upstream documents none; the firmware encodes `value+128`. Every field accepts −127..127 °C, `protocol` basis. HA ranges are recorded as secondary evidence only. |
+| O3 | SET21–SET23 ranges | Upstream gives units only. Encoders: delay `value+1` → 0..254 min; start/stop delta `value+128` → −127..127 K; all `protocol` basis. MQTT-Topics says J-series only, but ProtocolByteDecrypt says J/K/L, and the owner K snapshot reports values, so no series restriction is reported. |
+| O4 | `SetHeatCoolMode` polarity | Firmware sets bit 7 of PCB byte 06 to `toInt()==1`. OptionalPCB.md says only "Heat/Cool" and documents no polarity. Exposed as a boolean switch bit (`pcb_heat_cool_switch`) with no heat/cool names. |
+| O5 | Demand Control mapping | The firmware writes the raw `toInt()` byte, and its default datagram byte 14 is 0xEB. The OptionalPCB.md table (2B/52/85/B8/EB = 5/25/50/75/100 %) matches that default. The range text ("234") and HA's linear formula do not. Frozen: only the five documented points, mapped to `43`/`82`/`133`/`184`/`235`. |
+| O6 | Curve invariants | Nothing authoritative exists; none is enforced. |
+| O7 | PCB identity scheme | Family `PCB`, identity = upstream command name. |
+| O8 | Reference refresh timing | Done in 4E-B. Verbatim upstream copies with recorded blob ids are the reference strategy; upstream is never hand-edited here. |
+
+**Other upstream discrepancies found (documentation only; firmware is authoritative).**
+
+- ProtocolByteDecrypt.md labels byte 80 as TOP84 and byte 81 as TOP83, and byte 68 as TOP136.
+  The firmware decodes TOP83 from byte 80, TOP85 from byte 81, TOP84 from byte 82 and TOP135 from
+  byte 68. That matches the `SetCurves` and `SetBivalentAPStopTemp` encoders.
+- ProtocolByteDecrypt documents quiet "scheduled" as byte-7 pattern `0b10001`. HA's quiet `4`
+  encodes `0b00101`, so it is not that state and stays excluded.
+
+**Independent evidence.** An untracked probe extracted the command tables, `topicBytes` and
+`topicFunctions` from the pinned firmware sources and transcribed every encoder. It then checked:
+
+- that the catalog SET names equal firmware `commands[]` (48);
+- that the catalog PCB names plus the exclusion equal `optionalCommands[]` (14);
+- for 245 sampled requests: payload → firmware encoder → protocol byte → firmware decoder at the
+  readback TOP → readback semantic.
+
+Every sample matched the definition, with no discrepancy. The probe also confirmed:
+
+- every curve field writes only its own byte;
+- trigger payloads write the documented byte-8 values;
+- the PCB enums land on the documented bits;
+- the Demand Control bytes match the table;
+- PCB temperature payloads parse back exactly.
+
+`backend/tests/test_control.py` keeps literal firmware-derived expectations: golden payloads,
+ranges, enums, triggers, curves, contexts, prerequisites and readback maps.

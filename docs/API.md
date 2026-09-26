@@ -349,8 +349,11 @@ One subsystem's failure is never turned into process failure or into a global ve
 ## Stage 4A opt-in capability and physical-reading forms
 
 `GET /api/v1/metrics?include=capabilities` returns the default `/metrics` body plus exactly one
-top-level `capabilities` array. It contains all 203 effective identities in order: TOP0–TOP143,
-OPT0–OPT6, SET1–SET46, XTOP0–XTOP5. Each entry has exactly:
+top-level `capabilities` array. It contains all 218 effective identities in order: TOP0–TOP143,
+OPT0–OPT6, SET1–SET48, the 13 Optional PCB commands in `OptionalPCB.md` table order (family `PCB`,
+identity = upstream command name, e.g. `SetSmartGridMode`), then XTOP0–XTOP5. Stage 4E-B added
+SET47, SET48 and the PCB family through the pinned upstream reference refresh. Each entry has
+exactly:
 
 ```json
 {
@@ -372,7 +375,7 @@ capability `key`. A capability's relationship to the canonical core, when any, i
 have `null` for both. A physical capability identity and a canonical logical series key are distinct
 namespaces and are never conflated into one field.
 
-`readable` is `true` for TOP/OPT/XTOP and `false` for SET. TOP/OPT/SET topics come
+`readable` is `true` for TOP/OPT/XTOP and `false` for SET and PCB commands. TOP/OPT/SET/PCB topics come
 from the documented reference. XTOP0/2/3/5 topics come from verified canonical sources; the exact
 received paths `extra/Cool_Power_Consumption_Extra` (XTOP1) and
 `extra/Cool_Power_Production_Extra` (XTOP4) were supplied from CT109 `mqtt.uncatalogued_topics`.
@@ -380,7 +383,7 @@ No type, history, safety or control policy is implied by these fields.
 
 `GET /api/v1/live?include=readings` returns the default `/live` body plus exactly one top-level
 `readings` object. It contains all 157 readable identities in order: TOP0–TOP143, OPT0–OPT6,
-XTOP0–XTOP5. SET identities are absent. Each identity maps to exactly:
+XTOP0–XTOP5. SET and PCB command identities are absent. Each identity maps to exactly:
 
 ```json
 {
@@ -861,7 +864,7 @@ upstream publishes no readback of the emulated inputs, and `commands/…` echoes
       "family": "heat_pump",
       "class": "setting",
       "service": false,
-      "value": {"type": "integer", "min": 40, "max": 75, "unit": "°C"},
+      "value": {"type": "integer", "min": 40, "max": 75, "unit": "°C", "range_basis": "documented"},
       "readback": {"identity": "TOP9", "kind": "state"},
       "state": {"value": 48, "raw": "48", "mode": "live",
                 "received_at": "2026-10-01T07:59:58Z", "available": true},
@@ -884,8 +887,8 @@ upstream publishes no readback of the emulated inputs, and `commands/…` echoes
 | `value` | The accepted request value (value types below). |
 | `readback` | `{identity, kind}`, where `kind` is `state` (the same protocol byte) or `effect` (a resulting machine state); `null` without readback. |
 | `state` | The current readback reading mapped to the control's semantic value. `raw` is the decoded payload. `value` is `null` when `raw` does not map. For example, TOP18=`4` is undocumented upstream and has no `quiet_mode` value. `mode` and `available` follow the Stage 4A reading rules. `state` is `null` without readback. A curve's `state.value` is an object of its four fields. |
-| `prerequisites` | Each entry is `{id, identity, satisfied}`. `satisfied` is `true` or `false` from a live reading, or `null` when the reading is absent, retained or stale, or cannot be observed (`identity: null`). Ids: `heat_pump_optional_pcb` (TOP110), `heishamon_optional_pcb_emulation` (not observable) and `dhw_operation_mode` (TOP4). |
-| `restrictions` | Documented applicability notes that are never enforced: `documented_j_series_only`, `documented_all_in_one_only`, `documented_h_j_series_only`, `firmware_min_4_2_0`. |
+| `prerequisites` | Each entry is `{id, identity, satisfied}`. `satisfied` is `true` or `false` from a live reading, or `null` when the reading is absent, retained or stale, or cannot be observed (`identity: null`). A live `-1` (the documented "unknown" state value) is also `null`. Ids: `heat_pump_optional_pcb` (TOP110), `heishamon_optional_pcb_emulation` (not observable), `dhw_operation_mode` (TOP4) and `external_compressor_control` (TOP122, `pcb_compressor_switch` only). |
+| `restrictions` | Documented applicability notes that are never enforced: `documented_all_in_one_only`, `documented_h_j_series_only`, `firmware_min_4_2_0`. |
 | `executable` / `not_executable_because` | `false` with codes `mqtt_disconnected`, `prerequisite_not_met` or `validation_context_unavailable`. A `null` prerequisite never makes a control non-executable. |
 
 **Value types.**
@@ -894,11 +897,12 @@ upstream publishes no readback of the emulated inputs, and `commands/…` echoes
 |---|---|
 | `boolean` | `{"type": "boolean"}` |
 | `enum` | `{"type": "enum", "values": [...]}` |
-| `integer` | `{"type": "integer", "min": …, "max": …, "unit": …}` |
+| `integer` | `{"type": "integer", "min": …, "max": …, "unit": …, "range_basis": "documented" \| "protocol"}`. `protocol` means upstream documents no range and the bounds are the firmware encoding limits. The device's own limit is then visible only through readback. |
+| `integer_choice` | `{"type": "integer_choice", "values": [5, 25, 50, 75, 100], "unit": "%"}` (`pcb_demand_control`) |
 | `number` | `{"type": "number", "min": …, "max": …, "unit": …}` (Optional PCB temperatures) |
 | `trigger` | `{"type": "trigger"}` |
-| `curve` | `{"type": "curve", "fields": {"target_high": {min, max, unit}, "target_low": {…}, "outside_high": {…}, "outside_low": {…}}}` |
-| `request_temperature` | `{"type": "request_temperature", "context_identity": "TOP76", "active": "shift", "ranges": {"shift": {"min": -5, "max": 5, "unit": "K"}, "direct": {"min": 20, "max": …, "unit": "°C"}}}` |
+| `curve` | `{"type": "curve", "fields": {"target_high": {min, max, unit, range_basis}, "target_low": {…}, "outside_high": {…}, "outside_low": {…}}}`. Each field is −127..127 °C with `protocol` basis. No cross-field ordering is enforced. |
+| `request_temperature` | `{"type": "request_temperature", "context_identity": "TOP76", "active": "shift", "ranges": {"shift": {"min": -5, "max": 5, "unit": "K", "range_basis": "documented"}, "direct": {"min": 20, "max": 127, "unit": "°C", "range_basis": "protocol"}}}` (cool: direct 5..20 °C, documented) |
 
 For `request_temperature`, `active` is `shift`, `direct` or `null`. It comes from a live
 TOP76/TOP81 reading.

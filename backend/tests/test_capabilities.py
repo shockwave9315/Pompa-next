@@ -10,7 +10,9 @@ from pompa.capabilities import (
     capability_dict,
     effective_capabilities,
     parse_documented,
+    parse_documented_extra,
     parse_observed,
+    parse_optional_pcb,
     reference_dir,
 )
 from pompa.catalog import METRICS, RECORDED_KEYS, Source
@@ -19,6 +21,20 @@ from pompa.catalog import METRICS, RECORDED_KEYS, Source
 ROOT = REPO_ROOT / "docs/reference/heishamon"
 DOCUMENTED = (ROOT / "MQTT-Topics.md").read_text(encoding="utf-8")
 OBSERVED = (ROOT / "realne_dane.md").read_text(encoding="utf-8")
+OPTIONAL_PCB = (ROOT / "OptionalPCB.md").read_text(encoding="utf-8")
+# Upstream OptionalPCB.md names these commands in its set-command table, in this order. The firmware
+# also accepts SetOptPCBByte9, which that table does not name (byte 09 is documented only as "?").
+PCB_NAMES = (
+    "SetHeatCoolMode", "SetCompressorState", "SetSmartGridMode", "SetExternalThermostat1State",
+    "SetExternalThermostat2State", "SetPoolTemp", "SetBufferTemp", "SetZ1RoomTemp",
+    "SetZ2RoomTemp", "SetSolarTemp", "SetDemandControl", "SetZ2WaterTemp", "SetZ1WaterTemp",
+)
+
+
+def _catalog_inputs():
+    documented = parse_documented(DOCUMENTED)
+    return (documented, parse_observed(OBSERVED, documented), parse_optional_pcb(OPTIONAL_PCB),
+            parse_documented_extra(DOCUMENTED))
 CORE_KEYS = (
     "main_outlet_temp", "main_inlet_temp", "main_target_temp", "dhw_tank_temp",
     "outside_temp", "water_pressure", "pump_flow", "pump_speed", "compressor_freq",
@@ -35,19 +51,23 @@ def test_exact_reference_coverage_and_order():
     assert tuple(e.identity for e in documented) == tuple(
         [f"TOP{i}" for i in range(144)]
         + [f"OPT{i}" for i in range(7)]
-        + [f"SET{i}" for i in range(1, 47)]
+        + [f"SET{i}" for i in range(1, 49)]
     )
     assert tuple(e.identity for e in observed) == tuple(f"XTOP{i}" for i in range(6))
-    assert len(documented) == 197
+    pcb = parse_optional_pcb(OPTIONAL_PCB)
+    assert tuple(e.identity for e in pcb) == PCB_NAMES
+    assert len(documented) == 144 + 7 + 48
     assert len(observed) == 6
-    assert all(e.provenance == "documented" for e in documented)
+    assert len(pcb) == 13
+    assert all(e.provenance == "documented" for e in documented + pcb)
     assert all(e.provenance == "observed" and e.topic is None for e in observed)
     catalog = effective_capabilities()
     assert tuple(e.reference.identity for e in catalog) == tuple(
-        e.identity for e in documented + observed
+        e.identity for e in documented + pcb + observed
     )
-    assert len({e.reference.identity for e in catalog}) == len(catalog) == 203
-    assert catalog == build_capabilities(documented, observed)
+    assert len({e.reference.identity for e in catalog}) == len(catalog) == 218
+    assert catalog == build_capabilities(documented, observed, pcb=pcb,
+                                         documented_xtop=parse_documented_extra(DOCUMENTED))
 
 
 def test_capability_contract_has_no_key_field():
@@ -72,7 +92,20 @@ def test_reference_facts():
     assert entries["XTOP4"].reference.topic is None
     assert entries["XTOP4"].topic == "extra/Cool_Power_Production_Extra"
     assert entries["XTOP0"].source is METRICS[11].sources[0]
-    assert all(e.topic is not None for e in entries.values() if e.reference.family != "SET")
+    assert all(e.topic is not None for e in entries.values())
+    assert entries["SET47"].reference.name == "SetForceHeater"
+    assert entries["SET47"].reference.topic == "commands/SetForceHeater"
+    assert entries["SET48"].reference.name == "SetReset"
+    assert entries["SET48"].reference.topic == "commands/SetReset"
+    assert entries["SetDemandControl"].reference.family == "PCB"
+    assert entries["SetDemandControl"].reference.topic == "commands/SetDemandControl"
+    assert entries["SetDemandControl"].reference.description == (
+        "Byte 14: Demand Control | from 43 -5% to 234 - 100%"
+    )
+    assert entries["SetZ1RoomTemp"].reference.description == (
+        "Byte 10: Temp. Z1_Room (H/J series only) | Temp [C]"
+    )
+    assert not any(e.reference.name == "SetOptPCBByte9" for e in entries.values())
 
 
 @pytest.mark.parametrize("bad", [
@@ -91,7 +124,7 @@ def test_reference_facts():
     # A table-like row after the table body must fail even when it does not
     # match the case-sensitive TOP/OPT/SET detector (lowercase here).
     DOCUMENTED.replace(
-        "## Option PCB Topics:", "top6 | main/Something | description\n\n## Option PCB Topics:", 1
+        "## Extra Sensor Topics:", "top6 | main/Something | description\n\n## Extra Sensor Topics:", 1
     ),
     # Any other unexpected table-like content (a "|") past the table end must
     # fail fast too, not just a stray identity-shaped row.
@@ -164,7 +197,7 @@ def test_documented_top_does_not_require_observed_top_row():
     observed = parse_observed(incomplete_snapshot, documented)
     assert tuple(entry.identity for entry in observed) == tuple(f"XTOP{i}" for i in range(6))
     effective = {entry.reference.identity: entry for entry in build_capabilities(documented, observed)}
-    assert len(effective) == 204
+    assert len(effective) == len(documented) + len(observed) == 144 + 1 + 7 + 48 + 6
     assert effective["TOP6"].reference.topic == "main/Main_Outlet_Temp"
     assert effective["TOP144"].reference.topic == "main/Future_Topic"
     assert effective["TOP144"].source is None
@@ -215,7 +248,8 @@ def test_runtime_packaging_points_to_authoritative_docs():
     assert reference_dir().resolve() == ROOT.resolve()
     dockerfile = (REPO_ROOT / "backend/Dockerfile").read_text()
     compose = (REPO_ROOT / "docker-compose.yml").read_text()
-    assert "COPY docs/reference/heishamon/MQTT-Topics.md docs/reference/heishamon/realne_dane.md ./docs/reference/heishamon/" in dockerfile
+    assert ("COPY docs/reference/heishamon/MQTT-Topics.md docs/reference/heishamon/OptionalPCB.md "
+            "docs/reference/heishamon/realne_dane.md ./docs/reference/heishamon/") in dockerfile
     assert "dockerfile: backend/Dockerfile" in compose
     assert "context: ." in compose
     ignore = (REPO_ROOT / "backend/Dockerfile.dockerignore").read_text()
@@ -224,7 +258,107 @@ def test_runtime_packaging_points_to_authoritative_docs():
         "backend/pompa/**", "!backend/pompa/*.py", "!docs/", "docs/**",
         "!docs/reference/", "docs/reference/**", "!docs/reference/heishamon/",
         "docs/reference/heishamon/**", "!docs/reference/heishamon/MQTT-Topics.md",
-        "!docs/reference/heishamon/realne_dane.md",
+        "!docs/reference/heishamon/OptionalPCB.md", "!docs/reference/heishamon/realne_dane.md",
     ]
     assert (ROOT / "MQTT-Topics.md").is_file()
+    assert (ROOT / "OptionalPCB.md").is_file()
     assert (ROOT / "realne_dane.md").is_file()
+
+
+def test_documented_xtop_table_agrees_with_observed_identities_and_topics():
+    documented, observed, pcb, extra = _catalog_inputs()
+    assert tuple((e.identity, e.name, e.topic) for e in extra) == (
+        ("XTOP0", "Heat_Power_Consumption_Extra", "extra/Heat_Power_Consumption_Extra"),
+        ("XTOP1", "Cool_Power_Consumption_Extra", "extra/Cool_Power_Consumption_Extra"),
+        ("XTOP2", "DHW_Power_Consumption_Extra", "extra/DHW_Power_Consumption_Extra"),
+        ("XTOP3", "Heat_Power_Production_Extra", "extra/Heat_Power_Production_Extra"),
+        ("XTOP4", "Cool_Power_Production_Extra", "extra/Cool_Power_Production_Extra"),
+        ("XTOP5", "DHW_Power_Production_Extra", "extra/DHW_Power_Production_Extra"),
+    )
+    # The documented table is a cross-check only: XTOP identities stay observed.
+    catalog = build_capabilities(documented, observed, pcb=pcb, documented_xtop=extra)
+    assert all(c.reference.provenance == "observed" for c in catalog if c.reference.family == "XTOP")
+    renamed = tuple(replace(e, name="Other_Extra", topic="extra/Other_Extra") if e.identity == "XTOP1"
+                    else e for e in extra)
+    with pytest.raises(ReferenceError, match="XTOP1"):
+        build_capabilities(documented, observed, pcb=pcb, documented_xtop=renamed)
+    with pytest.raises(ReferenceError, match="identities differ"):
+        build_capabilities(documented, observed, pcb=pcb, documented_xtop=extra[:5])
+
+
+@pytest.mark.parametrize("bad", [
+    DOCUMENTED.replace("XTOP1 | extra/Cool_Power_Consumption_Extra |", "XTOP1 | main/Cool_Power_Consumption_Extra |"),
+    DOCUMENTED.replace("XTOP1 | extra/Cool_Power_Consumption_Extra |", "XTOP9 | extra/Cool_Power_Consumption_Extra |"),
+    DOCUMENTED.replace("## Extra Sensor Topics:", "## Extra Topics:"),
+    DOCUMENTED.replace(
+        "## Option PCB Topics:", "xtop6 | extra/Something | description\n\n## Option PCB Topics:", 1
+    ),
+])
+def test_malformed_documented_xtop_table_fails(bad):
+    with pytest.raises(ReferenceError):
+        parse_documented_extra(bad)
+
+
+def test_pcb_rows_bytes_and_values():
+    pcb = {e.identity: e for e in parse_optional_pcb(OPTIONAL_PCB)}
+    assert all(e.family == "PCB" and e.name == e.identity and e.topic == f"commands/{e.identity}"
+               for e in pcb.values())
+    expected = {
+        "SetHeatCoolMode": ("06", "0/1"), "SetCompressorState": ("06", "0/1"),
+        "SetSmartGridMode": ("06", "0/1/2/3"), "SetExternalThermostat1State": ("06", "0/1/2/3"),
+        "SetExternalThermostat2State": ("06", "0/1/2/3"), "SetPoolTemp": ("07", "Temp [C]"),
+        "SetBufferTemp": ("08", "Temp [C]"), "SetZ1RoomTemp": ("10", "Temp [C]"),
+        "SetZ2RoomTemp": ("11", "Temp [C]"), "SetSolarTemp": ("13", "Temp [C]"),
+        "SetDemandControl": ("14", "from 43 -5% to 234 - 100%"),
+        "SetZ2WaterTemp": ("15", "Temp [C]"), "SetZ1WaterTemp": ("16", "Temp [C]"),
+    }
+    for name, (byte, value) in expected.items():
+        description = pcb[name].description
+        assert description.startswith(f"Byte {byte}: ") and description.endswith(f" | {value}")
+
+
+def test_pcb_identity_cannot_collide_with_other_families():
+    documented, observed, pcb, extra = _catalog_inputs()
+    others = {e.identity for e in documented + observed} | {e.name for e in documented}
+    assert not {e.identity for e in pcb} & others
+    renamed = (replace(pcb[0], identity="SET5"),) + pcb[1:]
+    with pytest.raises(ReferenceError, match="upstream command names"):
+        build_capabilities(documented, observed, pcb=renamed)
+    clashing = (replace(pcb[0], topic="commands/SetHeatpump"),) + pcb[1:]
+    with pytest.raises(ReferenceError, match="Duplicate topic"):
+        build_capabilities(documented, observed, pcb=clashing)
+
+
+@pytest.mark.parametrize("bad", [
+    OPTIONAL_PCB.replace("### Set command byte decrypt:", "### Set command bytes:"),
+    OPTIONAL_PCB.replace("| PCB Topic |Topic value|", "| Topic |Topic value|"),
+    OPTIONAL_PCB.replace("| SetPoolTemp |Temp [C]| 07 |", "| SetPoolTemp |Temp [C]| 7 |"),
+    OPTIONAL_PCB.replace("| SetPoolTemp |", "| setPoolTemp |"),
+    OPTIONAL_PCB.replace("| SetPoolTemp |Temp [C]|", "| SetPoolTemp ||"),
+    OPTIONAL_PCB.replace("0/1<br/>0/1<br/>0/1/2/3<br/>", "0/1<br/>0/1/2/3<br/>"),
+    OPTIONAL_PCB.replace("| SetSolarTemp |", "| SetPoolTemp |"),
+    OPTIONAL_PCB.replace("| SetSolarTemp |Temp [C]| 13 |", "\n| SetSolarTemp |Temp [C]| 13 |"),
+    OPTIONAL_PCB.replace("| SetZ1WaterTemp |Temp [C] | 16 |", "| SetZ1WaterTemp |Temp [C] | 16 | FF |"),
+])
+def test_malformed_optional_pcb_reference_fails(bad):
+    with pytest.raises(ReferenceError):
+        parse_optional_pcb(bad)
+
+
+def test_reference_refresh_changed_only_the_pinned_upstream_facts():
+    """Every pre-refresh identity keeps its facts; only the six upstream warnings changed."""
+    entries = {e.reference.identity: capability_dict(e) for e in effective_capabilities()}
+    warnings = {"TOP15": "XTOP3", "TOP16": "XTOP0", "TOP38": "XTOP4",
+                "TOP39": "XTOP1", "TOP40": "XTOP5", "TOP41": "XTOP2"}
+    for identity, xtop in warnings.items():
+        assert entries[identity]["description"].endswith(
+            f" — invalid on heatpumps with extra data block support, see {xtop}"
+        )
+    assert entries["TOP56"]["description"] == "Zone1: Actual Temperature (°C)"
+    assert entries["SET46"] == {
+        "identity": "SET46", "family": "SET", "name": "SetHeaterOnOutdoorTemp",
+        "topic": "commands/SetHeaterOnOutdoorTemp",
+        "description": "Outdoor temperature for heater ON | -15 to 20",
+        "provenance": "documented", "readable": False,
+        "canonical_metric": None, "source_priority": None,
+    }

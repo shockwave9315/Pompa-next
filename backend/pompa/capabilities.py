@@ -1,7 +1,13 @@
 """Reference identities joined to the unchanged core metric catalog.
 
 Only the tracked Markdown supplies documented topics. XTOP names come from an
-observed snapshot; their paths require separate runtime evidence.
+observed snapshot; their paths require separate runtime evidence. The upstream
+reference also documents XTOP0-XTOP5; that table is parsed only to prove it
+agrees with the observed identities and the verified topics.
+
+Optional PCB commands (``OptionalPCB.md``) have no upstream numeric ID. Their
+identity is the exact upstream command name in the ``PCB`` family, which cannot
+collide with the ``TOP``/``OPT``/``SET``/``XTOP`` identity grammar.
 """
 
 from __future__ import annotations
@@ -15,7 +21,7 @@ from typing import Literal
 
 from pompa.catalog import METRICS, Metric, Source
 
-Family = Literal["TOP", "OPT", "SET", "XTOP"]
+Family = Literal["TOP", "OPT", "SET", "PCB", "XTOP"]
 Provenance = Literal["documented", "observed"]
 
 # Exact received topics in the owner's pre-deployment CT109 mqtt.uncatalogued_topics.
@@ -49,6 +55,11 @@ class Capability:
     source_priority: int | None = None
 
     @property
+    def readable(self) -> bool:
+        """TOP/OPT/XTOP are readings; SET and PCB identities are commands, never readings."""
+        return self.reference.family not in _COMMAND_FAMILIES
+
+    @property
     def topic(self) -> str | None:
         return (self.reference.topic or (self.source.topic if self.source else None)
                 or _VERIFIED_XTOP_TOPICS.get(self.reference.identity))
@@ -69,7 +80,7 @@ def capability_dict(capability: Capability) -> dict:
         "topic": capability.topic,
         "description": reference.description,
         "provenance": reference.provenance,
-        "readable": reference.family != "SET",
+        "readable": capability.readable,
         "canonical_metric": capability.metric.key if capability.metric else None,
         "source_priority": capability.source_priority,
     }
@@ -105,6 +116,8 @@ def normalize_payload(raw: str) -> TypedPayload:
     return TypedPayload(raw, text, "text")
 
 
+_COMMAND_FAMILIES = frozenset({"SET", "PCB"})
+
 _SECTIONS: tuple[tuple[str, Family, int], ...] = (
     ("## Sensor Topics:", "TOP", 3),
     ("## Option PCB Topics:", "OPT", 3),
@@ -114,7 +127,10 @@ _HEADERS = {
     "TOP": ("ID", "Topic", "Response/Description"),
     "OPT": ("ID", "Topic", "Response/Description"),
     "SET": ("ID", "Topic", "Description", "Value/Range"),
+    "XTOP": ("ID", "Topic", "Response/Description"),
 }
+_TOPIC_PREFIX = {"TOP": "main/", "OPT": "optional/", "XTOP": "extra/"}
+_EXTRA_SECTION = ("## Extra Sensor Topics:", "XTOP", 3)
 _IDENTITY = re.compile(r"^(TOP|OPT|SET|XTOP)(0|[1-9][0-9]*)$")
 _PATH = re.compile(r"^[A-Za-z0-9_]+/[A-Za-z0-9_]+$")
 _NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
@@ -157,64 +173,154 @@ def _contiguous(entries: tuple[ReferenceIdentity, ...], family: Family, first: i
         raise ReferenceError(f"Missing or non-contiguous {family} identities")
 
 
+def _parse_section(lines: list[str], heading: str, family: Family, width: int) -> list[ReferenceIdentity]:
+    positions = [i for i, line in enumerate(lines) if line.strip() == heading]
+    if len(positions) != 1:
+        raise ReferenceError(f"Expected one {heading} section")
+    start = positions[0] + 1
+    end = next((i for i in range(start, len(lines)) if lines[i].startswith("## ")), len(lines))
+    section = lines[start:end]
+    headers = [i for i, line in enumerate(section) if line.strip().startswith("ID |")]
+    if len(headers) != 1:
+        raise ReferenceError(f"Expected one {family} table header")
+    header = headers[0]
+    # Any non-blank table-like line ("|") before the accepted header would
+    # otherwise disappear silently, exactly like one after the table body.
+    if any(line.strip() and "|" in line for line in section[:header]):
+        raise ReferenceError(f"Row outside {family} table")
+    if tuple(cell.strip() for cell in section[header].split("|")) != _HEADERS[family]:
+        raise ReferenceError(f"Malformed {family} table header")
+    if header + 1 >= len(section) or not all(
+        re.fullmatch(r":?-{3,}:?", cell.strip())
+        for cell in section[header + 1].split("|")
+    ) or len(section[header + 1].split("|")) != width:
+        raise ReferenceError(f"Malformed {family} table separator")
+    row_start = header + 2
+    row_end = next((i for i in range(row_start, len(section)) if not section[i].strip()), len(section))
+    if row_start == row_end:
+        raise ReferenceError(f"Empty {family} table")
+    entries: list[ReferenceIdentity] = []
+    for line in section[row_start:row_end]:
+        cells = [cell.strip() for cell in line.split("|")]
+        if len(cells) != width or any(not cell for cell in cells):
+            raise ReferenceError(f"Malformed {family} row: {line!r}")
+        raw_id, raw_topic = cells[:2]
+        index = _identity(raw_id, family)
+        if family == "SET":
+            if not _NAME.fullmatch(raw_topic):
+                raise ReferenceError(f"Invalid SET name: {raw_topic!r}")
+            name, topic = raw_topic, f"commands/{raw_topic}"
+            description = " | ".join(cells[2:])
+        else:
+            if not _PATH.fullmatch(raw_topic) or not raw_topic.startswith(_TOPIC_PREFIX[family]):
+                raise ReferenceError(f"Invalid {family} topic: {raw_topic!r}")
+            name, topic = raw_topic.split("/", 1)[1], raw_topic
+            description = cells[2]
+        entries.append(ReferenceIdentity(raw_id, family, index, name, topic, description, "documented"))
+    # Any non-blank table-like line (containing "|") after the table body
+    # would otherwise disappear silently, including one that does not match
+    # the case-sensitive TOP/OPT/SET detector. Fail fast instead of guessing.
+    if any(line.strip() and "|" in line for line in section[row_end:]):
+        raise ReferenceError(f"Row outside {family} table")
+    return entries
+
+
 def parse_documented(text: str) -> tuple[ReferenceIdentity, ...]:
-    """Parse the three supported tables in MQTT-Topics.md, in family/index order."""
+    """Parse the TOP/OPT/SET tables in MQTT-Topics.md, in family/index order."""
     lines = text.splitlines()
     entries: list[ReferenceIdentity] = []
     for heading, family, width in _SECTIONS:
-        positions = [i for i, line in enumerate(lines) if line.strip() == heading]
-        if len(positions) != 1:
-            raise ReferenceError(f"Expected one {heading} section")
-        start = positions[0] + 1
-        end = next((i for i in range(start, len(lines)) if lines[i].startswith("## ")), len(lines))
-        section = lines[start:end]
-        headers = [i for i, line in enumerate(section) if line.strip().startswith("ID |")]
-        if len(headers) != 1:
-            raise ReferenceError(f"Expected one {family} table header")
-        header = headers[0]
-        # Any non-blank table-like line ("|") before the accepted header would
-        # otherwise disappear silently, exactly like one after the table body.
-        if any(line.strip() and "|" in line for line in section[:header]):
-            raise ReferenceError(f"Row outside {family} table")
-        if tuple(cell.strip() for cell in section[header].split("|")) != _HEADERS[family]:
-            raise ReferenceError(f"Malformed {family} table header")
-        if header + 1 >= len(section) or not all(
-            re.fullmatch(r":?-{3,}:?", cell.strip())
-            for cell in section[header + 1].split("|")
-        ) or len(section[header + 1].split("|")) != width:
-            raise ReferenceError(f"Malformed {family} table separator")
-        row_start = header + 2
-        row_end = next((i for i in range(row_start, len(section)) if not section[i].strip()), len(section))
-        if row_start == row_end:
-            raise ReferenceError(f"Empty {family} table")
-        for line in section[row_start:row_end]:
-            cells = [cell.strip() for cell in line.split("|")]
-            if len(cells) != width or any(not cell for cell in cells):
-                raise ReferenceError(f"Malformed {family} row: {line!r}")
-            raw_id, raw_topic = cells[:2]
-            index = _identity(raw_id, family)
-            if family == "SET":
-                if not _NAME.fullmatch(raw_topic):
-                    raise ReferenceError(f"Invalid SET name: {raw_topic!r}")
-                name, topic = raw_topic, f"commands/{raw_topic}"
-                description = " | ".join(cells[2:])
-            else:
-                if not _PATH.fullmatch(raw_topic) or not raw_topic.startswith(
-                    "main/" if family == "TOP" else "optional/"
-                ):
-                    raise ReferenceError(f"Invalid {family} topic: {raw_topic!r}")
-                name, topic = raw_topic.split("/", 1)[1], raw_topic
-                description = cells[2]
-            entries.append(ReferenceIdentity(raw_id, family, index, name, topic, description, "documented"))
-        # Any non-blank table-like line (containing "|") after the table body
-        # would otherwise disappear silently, including one that does not match
-        # the case-sensitive TOP/OPT/SET detector. Fail fast instead of guessing.
-        if any(line.strip() and "|" in line for line in section[row_end:]):
-            raise ReferenceError(f"Row outside {family} table")
+        entries.extend(_parse_section(lines, heading, family, width))
     result = tuple(sorted(entries, key=lambda e: (dict(TOP=0, OPT=1, SET=2)[e.family], e.index)))
     _unique(result)
     for family, first in (("TOP", 0), ("OPT", 0), ("SET", 1)):
         _contiguous(result, family, first)
+    return result
+
+
+def parse_documented_extra(text: str) -> tuple[ReferenceIdentity, ...]:
+    """Parse the documented XTOP table in MQTT-Topics.md (evidence cross-check only)."""
+    heading, family, width = _EXTRA_SECTION
+    result = tuple(sorted(_parse_section(text.splitlines(), heading, family, width),
+                          key=lambda e: e.index))
+    _unique(result)
+    _contiguous(result, "XTOP", 0)
+    return result
+
+
+_PCB_SECTION = "### Set command byte decrypt:"
+_PCB_HEADER = ("", "PCB Topic", "Topic value", "Byte#", "Possible Value", "Value decrypt",
+               "Value Description", "")
+_PCB_NAME = re.compile(r"^Set[A-Za-z0-9]+$")
+_BR = re.compile(r"<br\s*/?>")
+
+
+def _pcb_text(cell: str) -> str:
+    return " ".join(part.strip() for part in _BR.split(cell) if part.strip())
+
+
+def parse_optional_pcb(text: str) -> tuple[ReferenceIdentity, ...]:
+    """Parse the Optional PCB set-command table in OptionalPCB.md, in document order.
+
+    A row may name several commands separated by ``<br/>`` (byte 06 carries five
+    bit fields). Rows without a command name (header, checksum, unknown bytes)
+    describe the datagram only and create no identity.
+    """
+    lines = text.splitlines()
+    positions = [i for i, line in enumerate(lines) if line.strip() == _PCB_SECTION]
+    if len(positions) != 1:
+        raise ReferenceError(f"Expected one {_PCB_SECTION} section")
+    start = positions[0] + 1
+    end = next((i for i in range(start, len(lines)) if lines[i].startswith("#")), len(lines))
+    section = lines[start:end]
+    headers = [i for i, line in enumerate(section) if "PCB Topic" in line]
+    if len(headers) != 1:
+        raise ReferenceError("Expected one PCB table header")
+    header = headers[0]
+    if any(line.strip() and "|" in line for line in section[:header]):
+        raise ReferenceError("Row outside PCB table")
+    if tuple(cell.strip() for cell in section[header].split("|")) != _PCB_HEADER:
+        raise ReferenceError("Malformed PCB table header")
+    separator = [cell.strip() for cell in section[header + 1].split("|")] if header + 1 < len(section) else []
+    if (len(separator) != len(_PCB_HEADER) or separator[0] or separator[-1]
+            or not all(re.fullmatch(r":?-{3,}:?", cell) for cell in separator[1:-1])):
+        raise ReferenceError("Malformed PCB table separator")
+    row_start = header + 2
+    row_end = next((i for i in range(row_start, len(section)) if not section[i].strip()), len(section))
+    if row_start == row_end:
+        raise ReferenceError("Empty PCB table")
+    entries: list[ReferenceIdentity] = []
+    for line in section[row_start:row_end]:
+        cells = [cell.strip() for cell in line.split("|")]
+        if len(cells) != len(_PCB_HEADER) or cells[0] or cells[-1]:
+            raise ReferenceError(f"Malformed PCB row: {line!r}")
+        names_cell, values_cell, byte, *_rest = cells[1:-1]
+        description_cell = cells[6]
+        if not re.fullmatch(r"[0-9]{2}", byte):
+            raise ReferenceError(f"Malformed PCB byte: {line!r}")
+        names = [part.strip() for part in _BR.split(names_cell) if part.strip()]
+        if not names:
+            continue
+        if any(not _PCB_NAME.fullmatch(name) for name in names):
+            raise ReferenceError(f"Invalid PCB command name: {line!r}")
+        values = [part.strip() for part in _BR.split(values_cell) if part.strip()]
+        if len(names) > 1:
+            if len(values) != len(names):
+                raise ReferenceError(f"PCB values do not align with names: {line!r}")
+        else:
+            values = [" ".join(values)]
+        if not all(values) or not description_cell:
+            raise ReferenceError(f"Malformed PCB row: {line!r}")
+        described = _pcb_text(description_cell)
+        for name, value in zip(names, values):
+            entries.append(ReferenceIdentity(
+                name, "PCB", len(entries), name, f"commands/{name}",
+                f"Byte {byte}: {described} | {value}", "documented",
+            ))
+    if any(line.strip() and "|" in line for line in section[row_end:]):
+        raise ReferenceError("Row outside PCB table")
+    result = tuple(entries)
+    _unique(result)
     return result
 
 
@@ -259,9 +365,16 @@ def build_capabilities(
     documented: tuple[ReferenceIdentity, ...],
     observed: tuple[ReferenceIdentity, ...],
     metrics: tuple[Metric, ...] = METRICS,
+    pcb: tuple[ReferenceIdentity, ...] = (),
+    documented_xtop: tuple[ReferenceIdentity, ...] | None = None,
 ) -> tuple[Capability, ...]:
-    """Join reference identities with core objects; reject conflicting core facts."""
-    baseline = documented + observed
+    """Join reference identities with core objects; reject conflicting core facts.
+
+    Order: TOP, OPT, SET (documented), PCB (document order), XTOP (observed).
+    """
+    if any(entry.family != "PCB" or _IDENTITY.fullmatch(entry.identity) for entry in pcb):
+        raise ReferenceError("PCB identities must be upstream command names")
+    baseline = documented + pcb + observed
     _unique(baseline)
     by_id = {entry.identity: entry for entry in baseline}
     associations: dict[str, tuple[Metric, Source, int]] = {}
@@ -285,11 +398,20 @@ def build_capabilities(
             raise ReferenceError(f"Verified XTOP topic conflicts with observation: {identity}")
         if identity in associations and associations[identity][1].topic != topic:
             raise ReferenceError(f"Verified XTOP topic conflicts with core: {identity}")
-    return tuple(
+    capabilities = tuple(
         Capability(reference, *associations[reference.identity]) if reference.identity in associations
         else Capability(reference)
         for reference in baseline
     )
+    if documented_xtop is not None:
+        effective = {c.reference.identity: c for c in capabilities if c.reference.family == "XTOP"}
+        if [e.identity for e in documented_xtop] != list(effective):
+            raise ReferenceError("Documented XTOP identities differ from observed identities")
+        for entry in documented_xtop:
+            capability = effective[entry.identity]
+            if entry.name != capability.reference.name or entry.topic != capability.topic:
+                raise ReferenceError(f"Documented XTOP conflicts with observation: {entry.identity}")
+    return capabilities
 
 
 def reference_dir() -> Path:
@@ -302,6 +424,9 @@ def reference_dir() -> Path:
 @lru_cache(maxsize=1)
 def effective_capabilities() -> tuple[Capability, ...]:
     root = reference_dir()
-    documented = parse_documented((root / "MQTT-Topics.md").read_text(encoding="utf-8"))
+    topics = (root / "MQTT-Topics.md").read_text(encoding="utf-8")
+    documented = parse_documented(topics)
     observed = parse_observed((root / "realne_dane.md").read_text(encoding="utf-8"), documented)
-    return build_capabilities(documented, observed)
+    pcb = parse_optional_pcb((root / "OptionalPCB.md").read_text(encoding="utf-8"))
+    return build_capabilities(documented, observed, pcb=pcb,
+                              documented_xtop=parse_documented_extra(topics))
