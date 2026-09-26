@@ -42,6 +42,17 @@ ERROR_STATUS = {
 }
 
 
+# ``requested`` of a request whose body had no trustworthy semantic value (400 before validation).
+UNPARSED_REQUEST = "<invalid_request>"
+
+
+def log_request(key: str, requested: str, result: str, outcome: str | None, elapsed: float) -> None:
+    """The one structured log line of a control request (§25.5.10)."""
+    # A key from the URL path is arbitrary text; repr keeps a hostile one on this single line.
+    log.info("control key=%s requested=%s publish=%s readback=%s elapsed=%.3fs",
+             key if key.isidentifier() else repr(key), requested, result, outcome, elapsed)
+
+
 class Publisher(Protocol):
     def publish_command(self, topic: str, payload: str) -> bool:
         """Publish one prepared command topic/payload; ``True`` only if the client accepted it."""
@@ -248,9 +259,8 @@ class ControlRuntime:
             result = error.code
             raise
         finally:
-            log.info("control key=%s requested=%s publish=%s readback=%s elapsed=%.3fs",
-                     key, "{}" if value is ABSENT else repr(value), result, outcome,
-                     self.monotonic() - started)
+            log_request(key, "{}" if value is ABSENT else repr(value), result, outcome,
+                        self.monotonic() - started)
 
     def _execute_claimed(self, key: str, value: object, started: float) -> dict:
         baseline = self.recorder.readings_observation(self.clock)

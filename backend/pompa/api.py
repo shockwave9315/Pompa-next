@@ -23,7 +23,7 @@ from . import optional_policy
 from . import report as report_domain, report_read
 from .capabilities import capability_dict, effective_capabilities
 from .control import ABSENT, definitions as controls_catalog
-from .control_runtime import ControlRequestError, ControlRuntime
+from .control_runtime import UNPARSED_REQUEST, ControlRequestError, ControlRuntime, log_request
 from .history_profile import HISTORY_PROFILES, capability_topics, history_profile_dict
 from .minute import MINUTE, iso_utc
 from .optional_policy import (
@@ -228,8 +228,14 @@ def create_app(recorder: Recorder, storage: Storage, clock: Callable[[], float] 
     @app.post("/api/v1/controls/{key}")
     async def control_command(key: str, request: Request):
         """Validate, publish at most once, report the factual readback. Errors publish nothing."""
+        started = controls.monotonic()
         try:
             value = _control_value(await request.body())
+        except ControlRequestError as error:
+            # Refused before the runtime (which logs every request it receives): log it here, once.
+            log_request(key, UNPARSED_REQUEST, error.code, None, controls.monotonic() - started)
+            return _control_error(error)
+        try:
             if not control_limiter:
                 control_limiter.append(anyio.CapacityLimiter(max(len(controls_catalog()), 1)))
             return await anyio.to_thread.run_sync(controls.execute, key, value, limiter=control_limiter[0])

@@ -606,6 +606,60 @@ def test_one_log_line_per_request(caplog):
     assert "key=fault_reset requested={} publish=sent readback=not_applicable" in lines[2]
 
 
+PARSER_FAILURES = [
+    ("heat_delta", b"not json"),
+    ("heat_delta", b'{"value":3,"value":4}'),
+    ("heat_delta", b'{"value":3,"extra":1}'),
+    ("heat_delta", b""),
+    ("heat_delta", b"[3]"),
+    ("heat_delta", b'{"value": NaN}'),
+    ("zone1_heat_curve", b'{"value":{"target_high":30,"target_high":31}}'),
+]
+
+
+def _control_lines(caplog):
+    return [r.getMessage() for r in caplog.records if r.name == "pompa.control_runtime"]
+
+
+@pytest.mark.parametrize("key,raw", PARSER_FAILURES)
+def test_a_body_refused_before_the_runtime_logs_exactly_one_line(key, raw, caplog):
+    h = ready_harness()
+    with caplog.at_level(logging.INFO, logger="pompa.control_runtime"):
+        response = h.post(key, raw=raw)
+    assert (response.status_code, response.json()) == (400, {**response.json(), "code": "invalid_request"})
+    assert h.publisher.calls == []
+    lines = _control_lines(caplog)
+    assert len(lines) == 1
+    assert lines[0].startswith(
+        f"control key={key} requested=<invalid_request> publish=invalid_request readback=None elapsed=")
+    for fragment in (b"not json", b"extra", b"NaN", b"31", b"[3]"):
+        if fragment in raw:
+            assert fragment.decode() not in lines[0]  # the raw body never reaches the log
+
+
+def test_requests_that_reach_the_runtime_still_log_exactly_one_line(caplog):
+    h = ready_harness(window=0.05)
+    requests = [("heat_delta", {"value": 50}, 422), ("nope", {"value": 1}, 404),
+                ("force_defrost", {"value": True}, 400), ("heat_delta", {"value": 5}, 200)]
+    for key, body, status in requests:
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="pompa.control_runtime"):
+            assert h.post(key, body).status_code == status
+        lines = _control_lines(caplog)
+        assert len(lines) == 1 and f"control key={key} " in lines[0], lines
+        assert "<invalid_request>" not in lines[0]
+
+
+def test_an_arbitrary_path_key_stays_on_one_log_line(caplog):
+    h = ready_harness()
+    with caplog.at_level(logging.INFO, logger="pompa.control_runtime"):
+        assert h.post("bad%0Akey", {"value": 1}).status_code == 404
+        assert h.post("bad%0Akey", raw=b"x").status_code == 400
+    lines = _control_lines(caplog)
+    assert len(lines) == 2 and not any("\n" in line for line in lines)
+    assert all(line.startswith("control key='bad\\nkey' ") for line in lines)
+
+
 # ----------------------------------------------------------------------------- MQTT adapter
 
 class FakeInfo:

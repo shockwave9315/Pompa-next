@@ -419,6 +419,11 @@ The readback window `W` stays provisional until the 4E-D CT109 measurement.
       1,686 passed, 0 skipped;
     - the backend image built and an offline container smoke showed 63 controls, 218
       capabilities, 157 readings and POST `503`.
+  - Correction after the owner review:
+    - A body refused before validation (invalid JSON, a duplicate key, an unknown field) wrote no
+      request log line. It now writes exactly one, with `requested=<invalid_request>` and never
+      the raw body.
+    - Requests that reach the runtime still log once; regression tests pin both paths.
 - **4E-D — CT109 validation, API freeze, whole-stage review and closeout:** planned.
 
 ## Stage 4D checkpoints (DONE)

@@ -2403,6 +2403,14 @@ reconciliation was added. The 63 Stage 4E-B definitions are unchanged.
 5. `publish_command`: a `False` result is `503 mqtt_unavailable`.
 6. After an accepted publish, nothing can turn the request into an error or a second publish.
 
+**Request log line (§25.5.10).** Every POST writes exactly one line, through the shared
+`control_runtime.log_request`.
+
+- Requests that reach the runtime log from its `finally`, including unexpected exceptions.
+- A body refused before validation has no trustworthy value. It is logged by the API with
+  `requested=<invalid_request>`, and the raw body is never logged.
+- A path key that is not an identifier is logged with `repr`, so it stays on one line.
+
 **In-flight guard.**
 
 - It is a set of keys under a `threading.Lock`: the check and the add are one atomic claim.
