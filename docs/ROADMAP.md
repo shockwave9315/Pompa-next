@@ -78,7 +78,8 @@ See `docs/ARCHITECTURE.md` §25.4.
 ### 4E — SET/control backend, final API freeze and runtime validation (CURRENT)
 
 Expose the complete evidenced HeishaMon command surface as backend-validated semantic controls:
-48 heat-pump commands and 14 Optional PCB commands, as 64 controls. Publish through an isolated
+48 heat-pump commands and 14 Optional PCB commands, as 63 controls (`SetOptPCBByte9` and
+`SetHeatCoolMode` have no validated value meaning). Publish through an isolated
 QoS 0, non-retained, connected-only path that makes at most one publish per request. Report
 factual readback, with no command persistence. Freeze the complete product API and validate the
 backend on CT109 before frontend work. Checkpoints:

@@ -46,6 +46,12 @@ EXCLUDED_COMMANDS: Mapping[str, str] = {
         "OptionalPCB.md documents datagram byte 09 only as '?', so it has no semantic meaning "
         "that could be validated."
     ),
+    "SetHeatCoolMode": (
+        "Catalog Optional PCB command. The firmware sets bit 7 of datagram byte 06 to "
+        "toInt()==1, and OptionalPCB.md names that bit only 'Heat/Cool' (Heat/Cool SW). No "
+        "pinned source says which bit value selects heat or cool, so neither request value has a "
+        "semantic meaning that could be validated."
+    ),
 }
 
 
@@ -208,7 +214,8 @@ class NumberValue:
     unit: str | None
 
     def validate(self, value: object, facts: Facts) -> int | float:
-        if type(value) not in (int, float) or not math.isfinite(value):
+        # An int is always finite; math.isfinite() would overflow on a huge one.
+        if type(value) not in (int, float) or (type(value) is float and not math.isfinite(value)):
             raise _invalid("expected a finite number")
         if not self.minimum <= value <= self.maximum:
             raise _invalid(f"expected {self.minimum}..{self.maximum}")
@@ -377,20 +384,22 @@ class Prerequisite:
     """A documented condition for the command to have any effect.
 
     ``identity`` is the readable TOP proving it, or ``None`` when it is not observable over MQTT.
-    Only a live reading can make it ``False``; absent, retained, stale or ``-1`` (documented
-    "unknown") facts stay ``None``.
+    Only a live reading of a documented state (``documented``) can make it ``False``; absent,
+    retained, stale, ``-1`` (documented "unknown") or undocumented values stay ``None``.
     """
 
     id: str
     identity: str | None
     satisfied_by: frozenset[int] = frozenset()
+    documented: frozenset[int] = frozenset()
 
     def evaluate(self, facts: Facts) -> bool | None:
         if self.identity is None:
             return None
         value = live_int(facts, self.identity)
-        # MQTT-Topics.md: state topics report -1 for "unknown" in abnormal situations.
-        return None if value is None or value == -1 else value in self.satisfied_by
+        # MQTT-Topics.md: state topics report -1 for "unknown" in abnormal situations; it is
+        # outside every documented domain, like any other undocumented code.
+        return value in self.satisfied_by if value in self.documented else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -400,10 +409,14 @@ class PrerequisiteResult:
     satisfied: bool | None
 
 
-HEAT_PUMP_OPTIONAL_PCB = Prerequisite("heat_pump_optional_pcb", "TOP110", frozenset({1}))
+# Documented TOP domains: TOP110/TOP122 are 0/1 settings; TOP4 is 0..8 (MQTT-Topics.md).
+HEAT_PUMP_OPTIONAL_PCB = Prerequisite("heat_pump_optional_pcb", "TOP110", frozenset({1}),
+                                      frozenset({0, 1}))
 HEISHAMON_OPTIONAL_PCB_EMULATION = Prerequisite("heishamon_optional_pcb_emulation", None)
-DHW_OPERATION_MODE = Prerequisite("dhw_operation_mode", "TOP4", frozenset({3, 4, 5, 6, 8}))
-EXTERNAL_COMPRESSOR_CONTROL = Prerequisite("external_compressor_control", "TOP122", frozenset({1}))
+DHW_OPERATION_MODE = Prerequisite("dhw_operation_mode", "TOP4", frozenset({3, 4, 5, 6, 8}),
+                                  frozenset(range(9)))
+EXTERNAL_COMPRESSOR_CONTROL = Prerequisite("external_compressor_control", "TOP122", frozenset({1}),
+                                           frozenset({0, 1}))
 PCB_PREREQUISITES = (HEAT_PUMP_OPTIONAL_PCB, HEISHAMON_OPTIONAL_PCB_EMULATION)
 
 
@@ -466,7 +479,10 @@ SMART_GRID = (("normal", 0), ("capacity_1", 1), ("hp_dhw_off", 2), ("capacity_2"
 THERMOSTAT = (("none", 0), ("cool", 1), ("heat", 2), ("heat_cool", 3))
 # OptionalPCB.md byte 14 table; the firmware's default datagram also carries 0xEB (235) = 100 %.
 DEMAND_CONTROL = ((5, "43"), (25, "82"), (50, "133"), (75, "184"), (100, "235"))
-PCB_TEMPERATURE = NumberValue(-78, 120, "°C")  # temp2hex() encodable range (0x00..0xFF)
+# temp2hex() converts only within -78..120 °C and clamps outside it (>120 → 0x00, <-78 → 0xFF).
+# The resulting NTC byte quantizes non-uniformly (about 0.3 °C to 11 °C per step), so no step
+# is claimed.
+PCB_TEMPERATURE = NumberValue(-78, 120, "°C")
 
 CURVE_TOPS = {
     (1, "heat"): ("TOP29", "TOP30", "TOP31", "TOP32"),
@@ -492,6 +508,7 @@ CONTROLS: tuple[Control, ...] = (
         _state("TOP17", _enum_decode(POWERFUL))),
     _hp("zone1_heat_request", 5, "SetZ1HeatRequestTemperature", "setting",
         RequestTemperatureValue("TOP76", _int(20, SIGNED_BYTE[1], "°C", "protocol")), _state("TOP27")),
+    # Direct cool 5..20 °C is the TOP28/TOP35 readback text; the SET6/SET8 rows repeat "20 to max".
     _hp("zone1_cool_request", 6, "SetZ1CoolRequestTemperature", "setting",
         RequestTemperatureValue("TOP81", _int(5, 20, "°C")), _state("TOP28")),
     _hp("zone2_heat_request", 7, "SetZ2HeatRequestTemperature", "setting",
@@ -570,7 +587,6 @@ CONTROLS: tuple[Control, ...] = (
     _hp("force_heater", 47, "SetForceHeater", "setting", BOOL, _state("TOP68", BOOL_DECODE),
         service=True, restrictions=(FIRMWARE_MIN_4_2_0,)),
     _hp("fault_reset", 48, "SetReset", "trigger", TRIGGER, NO_READBACK, service=True),
-    _pcb("pcb_heat_cool_switch", "SetHeatCoolMode", BOOL),
     _pcb("pcb_compressor_switch", "SetCompressorState", BOOL, EXTERNAL_COMPRESSOR_CONTROL),
     _pcb("pcb_smart_grid_mode", "SetSmartGridMode", EnumValue(SMART_GRID)),
     _pcb("pcb_thermostat1_demand", "SetExternalThermostat1State", EnumValue(THERMOSTAT),
@@ -623,11 +639,12 @@ def check_definitions(controls: tuple[Control, ...], capabilities: tuple[Capabil
                 raise ValueError(f"{control.key}: {identity} is not a readable capability")
     commands = {c.reference.name for c in capabilities if not c.readable}
     covered = {control.command for control in controls}
-    if covered != commands:
-        raise ValueError(f"Undefined commands {sorted(commands - covered)}; "
+    excluded = set(EXCLUDED_COMMANDS)
+    if covered & excluded:
+        raise ValueError(f"Excluded commands are defined: {sorted(covered & excluded)}")
+    if covered | (commands & excluded) != commands:
+        raise ValueError(f"Undefined commands {sorted(commands - covered - excluded)}; "
                          f"unknown commands {sorted(covered - commands)}")
-    if set(EXCLUDED_COMMANDS) & (commands | covered):
-        raise ValueError("An excluded command is also a catalog command")
 
 
 @lru_cache(maxsize=1)

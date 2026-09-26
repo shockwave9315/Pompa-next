@@ -76,10 +76,10 @@ def refused(code, key, value=ABSENT, facts=OK):
 
 def test_counts_and_unique_keys():
     defs = control.definitions()
-    assert len(control.CONTROLS) == len(defs) == 64
+    assert len(control.CONTROLS) == len(defs) == 63
     assert sum(c.family == "heat_pump" for c in defs.values()) == 51
-    assert sum(c.family == "optional_pcb" for c in defs.values()) == 13
-    assert len({c.key for c in control.CONTROLS}) == 64
+    assert sum(c.family == "optional_pcb" for c in defs.values()) == 12
+    assert len({c.key for c in control.CONTROLS}) == 63
     assert len(FIRMWARE_COMMANDS) + len(FIRMWARE_OPTIONAL_COMMANDS) == 62
 
 
@@ -89,10 +89,30 @@ def test_every_firmware_command_is_defined_or_explicitly_excluded():
     pcb_names = {c.reference.name for c in catalog if c.reference.family == "PCB"}
     assert set_names == set(FIRMWARE_COMMANDS)
     assert pcb_names | set(control.EXCLUDED_COMMANDS) == set(FIRMWARE_OPTIONAL_COMMANDS)
-    assert set(control.EXCLUDED_COMMANDS) == {"SetOptPCBByte9"}
+    assert set(control.EXCLUDED_COMMANDS) == {"SetOptPCBByte9", "SetHeatCoolMode"}
     defined = {c.command for c in control.CONTROLS}
-    assert defined == (set(FIRMWARE_COMMANDS) | set(FIRMWARE_OPTIONAL_COMMANDS)) - {"SetOptPCBByte9"}
+    assert defined == (set(FIRMWARE_COMMANDS) | set(FIRMWARE_OPTIONAL_COMMANDS)) - {
+        "SetOptPCBByte9", "SetHeatCoolMode",
+    }
     assert not any("Byte9" in c.command or "Byte9" in c.key for c in control.CONTROLS)
+
+
+def test_heat_cool_switch_is_a_known_capability_but_not_a_control():
+    # OptionalPCB.md byte 06 "1st bit = Heat/Cool" documents no polarity: neither payload has a
+    # semantic meaning, so the catalog keeps the command and no control can publish it.
+    capability = {c.reference.identity: c for c in effective_capabilities()}["SetHeatCoolMode"]
+    assert capability.reference.family == "PCB" and not capability.readable
+    assert not any(c.command == "SetHeatCoolMode" or "heat_cool_switch" in c.key
+                   for c in control.CONTROLS)
+    for value in (True, False, "heat", "cool"):
+        refused("unknown_control", "pcb_heat_cool_switch", value)
+    by_key = {c.key: c for c in control.CONTROLS}
+    revived = control.CONTROLS + (
+        replace(by_key["pcb_compressor_switch"], key="pcb_heat_cool_switch", identity="SetHeatCoolMode",
+                command="SetHeatCoolMode"),
+    )
+    with pytest.raises(ValueError, match="Excluded commands are defined"):
+        control.check_definitions(revived, effective_capabilities())
 
 
 def test_set_curves_is_exactly_four_controls_and_other_commands_are_one():
@@ -215,7 +235,6 @@ GOLDEN = [
     ("fault_reset", ABSENT, None, "1"),
     ("zone1_heat_curve", {"target_high": 32}, None, '{"zone1":{"heat":{"target":{"high":32}}}}'),
     ("zone2_cool_curve", {"outside_low": -127}, None, '{"zone2":{"cool":{"outside":{"low":-127}}}}'),
-    ("pcb_heat_cool_switch", True, None, "1"), ("pcb_heat_cool_switch", False, None, "0"),
     ("pcb_compressor_switch", True, None, "1"), ("pcb_compressor_switch", False, None, "0"),
     ("pcb_smart_grid_mode", "normal", None, "0"), ("pcb_smart_grid_mode", "capacity_1", None, "1"),
     ("pcb_smart_grid_mode", "hp_dhw_off", None, "2"), ("pcb_smart_grid_mode", "capacity_2", None, "3"),
@@ -259,6 +278,8 @@ def test_golden_table_covers_every_control_and_every_enum_value():
 
 def test_topics_come_from_the_catalog():
     assert prep("dhw_target_temperature", 50).topic == "commands/SetDHWTemp"
+    # SET37/SET38: the firmware names; Home Assistant's SetBivalentAStartTemp/StopTemp never arrive.
+    assert prep("bivalent_advanced_start_temperature", 0).topic == "commands/SetBivalentAPStartTemp"
     assert prep("bivalent_advanced_stop_temperature", 0).topic == "commands/SetBivalentAPStopTemp"
     assert prep("zone2_cool_curve", {"target_low": 10}).topic == "commands/SetCurves"
     assert prep("pcb_smart_grid_mode", "normal").topic == "commands/SetSmartGridMode"
@@ -314,7 +335,8 @@ def test_bool_is_not_an_integer_and_integer_is_not_a_bool():
 def test_pcb_temperature_boundaries(key):
     assert prep(key, -78).payload == "-78"
     assert prep(key, 120).payload == "120"
-    for bad in (-78.01, 120.5, float("nan"), float("inf"), float("-inf"), True, "21", None):
+    for bad in (-78.01, 120.5, float("nan"), float("inf"), float("-inf"), True, "21", None,
+                10**400, -10**400):  # a huge int must be refused, not overflow a float conversion
         refused("invalid_value", key, bad)
 
 
@@ -453,7 +475,8 @@ def test_force_dhw_operation_mode_prerequisite():
         assert results(prep("force_dhw", True, {"TOP4": live(mode)})) == {"dhw_operation_mode": True}
     for mode in (0, 1, 2, 7):
         refused("prerequisite_not_met", "force_dhw", True, {"TOP4": live(mode)})
-    for fact in (retained(0), stale(0), ABSENT_FACT, live("x"), live(-1), live("3.0")):
+    # Only a live documented TOP4 state (0..8) proves the prerequisite false.
+    for fact in (retained(0), stale(0), ABSENT_FACT, live("x"), live(-1), live("3.0"), live(9), live(-2)):
         assert results(prep("force_dhw", True, {"TOP4": fact})) == {"dhw_operation_mode": None}
     assert results(prep("force_dhw", True, {})) == {"dhw_operation_mode": None}
 
@@ -464,9 +487,13 @@ def test_optional_pcb_prerequisites():
         "heat_pump_optional_pcb": True, "heishamon_optional_pcb_emulation": None,
     }
     refused("prerequisite_not_met", "pcb_smart_grid_mode", "normal", {"TOP110": live(0)})
-    for fact in (retained(0), stale(0), ABSENT_FACT, live(-1)):
+    # TOP110/TOP122 are documented 0/1 settings; their 2-bit field can also decode an undocumented 2.
+    for fact in (retained(0), stale(0), ABSENT_FACT, live(-1), live(2)):
         assert results(prep("pcb_pool_temperature", 20, {"TOP110": fact}))["heat_pump_optional_pcb"] is None
     refused("prerequisite_not_met", "pcb_compressor_switch", True, {"TOP110": live(1), "TOP122": live(0)})
+    for fact in (live(-1), live(2), retained(0)):
+        assert results(prep("pcb_compressor_switch", True, {"TOP110": live(1), "TOP122": fact}))[
+            "external_compressor_control"] is None
     assert results(prep("pcb_compressor_switch", True, {"TOP110": live(1), "TOP122": live(1)})) == {
         "heat_pump_optional_pcb": True, "heishamon_optional_pcb_emulation": None,
         "external_compressor_control": True,
@@ -510,8 +537,8 @@ def test_classes():
     assert by_class["temporary"] == {"powerful_mode", "force_dhw"}
     assert by_class["trigger"] == {"force_defrost", "force_sterilization", "fault_reset"}
     assert by_class["curve"] == set(CURVE_KEYS)
-    assert len(by_class["pcb_input"]) == 13
-    assert len(by_class["setting"]) == 64 - 2 - 3 - 4 - 13
+    assert len(by_class["pcb_input"]) == 12
+    assert len(by_class["setting"]) == 63 - 2 - 3 - 4 - 12
 
 
 # -------------------------------------------------------------------------------- readback

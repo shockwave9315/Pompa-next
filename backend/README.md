@@ -10,7 +10,8 @@ Domain rules are in [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 |---|---|
 | `pompa/config.py` | Environment settings; invalid configuration stops startup. |
 | `pompa/catalog.py` | The 21 recorded metrics: topics, priority, unit, kind, sentinels, ranges. |
-| `pompa/capabilities.py` | Reference-backed TOP/OPT/SET/XTOP capabilities and generic physical payload typing. |
+| `pompa/capabilities.py` | Reference-backed TOP/OPT/SET/PCB/XTOP capabilities and generic physical payload typing. |
+| `pompa/control.py` | Stage 4E pure control domain: semantic control definitions, validation, payload encoding, readback mapping, prerequisites. No I/O. |
 | `pompa/ingest.py` | Connection epochs, LWT, retained vs live, `seen_live`, freshness, source selection. |
 | `pompa/minute.py` | `MinuteAccumulator` → `MinuteRow` (full-minute source life, time-weighted means). |
 | `pompa/aggregation.py` | `Stats` algebra, derived series, energy, paired COP, coverage. |

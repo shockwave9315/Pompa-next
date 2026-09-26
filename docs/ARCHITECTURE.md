@@ -1833,10 +1833,11 @@ Pompa Next adopts neither the composite entities nor the automatic retry.
 #### 25.5.5 Complete command inventory and control definitions
 
 **Counts.** 62 upstream command names total = 48 heat-pump commands + 14 Optional PCB commands.
-Pompa Next defines 64 semantic controls = 51 heat-pump controls + 13 Optional PCB controls,
-because `SetCurves` becomes four curve controls and the unknown `SetOptPCBByte9` is not exposed.
-`SetOptPCBByte9` is a raw byte that upstream documents only as "?". The following are not heat-pump
-commands and are out of scope:
+Pompa Next defines 63 semantic controls = 51 heat-pump controls + 12 Optional PCB controls,
+because `SetCurves` becomes four curve controls and two Optional PCB commands have no validated
+meaning and are not exposed. `SetOptPCBByte9` is a raw byte that upstream documents only as "?".
+`SetHeatCoolMode` is a known catalog command whose bit polarity is undocumented (§25.5.14 O4). The
+following are not heat-pump commands and are out of scope:
 
 - `SendRawValue` (raw serial bytes);
 - `gpio/…` relays;
@@ -1866,8 +1867,9 @@ a display string, and is the only representation. No numeric PCB id is invented.
 **Keys and values.** Keys and enum ids are language-neutral snake_case identifiers. Units are
 symbols (`°C`, `K`, `min`, `%`, `duty`). HA labels and legacy Polish labels are not identities, and
 the backend carries no display strings. Numeric heat-pump values are integers only, because the
-firmware truncates. PCB temperatures are finite numbers in −78..120 °C, the encodable NTC table
-range.
+firmware truncates. PCB temperatures are finite numbers in −78..120 °C, the range firmware
+`temp2hex()` converts without clamping. The resulting NTC byte quantizes non-uniformly (about
+0.3 °C to 11 °C per step; −78 °C itself encodes as `0xFE`), so no step is claimed.
 
 **Classes.** Five classes, derived from firmware behavior:
 
@@ -1896,7 +1898,7 @@ means the readable TOP value equals the encoded value.
 | `quiet_mode` | SET3 `SetQuietMode` | setting | `off`,`level_1`,`level_2`,`level_3` → `0`–`3` | TOP18 = | HA-only `4` excluded | U | on |
 | `powerful_mode` | SET4 `SetPowerfulMode` | temporary | `off`,`min_30`,`min_60`,`min_90` → `0`–`3` | TOP17 = | ends by itself | U | on |
 | `zone1_heat_request` | SET5 | setting | int; TOP76=`0`: shift −5..5 K; `1`: direct 20..127 °C (max = protocol bound) | TOP27 = | range needs TOP76; device maximum undocumented | U | on |
-| `zone1_cool_request` | SET6 | setting | int; TOP81=`0`: shift −5..5 K; `1`: direct 5..20 °C | TOP28 = | range needs TOP81 | T | off |
+| `zone1_cool_request` | SET6 | setting | int; TOP81=`0`: shift −5..5 K; `1`: direct 5..20 °C | TOP28 = | range needs TOP81; direct range from the TOP28/TOP35 text (the SET6/SET8 rows repeat "20 to max") | T | off |
 | `zone2_heat_request` | SET7 | setting | as `zone1_heat_request` | TOP34 = | TOP76 | U | on |
 | `zone2_cool_request` | SET8 | setting | as `zone1_cool_request` | TOP35 = | TOP81 | T | off |
 | `operation_mode` | SET9 | setting | `heat`,`cool`,`auto`,`dhw`,`heat_dhw`,`cool_dhw`,`auto_dhw` → `0`–`6` | TOP4: `auto`→{2,7}, `auto_dhw`→{6,8}, else = | — | U | on |
@@ -1949,7 +1951,6 @@ pump's Optional PCB setting TOP110 = `1` (observable).
 
 | Key | Upstream | Value → payload | Notes | Owner | HA |
 |---|---|---|---|---|---|
-| `pcb_heat_cool_switch` | `SetHeatCoolMode` | bool → `0`/`1` (bit 7 of byte 06) | emulated Heat/Cool switch bit; which mode `1` selects is undocumented, so no heat/cool names | – | none |
 | `pcb_compressor_switch` | `SetCompressorState` | bool | prerequisite TOP122 = `1` (SET32 on); effect also needs a main-PCB DIP switch (HA source) | T | off |
 | `pcb_smart_grid_mode` | `SetSmartGridMode` | `normal`,`capacity_1`,`hp_dhw_off`,`capacity_2` → `0`–`3` | — | T | off |
 | `pcb_thermostat1_demand` | `SetExternalThermostat1State` | `none`,`cool`,`heat`,`heat_cool` → `0`–`3` | doc: H/J series only | – | none |
@@ -1962,6 +1963,9 @@ pump's Optional PCB setting TOP110 = `1` (observable).
 | `pcb_zone2_room_temperature` | `SetZ2RoomTemp` | number −78..120 °C | — | – | none |
 | `pcb_zone2_water_temperature` | `SetZ2WaterTemp` | number −78..120 °C | — | – | none |
 | `pcb_solar_temperature` | `SetSolarTemp` | number −78..120 °C | — | – | none |
+
+`SetHeatCoolMode` (bit 7 of byte 06, "Heat/Cool SW") stays a known `PCB` catalog capability but
+is not a control: no pinned source says which bit value selects heat or cool (§25.5.14 O4).
 
 **Ranges.** They come from the upstream reference, where the tracked and upstream text agree.
 
@@ -1993,8 +1997,8 @@ nearest entries are split K-series units. The snapshot shows these settings:
   have no effect. The owner's "works" in HA is HA's retained echo.
 
 **Proven inapplicable:** nothing. Undocumented values (HA's `7`/`8` operating modes, quiet `4`)
-are not commands. `SetOptPCBByte9` is excluded because its meaning is unknown, not because it is
-inapplicable.
+are not commands. `SetOptPCBByte9` and `SetHeatCoolMode` are excluded because their value
+meaning is unknown, not because they are inapplicable.
 
 **Legacy product evidence.** Legacy never published a command. It exposed a read-only "disabled
 future" projection of ten control candidates: DHW temperature and delta, heat delta, Z1 heat
@@ -2024,8 +2028,9 @@ The control domain evaluates three observable facts from it (boundary: §25.5.4)
    - PCB controls need TOP110 = `1`;
    - `force_dhw` needs TOP4 ∈ {3,4,5,6,8}.
 
-   A live reading that proves the prerequisite false makes the control non-executable (`409`). An
-   absent, stale or retained reading, or the documented unknown value `-1`, leaves it `unknown`:
+   A live reading of a documented state that proves the prerequisite false makes the control
+   non-executable (`409`). An absent, stale or retained reading, the documented unknown value `-1`,
+   or any other undocumented value (for example TOP110 = `2`), leaves it `unknown`:
    the request proceeds, and the response reports the fact. `pcb_compressor_switch` also needs
    TOP122 = `1`: external compressor control on, per the HA source comment and TOP122's
    optional-PCB description.
@@ -2266,10 +2271,11 @@ in-flight guard, request logging, schema or storage change.
 
 **Control domain (`pompa/control.py`).**
 
-- **Definitions.** 64 definitions (51 heat-pump, 13 Optional PCB). They are verified at load
+- **Definitions.** 63 definitions (51 heat-pump, 12 Optional PCB). They are verified at load
   against the catalog: identity, family, upstream name, and readable readback, context and
-  prerequisite TOPs. Every catalog command is covered; `SetOptPCBByte9` is the one explicit
-  exclusion.
+  prerequisite TOPs. Every catalog command is defined or explicitly excluded, and no excluded
+  command is defined. The exclusions are `SetHeatCoolMode` (in the catalog) and the firmware-only
+  `SetOptPCBByte9`.
 - **`prepare(key, value, facts)`** returns the catalog topic, the exact payload, the validated
   value, the expected readback semantic and the evaluated prerequisites. Otherwise it raises
   `unknown_control`, `invalid_request`, `validation_context_unavailable`, `invalid_value` or
@@ -2286,17 +2292,26 @@ in-flight guard, request logging, schema or storage change.
 | O1 | Direct heat request maximum | No upstream source gives it: "20 to max". The integration examples conflict (HA YAML 40, openHAB 65). Accepted 20..127 °C: documented minimum, and the maximum is the `value+128` byte bound (−128 would encode byte 0, "no change"). `range_basis: "protocol"`. The device limit can only be seen through readback. |
 | O2 | Curve ranges | Upstream documents none; the firmware encodes `value+128`. Every field accepts −127..127 °C, `protocol` basis. HA ranges are recorded as secondary evidence only. |
 | O3 | SET21–SET23 ranges | Upstream gives units only. Encoders: delay `value+1` → 0..254 min; start/stop delta `value+128` → −127..127 K; all `protocol` basis. MQTT-Topics says J-series only, but ProtocolByteDecrypt says J/K/L, and the owner K snapshot reports values, so no series restriction is reported. |
-| O4 | `SetHeatCoolMode` polarity | Firmware sets bit 7 of PCB byte 06 to `toInt()==1`. OptionalPCB.md says only "Heat/Cool" and documents no polarity. Exposed as a boolean switch bit (`pcb_heat_cool_switch`) with no heat/cool names. |
+| O4 | `SetHeatCoolMode` polarity | Firmware sets bit 7 of PCB byte 06 to `toInt()==1`. OptionalPCB.md says only "1st bit = Heat/Cool" ("Heat/Cool SW"); no pinned source, upstream history or HA entity documents which value selects heat or cool, or even which switch contact state a bit value means. A boolean would publish a raw bit whose physical meaning is a heat/cool choice nobody can state. Not a control: the command stays a known `PCB` capability, excluded with a reason until polarity evidence exists. |
 | O5 | Demand Control mapping | The firmware writes the raw `toInt()` byte, and its default datagram byte 14 is 0xEB. The OptionalPCB.md table (2B/52/85/B8/EB = 5/25/50/75/100 %) matches that default. The range text ("234") and HA's linear formula do not. Frozen: only the five documented points, mapped to `43`/`82`/`133`/`184`/`235`. |
 | O6 | Curve invariants | Nothing authoritative exists; none is enforced. |
 | O7 | PCB identity scheme | Family `PCB`, identity = upstream command name. |
 | O8 | Reference refresh timing | Done in 4E-B. Verbatim upstream copies with recorded blob ids are the reference strategy; upstream is never hand-edited here. |
 
+**Protocol-range review (O1–O3).** The independent 4E-B review re-examined each `protocol` range.
+Firmware encodability alone does not prove a device operating range, and no pinned source,
+firmware comment or upstream history narrows these values. A documented subset does not exist,
+an HA or integration-example range would be invented protocol truth, and refusing the controls
+would withdraw documented capability (owner decision: completeness, §25.5). The exposed bound is
+therefore the narrowest truthful executable model. `range_basis: "protocol"` tells clients it is
+not a device limit, and the device's accepted value appears only through readback.
+
 **Other upstream discrepancies found (documentation only; firmware is authoritative).**
 
-- ProtocolByteDecrypt.md labels byte 80 as TOP84 and byte 81 as TOP83, and byte 68 as TOP136.
-  The firmware decodes TOP83 from byte 80, TOP85 from byte 81, TOP84 from byte 82 and TOP135 from
-  byte 68. That matches the `SetCurves` and `SetBivalentAPStopTemp` encoders.
+- ProtocolByteDecrypt.md labels bytes 80/81/82 as TOP84/TOP83/TOP85 and bytes 67/68 as
+  TOP135/TOP136. The firmware decodes TOP83 from byte 80, TOP85 from byte 81, TOP84 from byte 82,
+  TOP136 from byte 67 and TOP135 from byte 68. That matches the `SetCurves` and
+  `SetBivalentAPStopTemp` encoders.
 - ProtocolByteDecrypt documents quiet "scheduled" as byte-7 pattern `0b10001`. HA's quiet `4`
   encodes `0b00101`, so it is not that state and stays excluded.
 

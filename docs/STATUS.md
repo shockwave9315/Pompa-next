@@ -5,7 +5,8 @@
 **Current stage: Stage 4E — SET/control backend, final API freeze and runtime validation.**
 Checkpoint 4E-A is owner accepted and closed at `1a7826655aefb5f79daf337b7aa5fe6e5418ab3c`.
 Checkpoint 4E-B (reference refresh and pure control domain) is implemented on branch
-`stage-4e-control` in draft PR #10 and awaits owner review. 4E-C has not started. The frozen control contract is `docs/ARCHITECTURE.md` §25.5
+`stage-4e-control` in draft PR #10. Its independent adversarial review and corrective pass are
+done, and it awaits owner review. 4E-C has not started. The frozen control contract is `docs/ARCHITECTURE.md` §25.5
 and the Stage 4E section of `docs/API.md`. Frontend work starts after Stage 4.
 
 Stage 4D — DONE and merged to `main` (PR #9, merge commit
@@ -353,7 +354,7 @@ The readback window `W` stays provisional until the 4E-D CT109 measurement.
   - Proves the MQTT write semantics.
   - Freezes the transport: QoS 0, non-retained, connected-only, at most one publish per request,
     no retry.
-  - Freezes 64 semantic controls with readback mapping, a factual readback model, no command
+  - Freezes 64 semantic controls (63 after the 4E-B review) with readback mapping, a factual readback model, no command
     persistence and the `/api/v1/controls` contract.
   - Plans 4E-B–4E-D and the later CT109 write matrix.
 - **4E-B — reference refresh and pure control domain (implemented, AWAITING OWNER REVIEW):**
@@ -361,17 +362,37 @@ The readback window `W` stays provisional until the 4E-D CT109 measurement.
     `heishamon/HeishaMon@0de4f3c`, with blob-id provenance.
   - The capability catalog grows from 203 to 218 entries (+SET47/48, +13 PCB). PCB identities are
     upstream command names; command topics are never readings.
-  - New pure `pompa/control.py`: 64 semantic controls (51 heat-pump, 13 Optional PCB), with
+  - New pure `pompa/control.py`: 63 semantic controls (51 heat-pump, 12 Optional PCB), with
     validation, payload encoding, readback metadata, prerequisites and restrictions.
-    `SetOptPCBByte9` is explicitly excluded.
+    `SetOptPCBByte9` and `SetHeatCoolMode` are explicitly excluded.
   - The 4E-B open questions are resolved from evidence (§25.5.14).
   - An independent firmware probe matched 245 of 245 encode→decode samples.
   - Tests:
     - focused control/capability/physical-reading tests: 316 passed;
     - full no-DB suite: 1,329 passed, 303 MariaDB-gated skips (baseline at the 4E-A head: 1,065
       passed, 303 skipped);
-    - full suite against a local MariaDB 10.11 server: 1,632 passed. MariaDB 11.4 was unavailable
-      in the execution environment (Docker Hub blocked), so the 11.4 target run is still owed.
+    - full suite against a local MariaDB 10.11 server: 1,632 passed.
+  - Independent adversarial review and corrective pass on CT112 (0 blocker, 1 important,
+    6 minor):
+    - IMPORTANT, fixed: `SetHeatCoolMode` was an executable boolean although no pinned source
+      documents which bit value selects heat or cool. It is now a known `PCB` capability excluded
+      from control (§25.5.14 O4); 64 → 63 controls.
+    - MINOR, fixed: a huge integer for a PCB temperature raised `OverflowError` instead of
+      `invalid_value`; an undocumented live prerequisite value (for example TOP110 = `2`) proved a
+      prerequisite false instead of leaving it unknown; documentation of the cool direct range
+      source, NTC quantization, ProtocolByteDecrypt mislabels and the backend module table.
+    - MINOR, reported for the owner, unchanged: `force_dhw=false` is also refused while a live
+      TOP4 is not a DHW mode (executability is per control); the upstream note that SET5–SET8 do
+      not set the direct temperature in thermostat/thermistor zone modes (observable as
+      TOP111/TOP112) is not reported as a restriction.
+    - Confirmed from the pinned firmware: the 43 state pairs, 16 curve bytes, two effect
+      readbacks, the Demand Control table points, PCB bit layout, verbatim reference blob ids,
+      preserved 203 earlier identities (only six upstream descriptions changed) and the unchanged
+      157 physical slots, order and topic map. O1–O3 protocol ranges stay (§25.5.14).
+    - Tests at the corrected head: focused 315 passed; full no-DB 1,328 passed, 303 MariaDB-gated
+      skips; full suite on MariaDB 11.4.13: 1,631 passed, 0 skipped. The backend image built and
+      its packaged references and catalog (218 / 157 readable / 63 controls) were probed in an
+      offline container.
 - **4E-C — publish path and control API:** planned.
 - **4E-D — CT109 validation, API freeze, whole-stage review and closeout:** planned.
 
