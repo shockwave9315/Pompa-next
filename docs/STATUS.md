@@ -5,8 +5,9 @@
 **Current stage: Stage 4E — SET/control backend, final API freeze and runtime validation.**
 Checkpoint 4E-A is owner accepted and closed at `1a7826655aefb5f79daf337b7aa5fe6e5418ab3c`.
 Checkpoint 4E-B (reference refresh and pure control domain) is OWNER ACCEPTED/CLOSED on branch
-`stage-4e-control` in draft PR #10, at the commit that records this closure. 4E-C is next and has
-not started. The frozen control contract is `docs/ARCHITECTURE.md` §25.5
+`stage-4e-control` in draft PR #10 at `dc157beb3c1fdf58c7b23c7075b8cfbb508fd1c4`. Checkpoint 4E-C
+(control runtime and API) is implemented and AWAITING OWNER REVIEW. 4E-D has not started. The
+frozen control contract is `docs/ARCHITECTURE.md` §25.5
 and the Stage 4E section of `docs/API.md`. Frontend work starts after Stage 4.
 
 Stage 4D — DONE and merged to `main` (PR #9, merge commit
@@ -328,8 +329,8 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
 
 ## Out of scope
 
-- In 4E-B: any MQTT publish path, the control HTTP API, readback waiting, in-flight guards,
-  request logging, schema or storage changes, frontend and CT109.
+- In 4E-C: CT109, any real broker or heat-pump command, schema or storage changes, a
+  configurable readback window, and 4E-D work.
 - Throughout Stage 4E: command persistence or history, generic MQTT publish, automatic retry or
   reconciliation, Stage 5 frontend, cooling/heater/cost/external-meter analytics, and year or
   season reports.
@@ -339,7 +340,8 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
 
 ## Next
 
-Stage 4E-C: the publish path and `/api/v1/controls` (`docs/ARCHITECTURE.md` §25.5.13).
+Owner review of 4E-C (`docs/ARCHITECTURE.md` §25.5.15). 4E-D (CT109 validation, API freeze,
+whole-stage review) starts only after owner approval.
 The readback window `W` stays provisional until the 4E-D CT109 measurement.
 
 ## Stage 4E checkpoints
@@ -398,7 +400,25 @@ The readback window `W` stays provisional until the 4E-D CT109 measurement.
   - Closure (F7/F8 decisions): focused 317 passed; full no-DB 1,330 passed, 303
     MariaDB-gated skips; full suite on MariaDB 11.4.13: 1,633 passed, 0 skipped. No packaging
     change, so no image rebuild.
-- **4E-C — publish path and control API:** NEXT, not started.
+- **4E-C — control runtime and API (implemented, AWAITING OWNER REVIEW):**
+  - `GET /api/v1/controls` (63 controls) and `POST /api/v1/controls/{key}`, with no database.
+  - `MqttAdapter.publish_command`: shared client, QoS 0, `retain=false`, connected only, at most
+    one publish, no retry or replay.
+  - `pompa/control_runtime.py`: per-key in-memory in-flight guard, factual readback (`matched`,
+    `unchanged_match`, `not_observed`, `not_applicable`) within the provisional `W` = 15 s, one
+    log line per request.
+  - The recorder gains only a generic readings observation and a change signal; it knows nothing
+    about control.
+  - Evidence:
+    - `test_control_api.py`: 53 tests;
+    - runtime/API/adapter mutations killed;
+    - a disposable local Mosquitto probe passed 18/18 checks: exactly one QoS 0 non-retained
+      publication, no retained command, retained TOP not confirming, `503` while disconnected,
+      no replay on reconnect, Optional PCB `not_applicable`;
+    - focused 460 passed; full no-DB 1,383 passed, 303 MariaDB-gated skips; full MariaDB 11.4.13
+      1,686 passed, 0 skipped;
+    - the backend image built and an offline container smoke showed 63 controls, 218
+      capabilities, 157 readings and POST `503`.
 - **4E-D — CT109 validation, API freeze, whole-stage review and closeout:** planned.
 
 ## Stage 4D checkpoints (DONE)

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from collections.abc import Callable
 from datetime import date, datetime
 from typing import Literal
 
+import anyio
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -20,6 +22,8 @@ from .activity import ActivityRecordInvalid
 from . import optional_policy
 from . import report as report_domain, report_read
 from .capabilities import capability_dict, effective_capabilities
+from .control import ABSENT, definitions as controls_catalog
+from .control_runtime import ControlRequestError, ControlRuntime
 from .history_profile import HISTORY_PROFILES, capability_topics, history_profile_dict
 from .minute import MINUTE, iso_utc
 from .optional_policy import (
@@ -121,14 +125,48 @@ def _selection_dict(view: SelectionView) -> dict:
     }
 
 
+def _no_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
+    body = dict(pairs)
+    if len(body) != len(pairs):
+        raise ValueError("duplicate JSON object key")
+    return body
+
+
+def _reject_constant(name: str) -> None:
+    raise ValueError(f"{name} is not valid JSON")
+
+
+def _control_value(raw: bytes) -> object:
+    """The ``value`` of a control request body, or ``ABSENT`` for ``{}`` (triggers)."""
+    try:
+        body = json.loads(raw, object_pairs_hook=_no_duplicate_keys, parse_constant=_reject_constant)
+    except (ValueError, RecursionError):
+        raise ControlRequestError("invalid_request", "the body must be one valid JSON object") from None
+    if type(body) is not dict:
+        raise ControlRequestError("invalid_request", "the body must be a JSON object")
+    unknown = sorted(set(body) - {"value"})
+    if unknown:
+        raise ControlRequestError("invalid_request", f"unknown body fields {unknown}")
+    return body.get("value", ABSENT)
+
+
+def _control_error(error: ControlRequestError) -> JSONResponse:
+    return JSONResponse(status_code=error.status, content={"detail": error.detail, "code": error.code})
+
+
 class SelectionRequest(BaseModel):
     base_revision: int
     identities: list[str]
 
 
 def create_app(recorder: Recorder, storage: Storage, clock: Callable[[], float] = time.time,
-               lifespan=None) -> FastAPI:
+               lifespan=None, controls: ControlRuntime | None = None) -> FastAPI:
     app = FastAPI(title="Pompa Next", version="1", lifespan=lifespan)
+    # Without an injected runtime nothing can be published: POST answers 503.
+    controls = controls if controls is not None else ControlRuntime(recorder, None, clock=clock)
+    # Readback waits run on their own limiter so they never hold the tokens of the default
+    # threadpool that serves every synchronous endpoint. The per-key guard bounds them anyway.
+    control_limiter: list[anyio.CapacityLimiter] = []
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
@@ -181,6 +219,22 @@ def create_app(recorder: Recorder, storage: Storage, clock: Callable[[], float] 
             raise HTTPException(status_code=500, detail=f"report history is inconsistent: {exc}") from None
         except StorageUnavailable as exc:
             raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from None
+
+    @app.get("/api/v1/controls")
+    def controls_list() -> dict:
+        """Every control over one in-memory live observation: no database, never publishes."""
+        return controls.controls()
+
+    @app.post("/api/v1/controls/{key}")
+    async def control_command(key: str, request: Request):
+        """Validate, publish at most once, report the factual readback. Errors publish nothing."""
+        try:
+            value = _control_value(await request.body())
+            if not control_limiter:
+                control_limiter.append(anyio.CapacityLimiter(max(len(controls_catalog()), 1)))
+            return await anyio.to_thread.run_sync(controls.execute, key, value, limiter=control_limiter[0])
+        except ControlRequestError as error:
+            return _control_error(error)
 
     @app.get("/api/v1/metrics")
     def metrics(request: Request,

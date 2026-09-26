@@ -11,7 +11,8 @@ CAPABILITY_FIELDS = {
 READING_FIELDS = {"topic", "value", "kind", "raw", "mode", "available", "received_at"}
 PATHS = {"/health", "/api/v1/status", "/api/v1/live", "/api/v1/metrics", "/api/v1/history",
          "/api/v1/optional-history/selection", "/api/v1/optional-history/series",
-         "/api/v1/activity", "/api/v1/activity/live", "/api/v1/report"}  # Stage 4D-C-B addition
+         "/api/v1/activity", "/api/v1/activity/live", "/api/v1/report",  # Stage 4D-C-B addition
+         "/api/v1/controls", "/api/v1/controls/{key}"}  # Stage 4E-C addition
 PCB_IDENTITIES = [
     "SetHeatCoolMode", "SetCompressorState", "SetSmartGridMode", "SetExternalThermostat1State",
     "SetExternalThermostat2State", "SetPoolTemp", "SetBufferTemp", "SetZ1RoomTemp",

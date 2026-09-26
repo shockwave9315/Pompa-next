@@ -86,7 +86,7 @@ backend on CT109 before frontend work. Checkpoints:
 
 - A: research and contract freeze (done);
 - B: reference refresh and pure control domain (owner accepted/closed);
-- C: publish path and `/api/v1/controls` (next);
+- C: publish path and `/api/v1/controls` (implemented, awaiting owner review);
 - D: CT109 validation, API freeze, whole-stage review and the owner merge.
 
 See `docs/ARCHITECTURE.md` §25.5.

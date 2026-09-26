@@ -29,11 +29,11 @@ the HTTP surface promises.
 | `GET /api/v1/activity` | Activity timeline, compressor runs, off intervals, defrosts and summary over `[from, to)` | no | yes |
 | `GET /api/v1/activity/live` | Current activity from the in-memory live observation | no | no |
 | `GET /api/v1/report` (Stage 4D-C) | Day/week/month/custom Warsaw calendar report | no | yes |
-| `GET /api/v1/controls` (Stage 4E-C, not yet implemented) | Control definitions, current readback state and executability | no | no |
-| `POST /api/v1/controls/{key}` (Stage 4E-C, not yet implemented) | Validate, publish once and report readback for one semantic command | yes | no |
+| `GET /api/v1/controls` (Stage 4E-C) | Control definitions, current readback state and executability | no | no |
+| `POST /api/v1/controls/{key}` (Stage 4E-C) | Validate, publish once and report readback for one semantic command | yes | no |
 
-The application exposes the first eleven product API endpoints above; the two control routes are
-frozen here and implemented in Stage 4E-C. FastAPI may additionally
+The application exposes the thirteen product API endpoints above; the two control routes were
+frozen in Stage 4E-A and are implemented in Stage 4E-C. FastAPI may additionally
 expose its standard documentation/OpenAPI routes (`/docs`, `/redoc`, `/openapi.json`). `/api/v1` is
 a fresh namespace, not inherited legacy versioning.
 
@@ -829,7 +829,8 @@ may be read from raw below that frontier under a report-local edge rule. Existin
 
 ## Stage 4E control (frozen in 4E-A; implemented in 4E-C)
 
-This section is the implementation contract. At checkpoint 4E-A these routes are not live. Domain
+This section is the implementation contract. Stage 4E-C implements it; the details the 4E-A
+freeze left open are marked below. Domain
 rules, the complete list of controls, the evidence and the owner decisions are in
 [`ARCHITECTURE.md`](ARCHITECTURE.md) §25.5. The control resources need MQTT but not MariaDB. They
 never read or write storage, and they leave every earlier response unchanged.
@@ -907,6 +908,13 @@ upstream publishes no readback of the emulated inputs, and `commands/…` echoes
 For `request_temperature`, `active` is `shift`, `direct` or `null`. It comes from a live
 TOP76/TOP81 reading.
 
+**Curves (4E-C detail).** A curve's `readback` is `{"identity": null, "kind": "state", "fields":
+{"target_high": "TOP29", …}}`. Its `state` is `{"value": {field: value, …}, "fields": {field:
+{"identity", "value", "raw", "mode", "received_at", "available"}}}`.
+
+`mqtt.connected` and the `mqtt_disconnected` reason come from the same in-memory observation as
+the readings. A `POST` checks the MQTT client's own connection again at publish time.
+
 `force_dhw` `false` deasserts the Force DHW request. It is not a stop or cancel of a DHW cycle
 already running, which the heat pump finishes under its ordinary DHW logic. Its TOP4 prerequisite
 applies to both values.
@@ -940,7 +948,22 @@ broker nor HeishaMon receipt, and never physical execution.
 }
 ```
 
-**Readback outcomes.** Only `mode="live"` readings count.
+**Order and body (4E-C detail).**
+
+- The body must be exactly one JSON object whose only allowed field is `value`. Duplicate object
+  keys at any depth and `NaN`/`Infinity` are `400 invalid_request`.
+- Checks run in this order: body (`400`), key (`404`), `command_in_progress` (`409`), validation
+  (`400`/`409`/`422`), then the publish (`503`).
+- Once paho has accepted the publish, the response is `200` whatever the readback shows.
+
+For a `curve`, `readback` also has `fields` (requested field → TOP). `expected` and `observed` are
+objects over the requested fields only, and `observed` holds `null` for a field with no live
+reading. A request without readback returns at once with
+`{"identity": null, "kind": null, "expected": null, "outcome": "not_applicable", "observed": null,
+"window_seconds": W, "waited_seconds": 0.0}`.
+
+**Readback outcomes.** Only `mode="live"` readings that are `available` count. A reading
+received before `publish.at` is pre-publish state; one received at or after it is post-publish.
 
 | Outcome | Meaning |
 |---|---|

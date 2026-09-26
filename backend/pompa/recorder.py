@@ -373,6 +373,17 @@ def physical_reading_dict(reading: PhysicalReading, *, now: float, connected: bo
     }
 
 
+@dataclass(frozen=True)
+class ReadingsObservation:
+    """One locked observation of the physical readings (``/live?include=readings`` entries)."""
+
+    now: float
+    connected: bool
+    readings: dict[str, dict]
+    received_at: dict[str, float | None]  # exact receipt instants, same clock as ``now``
+    seq: int  # MQTT events applied so far; see ``Recorder.wait_for_change``
+
+
 class Recorder:
     def __init__(self, ingest: Ingest, accumulator: MinuteAccumulator, storage: Storage, buffer_rows: int,
                  retention_days: int = 365):
@@ -382,6 +393,10 @@ class Recorder:
         self.storage = storage
         self.buffer_rows = buffer_rows
         self._lock = threading.Lock()
+        # Generic "an MQTT event was applied" signal for waiters (Stage 4E readback). It shares
+        # the lock; Condition.wait releases it, so a waiter never blocks the MQTT thread.
+        self._changed = threading.Condition(self._lock)
+        self._change_seq = 0
         self._waiting: deque[RecordedMinute] = deque()
         self._protected: list[RecordedMinute] = []
         self._flushing = False
@@ -424,21 +439,37 @@ class Recorder:
         with self._lock:
             self._advance(t)
             self.ingest.connect(t)
+            self._notify_changed()
 
     def on_disconnect(self, t: float) -> None:
         with self._lock:
             self._advance(t)
             self.ingest.disconnect(t)
+            self._notify_changed()
 
     def on_lwt(self, payload: str, retained: bool, t: float) -> None:
         with self._lock:
             self._advance(t)
             self.ingest.lwt_message(payload, retained, t)
+            self._notify_changed()
 
     def on_message(self, topic: str, payload: str, retained: bool, t: float) -> None:
         with self._lock:
             self._advance(t)
             self.ingest.message(topic, payload, retained, t)
+            self._notify_changed()
+
+    def _notify_changed(self) -> None:
+        self._change_seq += 1
+        self._changed.notify_all()
+
+    def wait_for_change(self, seq: int, timeout: float) -> None:
+        """Block until an MQTT event after observation ``seq`` was applied, or ``timeout``.
+
+        Waiting releases the recorder lock, so ingest is never delayed by a waiter.
+        """
+        with self._lock:
+            self._changed.wait_for(lambda: self._change_seq != seq, max(timeout, 0.0))
 
     # ------------------------------------------------------------- recorder tick
 
@@ -666,14 +697,34 @@ class Recorder:
                 },
             }
             if include_readings:
-                body["readings"] = {
-                    reading.identity: physical_reading_dict(
-                        reading, now=now, connected=ing.connected,
-                        lwt_offline=ing.lwt == LWT_OFFLINE, stale_after=ing.stale_after,
-                    )
-                    for reading in ing.physical_snapshot()
-                }
+                body["readings"] = self._readings(now)
             return body
+
+    def _readings(self, now: float) -> dict[str, dict]:
+        ing = self.ingest
+        return {
+            reading.identity: physical_reading_dict(
+                reading, now=now, connected=ing.connected,
+                lwt_offline=ing.lwt == LWT_OFFLINE, stale_after=ing.stale_after,
+            )
+            for reading in ing.physical_snapshot()
+        }
+
+    def readings_observation(self, clock: Callable[[], float]) -> ReadingsObservation:
+        """The ``/live?include=readings`` readings as one locked observation, plus the exact
+        receipt instants and the change sequence number a waiter can wait beyond.
+
+        No database I/O and no state change.
+        """
+        with self._lock:
+            now = clock()
+            return ReadingsObservation(
+                now=now,
+                connected=self.ingest.connected,
+                readings=self._readings(now),
+                received_at={r.identity: r.received_at for r in self.ingest.physical_snapshot()},
+                seq=self._change_seq,
+            )
 
     def physical_readings(self) -> tuple[PhysicalReading, ...]:
         """Copy immutable physical readings under the MQTT/tick snapshot lock."""

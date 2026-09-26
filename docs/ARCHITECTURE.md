@@ -2206,7 +2206,7 @@ A Stage 5 need for any of these requires new evidence. Accepted APIs are unchang
 | Checkpoint | Scope | Likely files | Gate |
 |---|---|---|---|
 | **4E-B** pure control domain + reference refresh (OWNER ACCEPTED/CLOSED, §25.5.14) | Refresh tracked `MQTT-Topics.md` (SET47/48) and add `OptionalPCB.md` verbatim at the pinned upstream commit. Extend the parser with the `PCB` family. Add the pure definition module: validation, encoding, readback mapping, prerequisite and context evaluation from a readings snapshot. No MQTT, no API. | `docs/reference/heishamon/*`, `pompa/capabilities.py`, new `pompa/control.py`, capability and control tests | Golden encoding table per command against the firmware encoders; boundary, enum and type rejection; readback mapping; curve JSON; definition ↔ reference coverage; updated capability counts. Adversarial review of definitions vs firmware source. No CT109. Owner gate resolves every open value, identity and invariant question (§25.5.2, §25.5.5, §25.5.11) before the executable definitions are frozen. |
-| **4E-C** publish path + API | Connected-only QoS 0 non-retained `publish` on the MQTT adapter; per-key in-flight guard; bounded readback observation; `GET`/`POST /api/v1/controls`; one log line per request | `pompa/mqtt.py`, `pompa/control.py` (or a small runtime module), `pompa/api.py`, `pompa/main.py`, tests | Fake-client tests: no publish on any refusal; exactly one publish per accepted request; disconnected `503`; no retry after reconnect; every readback outcome with an injected clock; `409` paths; recorder, history and report unaffected; earlier endpoints byte-identical. Adversarial review. No CT109. |
+| **4E-C** publish path + API (implemented, §25.5.15; awaiting owner review) | Connected-only QoS 0 non-retained `publish` on the MQTT adapter; per-key in-flight guard; bounded readback observation; `GET`/`POST /api/v1/controls`; one log line per request | `pompa/mqtt.py`, `pompa/control.py` (or a small runtime module), `pompa/api.py`, `pompa/main.py`, tests | Fake-client tests: no publish on any refusal; exactly one publish per accepted request; disconnected `503`; no retry after reconnect; every readback outcome with an injected clock; `409` paths; recorder, history and report unaffected; earlier endpoints byte-identical. Adversarial review. No CT109. |
 | **4E-D** CT109 validation, API freeze, closeout | Owner deploys; pre-checks; owner-approved write matrix (below); latency measurement fixes `W`; `docs/API.md` final freeze; whole-stage adversarial review; owner merge; Stage 4 DONE; Stage 5 ready | docs, `scripts/smoke.sh` only if needed | CT109 evidence accepted by the owner; review findings resolved; merge decision |
 
 **Later CT109 validation (owner approves every write).** The pre-checks do not publish:
@@ -2358,3 +2358,123 @@ Every sample matched the definition, with no discrepancy. The probe also confirm
 
 `backend/tests/test_control.py` keeps literal firmware-derived expectations: golden payloads,
 ranges, enums, triggers, curves, contexts, prerequisites and readback maps.
+
+#### 25.5.15 Checkpoint 4E-C — control runtime and API
+
+**Implemented, awaiting owner review.** No schema, storage, command persistence, retry, replay or
+reconciliation was added. The 63 Stage 4E-B definitions are unchanged.
+
+**Runtime shape (the smallest correct one).**
+
+- `pompa/mqtt.py` — `MqttAdapter.publish_command(topic, payload)` is the only write:
+  - it accepts only an already prepared relative `commands/…` topic and publishes
+    `{prefix}/{topic}` on the existing shared paho client and connection, with QoS 0 and
+    `retain=False`;
+  - it returns `True` only if `is_connected()` held and paho returned `MQTT_ERR_SUCCESS`;
+  - a disconnected client, another return code, or a paho `ValueError`/`OSError` returns
+    `False`;
+  - it never retries, and there is no generic publish.
+- `pompa/recorder.py` gains two generic, control-unaware facilities:
+  - `readings_observation(clock)` is the `/live?include=readings` entries (same serializer, same
+    lock), plus the exact float receipt instants and a change sequence number;
+  - `wait_for_change(seq, timeout)` is a `threading.Condition` on the recorder lock, notified
+    after every applied MQTT event. `Condition.wait` releases the lock, so a waiting request
+    never delays ingest. Recorder and ingest import nothing from control (a test enforces this).
+- `pompa/control_runtime.py` holds everything runtime:
+  - `ControlRuntime.controls()` is the GET projection;
+  - `ControlRuntime.execute()` handles POST coordination, the per-key in-flight guard and the
+    readback observation;
+  - the API maps its `ControlRequestError(code)` to status and `{detail, code}`;
+  - `pompa/control.py` stays pure and remains the only validation, encoding and readback-mapping
+    authority.
+- **Wiring.** `main.py` builds `ControlRuntime(recorder, adapter)` and passes it to
+  `create_app`. Without an injected runtime, the app has no publisher and POST answers `503`.
+- **Limiter.** POST waits run through `anyio.to_thread.run_sync` on a dedicated
+  `CapacityLimiter` (63 tokens, one per key), so up to 15 s readback waits never consume the
+  default threadpool tokens that serve every synchronous endpoint.
+
+**POST order.** Every refusal publishes nothing:
+
+1. The body must be one JSON object with only `value`. Duplicate keys at any depth and
+   `NaN`/`Infinity` are `400 invalid_request`.
+2. An unknown key is `404`.
+3. The in-flight guard: `409 command_in_progress`.
+4. `control.prepare()` on one baseline observation: `400`/`409`/`422`.
+5. `publish_command`: a `False` result is `503 mqtt_unavailable`.
+6. After an accepted publish, nothing can turn the request into an error or a second publish.
+
+**In-flight guard.**
+
+- It is a set of keys under a `threading.Lock`: the check and the add are one atomic claim.
+- A `finally` releases it on success, validation failure, publish failure, timeout or exception.
+- Different keys never contend, and there is no global lock.
+- It lives in process memory only, so a restart has no pending command.
+
+**Readback evidence.**
+
+- **Qualifying reading.** A reading counts only if it is `mode="live"` and `available` at the
+  observation that sees it.
+- **Pre- and post-publish.** `publish.at` is the API clock (`time.time`, the same wall clock as
+  MQTT receipts) read immediately before the paho call.
+  - A qualifying reading received before it is pre-publish state; the latest one wins, from the
+    baseline or a later observation.
+  - One received at or after it is a post-publish observation.
+- **Outcome per requested field** (a curve uses only its requested fields; a scalar has one):
+  - `matched`: every field had a post-publish observation equal to `expected`. Equality is
+    type-exact, so `True` never equals `1`. The request returns as soon as this holds.
+  - `unchanged_match`: every field's latest pre-publish state equalled `expected` and no field
+    had a different post-publish observation. This needs the whole window.
+  - `not_observed`: anything else.
+- **What is ignored.** Retained, stale, disconnected-epoch and `commands/…` topics never
+  qualify; command topics are not physical readings at all.
+- **Timing.** The window is measured with `time.monotonic`, so a wall-clock step can never
+  extend it. A backward step can only make a post-publish receipt look earlier, which
+  under-reports a match (`not_observed`); it never manufactures one.
+- **Waiting.** The runtime waits for recorder change notifications, not by polling.
+- **Missed intermediates.** Only intermediate values that are overwritten between two
+  observations can be missed. That can only turn a `matched` into `not_observed`, never
+  manufacture a match.
+- **No readback.** A control without readback returns `not_applicable` immediately after the
+  publish, without waiting.
+
+**Why no replay is possible (paho 2.1.0 source).**
+
+- A QoS 0 `publish()` without a socket returns `MQTT_ERR_NO_CONN` and queues nothing.
+- QoS 0 packets never enter `_out_messages`, the store that is resent after reconnect.
+- `reconnect()` clears the unsent packet queue.
+- An accepted packet that the socket never wrote is therefore dropped, not sent later.
+
+**Response details the 4E-A contract left open** (now in `docs/API.md`):
+
+- a curve's `readback` has `identity: null` and a `fields` map;
+- its `state` carries `value` plus per-field reading facts;
+- a `not_applicable` readback has `kind: null` and `waited_seconds: 0.0`;
+- `mqtt.connected` in GET is the ingest connection fact of the same observation. POST checks
+  the adapter's own `is_connected()` at publish time.
+
+**`W`.** `READBACK_WINDOW_SECONDS = 15.0` is a module constant, reported as
+`readback_window_seconds`. Tests inject a short window through the `ControlRuntime` constructor.
+It is not a setting and stays provisional until 4E-D measures CT109 latency.
+
+**Evidence.**
+
+- `backend/tests/test_control_api.py` uses a counting fake publisher and real recorder entry
+  points. It covers:
+  - every error class with zero publishes;
+  - no retry after a paho refusal;
+  - every readback outcome, including external writers, retained/stale/echo readings, curves
+    and effects;
+  - disconnect after publish and reconnect during the window;
+  - same-key, simultaneous and different-key concurrency;
+  - guard release on every path;
+  - no database access;
+  - an unblocked ingest while a request waits;
+  - one log line per request;
+  - adapter QoS 0, `retain=False` and connected-only behavior.
+- Runtime/API/adapter mutations (retry, retained or stale confirmation, guard leak, no guard,
+  extra fields or duplicate keys accepted, QoS 1/retain, publish while disconnected, an extra
+  publish, always-executable) are all killed by these tests.
+- A disposable local Mosquitto probe on CT112 exercised the real adapter end to end: 18/18
+  checks, including exactly one QoS 0 non-retained publication, no retained command for a later
+  subscriber, a retained TOP not confirming after an unclean reconnect, `503` while
+  disconnected, no replay on reconnect, and Optional PCB `not_applicable`.

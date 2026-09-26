@@ -8,6 +8,11 @@ Transport facts live here and nowhere else:
   checked-in reference; the retain flag is forwarded and measured, not assumed.
 * ``msg.retain`` is the broker's "delivered from the retained store" flag: MQTT
   3.1.1 §3.3.1.3 clears it for messages forwarded to an existing subscription.
+* Stage 4E command writes (docs/ARCHITECTURE.md §25.5.4): ``publish_command`` sends one
+  already prepared ``commands/…`` topic and payload on this same client and connection, QoS 0,
+  ``retain=False``, only while connected. paho 2.1 returns ``MQTT_ERR_NO_CONN`` for a QoS 0
+  publish without a socket and queues nothing; ``reconnect()`` drops unsent packets. Nothing is
+  retried or replayed here.
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ from .recorder import Recorder
 log = logging.getLogger(__name__)
 
 LWT_TOPIC = "LWT"
+COMMAND_TOPIC_PREFIX = "commands/"
 KEEPALIVE_SECONDS = 30
 RECONNECT_MIN_DELAY = 1
 RECONNECT_MAX_DELAY = 60
@@ -58,6 +64,20 @@ class MqttAdapter:
     def stop(self) -> None:
         self.client.disconnect()
         self.client.loop_stop()
+
+    def publish_command(self, topic: str, payload: str) -> bool:
+        """Publish one prepared command; ``True`` only if paho accepted it on the current
+        connection. That proves neither broker nor HeishaMon receipt."""
+        if not topic.startswith(COMMAND_TOPIC_PREFIX):
+            raise ValueError(f"not a command topic: {topic!r}")
+        if not self.client.is_connected():
+            return False
+        try:
+            info = self.client.publish(self.prefix + topic, payload, qos=0, retain=False)
+        except (ValueError, OSError):
+            log.exception("MQTT publish of %s refused by paho", topic)
+            return False
+        return info.rc == mqtt.MQTT_ERR_SUCCESS
 
     def _on_connect(self, client, userdata, flags, reason_code, properties) -> None:
         if reason_code.is_failure:

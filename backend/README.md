@@ -12,6 +12,7 @@ Domain rules are in [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 | `pompa/catalog.py` | The 21 recorded metrics: topics, priority, unit, kind, sentinels, ranges. |
 | `pompa/capabilities.py` | Reference-backed TOP/OPT/SET/PCB/XTOP capabilities and generic physical payload typing. |
 | `pompa/control.py` | Stage 4E pure control domain: semantic control definitions, validation, payload encoding, readback mapping, prerequisites. No I/O. |
+| `pompa/control_runtime.py` | Stage 4E control runtime: `/controls` projection, per-key in-flight guard, one connected-only publish, factual readback within the provisional window. No database. |
 | `pompa/ingest.py` | Connection epochs, LWT, retained vs live, `seen_live`, freshness, source selection. |
 | `pompa/minute.py` | `MinuteAccumulator` → `MinuteRow` (full-minute source life, time-weighted means). |
 | `pompa/aggregation.py` | `Stats` algebra, derived series, energy, paired COP, coverage. |
@@ -76,6 +77,8 @@ The Stage 3 default API shapes and the additive Stage 4A–4D forms are specifie
 - `GET /api/v1/activity?from=…&to=…` — exact `[from, to)` (≤ 31 days + 1 h): activity timeline, whole
   compressor runs, off intervals and defrosts with overlap facts, full-span energy/COP, factual summary.
 - `GET /api/v1/activity/live` — current activity from the in-memory live observation; no database.
+- `GET /api/v1/controls` / `POST /api/v1/controls/{key}` — semantic controls: validation, at most one
+  QoS 0 non-retained publish while connected, factual readback; no database.
 
 `from` and `to` are ISO 8601 instants with an explicit offset (`Z`, `+02:00`) or `YYYY-MM-DD`
 calendar dates meaning local midnight in Europe/Warsaw; both must be whole minutes.

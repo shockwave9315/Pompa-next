@@ -16,6 +16,7 @@ import uvicorn
 
 from .api import create_app
 from .config import ConfigError, load_settings
+from .control_runtime import ControlRuntime
 from .ingest import Ingest
 from .minute import MinuteAccumulator
 from .mqtt import MqttAdapter
@@ -83,7 +84,8 @@ def main() -> None:
             if left:
                 log.warning("shutdown with %d closed minute(s) not persisted", left)
 
-    app = create_app(recorder, storage, lifespan=lifespan)
+    # Control publishes through the same adapter, client and connection as ingest (§25.5.4).
+    app = create_app(recorder, storage, lifespan=lifespan, controls=ControlRuntime(recorder, adapter))
     uvicorn.run(app, host=settings.api_host, port=settings.api_port,
                 log_level=settings.log_level.lower(), access_log=False)
 
