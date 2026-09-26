@@ -2210,62 +2210,28 @@ A Stage 5 need for any of these requires new evidence. Accepted APIs are unchang
 | Checkpoint | Scope | Likely files | Gate |
 |---|---|---|---|
 | **4E-B** pure control domain + reference refresh (OWNER ACCEPTED/CLOSED, §25.5.14) | Refresh tracked `MQTT-Topics.md` (SET47/48) and add `OptionalPCB.md` verbatim at the pinned upstream commit. Extend the parser with the `PCB` family. Add the pure definition module: validation, encoding, readback mapping, prerequisite and context evaluation from a readings snapshot. No MQTT, no API. | `docs/reference/heishamon/*`, `pompa/capabilities.py`, new `pompa/control.py`, capability and control tests | Golden encoding table per command against the firmware encoders; boundary, enum and type rejection; readback mapping; curve JSON; definition ↔ reference coverage; updated capability counts. Adversarial review of definitions vs firmware source. No CT109. Owner gate resolves every open value, identity and invariant question (§25.5.2, §25.5.5, §25.5.11) before the executable definitions are frozen. |
-| **4E-C** publish path + API (implemented, §25.5.15; awaiting owner review) | Connected-only QoS 0 non-retained `publish` on the MQTT adapter; per-key in-flight guard; bounded readback observation; `GET`/`POST /api/v1/controls`; one log line per request | `pompa/mqtt.py`, `pompa/control.py` (or a small runtime module), `pompa/api.py`, `pompa/main.py`, tests | Fake-client tests: no publish on any refusal; exactly one publish per accepted request; disconnected `503`; no retry after reconnect; every readback outcome with an injected clock; `409` paths; recorder, history and report unaffected; earlier endpoints byte-identical. Adversarial review. No CT109. |
-| **4E-D** CT109 validation, API freeze, closeout | Owner deploys; pre-checks; owner-approved write matrix (below); latency measurement fixes `W`; `docs/API.md` final freeze; whole-stage adversarial review; owner merge; Stage 4 DONE; Stage 5 ready | docs, `scripts/smoke.sh` only if needed | CT109 evidence accepted by the owner; review findings resolved; merge decision |
+| **4E-C** publish path + API (OWNER ACCEPTED/CLOSED, §25.5.15) | Connected-only QoS 0 non-retained `publish` on the MQTT adapter; per-key in-flight guard; bounded readback observation; `GET`/`POST /api/v1/controls`; one log line per request | `pompa/mqtt.py`, `pompa/control.py` (or a small runtime module), `pompa/api.py`, `pompa/main.py`, tests | Fake-client tests: no publish on any refusal; exactly one publish per accepted request; disconnected `503`; no retry after reconnect; every readback outcome with an injected clock; `409` paths; recorder, history and report unaffected; earlier endpoints byte-identical. Adversarial review. No CT109. |
+| **4E-D** CT109 validation, API freeze, closeout (CURRENT) | Owner deploys; pre-checks; owner-approved write matrix in the validation contract; latency measurement fixes `W`; `docs/API.md` final freeze; whole-stage adversarial review; owner merge; Stage 4 DONE; Stage 5 ready | docs, `scripts/smoke.sh` only if needed | CT109 evidence accepted by the owner; review findings resolved; merge decision |
 
-**Later CT109 validation (owner approves every write).** The pre-checks do not publish:
+**Stage 4E-D validation procedure.** The authoritative phase, gate, candidate, restore and
+measurement contract is [`STAGE_4E_D_VALIDATION.md`](STAGE_4E_D_VALIDATION.md). 4E-D-A materializes
+that document only; it awaits independent review and owner acceptance. 4E-D-B runbook preparation
+and CT109 validation are NOT STARTED. The accepted 4E-C implementation candidate is
+`fa4d49e233927210260595143a0de01f12f05399`.
 
-- `/status` MQTT connected and alive;
-- retained `commands/#` topics on the broker (HA);
-- `{prefix}/stats` firmware version;
-- TOP110, TOP4, TOP76 and TOP81 readings;
-- the current value of each target TOP.
+The procedure retains the original sample sets: ten safe reversible candidates and seven
+state-changing but restorable candidates, with all 63 definitions explicitly classified. It uses
+observed original/schema/context facts and bounded alternate selection instead of assumed live
+values. Service/disruptive and Optional PCB controls are excluded from real execution. The
+classification is a validation procedure, not new API safety policy.
 
-For every test the expected MQTT result is `200` with `publish.status="sent"`. Wait at most `W`,
-extended to 60 s for measurement only.
-
-The rows are chosen for reversibility and TOP readback evidence. The owner's HA usage decides
-priority where it exists. SET46 (`heater_on_outdoor_temperature`) has no owner HA-write evidence;
-it is included only because TOP78 gives a direct state readback.
-
-*Safe and reversible.* Each is abort-safe: stop on `503`, on a non-`matched` outcome after two
-windows, or on any heat-pump error in TOP44.
-
-| Control | Initial (read) | Request | Expected readback | Restore |
-|---|---|---|---|---|
-| `quiet_mode_priority` | TOP141 | the other value | TOP141 = | original value |
-| `heating_control` | TOP139 | the other value | TOP139 = | original value |
-| `smart_dhw` | TOP140 | the other value | TOP140 = | original value |
-| `heat_delta` | TOP23 | +1 K | TOP23 = | original value |
-| `dhw_heat_delta` | TOP22 | +1 K | TOP22 = | original value |
-| `heating_off_outdoor_temperature` | TOP77 | +1 °C | TOP77 = | original value |
-| `heater_on_outdoor_temperature` | TOP78 | −1 °C | TOP78 = | original value |
-| `bivalent_start_temperature` | TOP131, bivalent off | −1 °C | TOP131 = | original value; HA retained replay can revert it |
-| `bivalent_advanced_start_temperature` / `_stop_` | TOP134 / TOP135 | −1 °C | TOP134 / TOP135 = | original value; proves the HA name defect is avoided |
-| any of the above | — | request equal to the current value | `unchanged_match` | none |
-
-*State-changing but easily restorable.* Each needs a before/after/restore record. Abort if the
-activity or error state becomes unexpected.
-
-| Control | Request | Expected readback | Restore |
-|---|---|---|---|
-| `dhw_target_temperature` | −1 °C | TOP9 = | original value |
-| `zone1_heat_curve` | `{"outside_low": +1}` | TOP32 = | original value |
-| `zone1_heat_request` | shift +1 K | TOP27 = | original value |
-| `quiet_mode` | `level_1` | TOP18 = | `off` or original |
-| `powerful_mode` | `min_30` | TOP17 = | `off` |
-| `force_dhw` | on | TOP2 = | off |
-| `operation_mode` | an owner-chosen mode | TOP4 per mapping | original value |
-
-*Service or disruptive: not exercised without explicit owner approval.* Transport and encoding are
-proved by 4E-B/4E-C tests:
-
-- `force_defrost`, `force_sterilization`, `force_heater`, `pump_service_mode`, `max_pump_duty`,
-  `fault_reset`, `heat_pump_power`, `holiday_mode`;
-- the installer settings: SET25/26/28/30–33/34/35/43/44/45, SET17, the cooling controls and
-  SET21–23;
-- every PCB input. On this unit they are refused while TOP110 = `0`. If the heat pump's Optional PCB
-  setting is enabled without HeishaMon emulation, error H74 follows.
+Deployment and read-only evidence require owner acceptance before the first write. Every change
+and restore is deliberate; operation_mode has a dedicated gate. Retained HA commands are audited,
+never automatically cleared. TOP44/activity are watched before, after and after restore. A
+not_observed result stops new writes; the optional 60-second total extension is passive evidence
+only, never another publish or a changed API response. Equal-value unchanged_match probes wait
+full W and do not count as latency samples. Final W, final API freeze and Stage 4 closure remain
+pending real evidence, independent reviews and the owner merge decision.
 
 #### 25.5.14 Checkpoint 4E-B — reference refresh and pure control domain
 
@@ -2365,7 +2331,8 @@ ranges, enums, triggers, curves, contexts, prerequisites and readback maps.
 
 #### 25.5.15 Checkpoint 4E-C — control runtime and API
 
-**Implemented, awaiting owner review.** No schema, storage, command persistence, retry, replay or
+**OWNER ACCEPTED/CLOSED at `fa4d49e233927210260595143a0de01f12f05399`.**
+No schema, storage, command persistence, retry, replay or
 reconciliation was added. The 63 Stage 4E-B definitions are unchanged.
 
 **Runtime shape (the smallest correct one).**

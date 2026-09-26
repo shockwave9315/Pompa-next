@@ -86,8 +86,14 @@ backend on CT109 before frontend work. Checkpoints:
 
 - A: research and contract freeze (done);
 - B: reference refresh and pure control domain (owner accepted/closed);
-- C: publish path and `/api/v1/controls` (implemented, awaiting owner review);
-- D: CT109 validation, API freeze, whole-stage review and the owner merge.
+- C: publish path and `/api/v1/controls` (owner accepted/closed at
+  `fa4d49e233927210260595143a0de01f12f05399`);
+- D: CT109 validation, API freeze, whole-stage review and the owner merge (CURRENT).
+  D-A's tracked validation contract is implemented and awaits independent review/owner acceptance;
+  D-B execution runbook and CT109 validation have not started. W remains provisional at 15 s.
+
+The phase/gate/evidence contract is [`STAGE_4E_D_VALIDATION.md`](STAGE_4E_D_VALIDATION.md).
+Stage 4 is not complete and the complete backend API is not finally frozen yet.
 
 See `docs/ARCHITECTURE.md` §25.5.
 

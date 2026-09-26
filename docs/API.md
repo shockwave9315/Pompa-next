@@ -835,6 +835,9 @@ rules, the complete list of controls, the evidence and the owner decisions are i
 [`ARCHITECTURE.md`](ARCHITECTURE.md) §25.5. The control resources need MQTT but not MariaDB. They
 never read or write storage, and they leave every earlier response unchanged.
 
+Production validation phases, owner gates and evidence requirements are in
+[`STAGE_4E_D_VALIDATION.md`](STAGE_4E_D_VALIDATION.md); W remains provisional until that validation.
+
 Clients never see MQTT topics, SET numbers, raw HeishaMon payloads or `SetCurves` JSON. `key`,
 enum ids and field names are stable, language-neutral identifiers, and no display labels are
 returned. `identity` links a control to the Stage 4A capability catalog, for reference only.

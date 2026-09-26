@@ -6,8 +6,11 @@
 Checkpoint 4E-A is owner accepted and closed at `1a7826655aefb5f79daf337b7aa5fe6e5418ab3c`.
 Checkpoint 4E-B (reference refresh and pure control domain) is OWNER ACCEPTED/CLOSED on branch
 `stage-4e-control` in draft PR #10 at `dc157beb3c1fdf58c7b23c7075b8cfbb508fd1c4`. Checkpoint 4E-C
-(control runtime and API) is implemented and AWAITING OWNER REVIEW. 4E-D has not started. The
-frozen control contract is `docs/ARCHITECTURE.md` §25.5
+(control runtime and API) is OWNER ACCEPTED/CLOSED at `fa4d49e233927210260595143a0de01f12f05399`.
+**Stage 4E-D is CURRENT.** 4E-D-A validation contract is IMPLEMENTED / AWAITING REVIEW;
+4E-D-B and CT109 validation are NOT STARTED. The tracked plan is
+[`STAGE_4E_D_VALIDATION.md`](STAGE_4E_D_VALIDATION.md). The frozen control contract is
+`docs/ARCHITECTURE.md` §25.5
 and the Stage 4E section of `docs/API.md`. Frontend work starts after Stage 4.
 
 Stage 4D — DONE and merged to `main` (PR #9, merge commit
@@ -21,7 +24,8 @@ Stage 4D — DONE and merged to `main` (PR #9, merge commit
 - No partial integrity framework or read guard was justified.
 - The owner merged PR #9.
 
-CT109 runs owner-validated head `3af4d8fc0e17bafe17cc669f694bb2d3652a9ac4`.
+Last owner-reported CT109 head: `3af4d8fc0e17bafe17cc669f694bb2d3652a9ac4`.
+Actual deployed identity must be re-observed before Stage 4E validation.
 
 Stage 4C — DONE and merged to `main` (PR #8, merge commit
 `8c3bccbcf6ba305bbf547c59ef3f6167471442e8`), including the reviewed F2 hardening commit
@@ -329,8 +333,8 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
 
 ## Out of scope
 
-- In 4E-C: CT109, any real broker or heat-pump command, schema or storage changes, a
-  configurable readback window, and 4E-D work.
+- In 4E-D-A: CT109 contact/deployment, production MQTT/credentials or heat-pump commands,
+  execution runbooks, production Python changes, final W/API freeze and later closeout execution.
 - Throughout Stage 4E: command persistence or history, generic MQTT publish, automatic retry or
   reconciliation, Stage 5 frontend, cooling/heater/cost/external-meter analytics, and year or
   season reports.
@@ -340,9 +344,10 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
 
 ## Next
 
-Owner review of 4E-C (`docs/ARCHITECTURE.md` §25.5.15). 4E-D (CT109 validation, API freeze,
-whole-stage review) starts only after owner approval.
-The readback window `W` stays provisional until the 4E-D CT109 measurement.
+Independent review and owner acceptance of the tracked 4E-D-A validation contract, then
+4E-D-B runbook preparation and owner-executed deployment/pre-checks. Phase 0/1 owner acceptance
+precedes any real write. The readback window `W` remains provisional at 15 s; CT109 validation,
+final API freeze and Stage 4 closure have not happened.
 
 ## Stage 4E checkpoints
 
@@ -400,7 +405,8 @@ The readback window `W` stays provisional until the 4E-D CT109 measurement.
   - Closure (F7/F8 decisions): focused 317 passed; full no-DB 1,330 passed, 303
     MariaDB-gated skips; full suite on MariaDB 11.4.13: 1,633 passed, 0 skipped. No packaging
     change, so no image rebuild.
-- **4E-C — control runtime and API (implemented, AWAITING OWNER REVIEW):**
+- **4E-C — control runtime and API (OWNER ACCEPTED/CLOSED at
+  `fa4d49e233927210260595143a0de01f12f05399`):**
   - `GET /api/v1/controls` (63 controls) and `POST /api/v1/controls/{key}`, with no database.
   - `MqttAdapter.publish_command`: shared client, QoS 0, `retain=false`, connected only, at most
     one publish, no retry or replay.
@@ -442,9 +448,19 @@ The readback window `W` stays provisional until the 4E-D CT109 measurement.
     - Production image built; offline packaged observation/control probe passed. Disposable
       localhost Mosquitto: 5/5 scalar, effect, curve and transition scenarios passed.
     - Self-review A–N: 14/14 passed. Compile and `git diff --check` passed.
-    - No journal, persistence, transport, clock-policy or storage change. Still IMPLEMENTED /
-      AWAITING OWNER REVIEW; 4E-D NOT STARTED.
-- **4E-D — CT109 validation, API freeze, whole-stage review and closeout:** NOT STARTED.
+    - No journal, persistence, transport, clock-policy or storage change. Owner accepted/closed
+      the corrected implementation at the SHA above.
+- **4E-D — CT109 validation, API freeze, whole-stage review and closeout: CURRENT.**
+  - **4E-D-A — validation contract: IMPLEMENTED / AWAITING REVIEW.**
+    [`STAGE_4E_D_VALIDATION.md`](STAGE_4E_D_VALIDATION.md) defines deployment/identity, read-only
+    pre-checks, owner gates, 10 safe reversible and 7 state-changing candidates, 46 controls
+    excluded from real execution, exact restore evidence, HA audit, TOP44/activity watches,
+    latency analysis and passive timeout diagnostics. No executable CT109 runbook yet.
+  - **4E-D-B — execution runbook / owner validation: NOT STARTED.**
+  - **CT109 validation: NOT STARTED.** Independent plan review and owner acceptance precede
+    runbook generation; owner acceptance of Phase 0/1 evidence precedes writes.
+  - W = 15 s remains provisional; final API freeze, whole-stage reviews, merge and Stage 4
+    completion remain pending. No Stage 5 work.
 
 ## Stage 4D checkpoints (DONE)
 
