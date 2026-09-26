@@ -2,25 +2,29 @@
 
 ## Current stage
 
-**Current stage: Stage 4D — Reports and product analytics projections.** Checkpoint 4D-A's
-contract freeze is owner-accepted. Checkpoint 4D-B's pure report domain and targeted hardening
-are owner accepted and closed at `5de43b88f632a7069a4f579ff7a26302624e2855`.
-Checkpoint 4D-C-A's behavior-preserving extraction refactor is owner accepted and closed at
-`33b1e0472d818502079bea20fb7034b7cdc1c33c`. Checkpoint 4D-C-B's report read model and API and
-Stage 4D-C as a whole are owner accepted and closed at
-`4b20bdefee451e59b292181e4aa0c75cf9e2bde6`. Stage 4D-D-A is owner accepted and closed at
-`3af4d8fc0e17bafe17cc669f694bb2d3652a9ac4`; Stage 4D-D-B is owner accepted and closed after
-CT109 runtime validation of that exact SHA. Stage 4D-D-C whole-PR adversarial review is next,
-not started. Stage 4D remains open pending whole-PR review and the owner merge decision.
-Stage 4C is DONE and merged to `main` in PR #8 (merge commit
-`8c3bccbcf6ba305bbf547c59ef3f6167471442e8`). Its A–D
-checkpoints and whole-PR review are complete. Frontend work starts after Stage 4.
+**Current stage: Stage 4E — SET/control backend, final API freeze and runtime validation.**
+Checkpoint 4E-A (control research, contract freeze and the full Stage 4E plan) is committed on
+branch `stage-4e-control` and awaits owner review. It changes documentation only. No production
+code, schema, CT109 connection or MQTT command publication is part of 4E-A. The frozen control
+contract is `docs/ARCHITECTURE.md` §25.5 and the Stage 4E section of `docs/API.md`. Frontend work
+starts after Stage 4.
 
-The already-reviewed F2 hardening commit `b81d680eecda67e7d2d80facd4b79ba08472c824` is in
-that merge. It makes `/activity` hold the unacknowledged recorder tail `open` until its historical
-outcome settles, preventing transient false gaps before a tick or during a write backlog. CT109
-now runs owner-validated Stage 4D head `3af4d8fc0e17bafe17cc669f694bb2d3652a9ac4`;
-this first Stage 4D deployment also delivered the F2 correction.
+Stage 4D — DONE and merged to `main` (PR #9, merge commit
+`890e4b0b882248130dbdecf0c412b5c1eac852ff`). The closure facts:
+
+- 4D-D-A and the 4D-D-B CT109 runtime validation are owner accepted and closed.
+- The final whole-PR Opus review supported the merge.
+- GitHub Codex raised one technically valid durable-energy corruption hypothesis. An independent
+  adversarial follow-up reproduced the technical condition and classified it TECHNICALLY TRUE BUT
+  NOT A MERGE FINDING: no supported application path creates that state.
+- No partial integrity framework or read guard was justified.
+- The owner merged PR #9.
+
+CT109 runs owner-validated head `3af4d8fc0e17bafe17cc669f694bb2d3652a9ac4`.
+
+Stage 4C — DONE and merged to `main` (PR #8, merge commit
+`8c3bccbcf6ba305bbf547c59ef3f6167471442e8`), including the reviewed F2 hardening commit
+`b81d680eecda67e7d2d80facd4b79ba08472c824`.
 
 Stage 4B — DONE and merged to `main` (PR #7, merge commit
 `dfd225d2a8fe35563cd1f684efb81cf91b532a2f`).
@@ -324,9 +328,10 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
 
 ## Out of scope
 
-- CT109 connection/deployment and whole-PR review in this runtime bookkeeping checkpoint;
-  frontend throughout Stage 4D.
-- Stage 4E SET/control, Stage 5 frontend, cooling/heater/cost/external-meter analytics and year or
+- In 4E-A: production Python, schema, frontend, CT109 connection or deployment, any MQTT command
+  publish, and edits to the packaged HeishaMon reference (deferred to 4E-B, §25.5.2).
+- Throughout Stage 4E: command persistence or history, generic MQTT publish, automatic retry or
+  reconciliation, Stage 5 frontend, cooling/heater/cost/external-meter analytics, and year or
   season reports.
 - Legacy compatibility or historical migration.
 - Changing the 21 canonical metric semantics, Stage 1–4A history invariants, or the 365-day
@@ -334,10 +339,28 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
 
 ## Next
 
-Stage 4E — isolated SET/control and final backend API, after Stage 4D. Within Stage 4D,
-4D-D-C whole-PR adversarial review is next, followed by the owner merge decision (§25.4).
+Owner review of 4E-A: the contract, the evidence and the open **(O)** decisions in
+`docs/ARCHITECTURE.md` §25.5. No 4E-B work starts before owner approval.
 
-## Stage 4D checkpoints
+## Stage 4E checkpoints
+
+- **4E-A — control research, contract freeze and full plan (CURRENT, awaiting owner review):**
+  - Docs only.
+  - Reconciles the tracked SET1–SET46 reference with upstream HeishaMon v4.2.2 firmware: 48
+    heat-pump commands plus 14 Optional PCB commands.
+  - Adds the Home Assistant integration evidence: disabled-by-default is UX-only, not
+    "unsupported"; HA's SET37/SET38 topic names do not reach the firmware.
+  - Proves the MQTT write semantics.
+  - Freezes the transport: QoS 0, non-retained, connected-only, at most one publish per request,
+    no retry.
+  - Freezes 64 semantic controls with readback mapping, a factual readback model, no command
+    persistence and the `/api/v1/controls` contract.
+  - Plans 4E-B–4E-D and the later CT109 write matrix.
+- **4E-B — reference refresh and pure control domain:** planned (§25.5.13).
+- **4E-C — publish path and control API:** planned.
+- **4E-D — CT109 validation, API freeze, whole-stage review and closeout:** planned.
+
+## Stage 4D checkpoints (DONE)
 
 - **4D-A — contract freeze (accepted/closed):** architecture, API, knownness, storage, time, error
   and snapshot contracts; stale Stage 4C docs. Documentation only.
@@ -423,5 +446,9 @@ Stage 4E — isolated SET/control and final backend API, after Stage 4D. Within 
   1,440, settled 508, recorded 503, gap 5, future 932 and coverage 99.0%; `503 + 5 = 508` and
   `508 + 932 = 1440`. Deployment log evidence contained no traceback, schema failure, DB failure
   or report error. This deployment also first delivered the already-reviewed F2 correction.
-- **4D-D-C — whole-PR adversarial review (NEXT / NOT STARTED):** whole-PR review and owner merge
-  decision remain. Stage 4D-D and Stage 4D remain open.
+- **4D-D-C — whole-PR review and merge (DONE):**
+  - The final whole-PR Opus review supported the merge.
+  - The Codex durable-energy corruption hypothesis was classified TECHNICALLY TRUE BUT NOT A MERGE
+    FINDING. No supported application path creates that state, and no integrity framework or read
+    guard was added.
+  - The owner merged PR #9 at `890e4b0b882248130dbdecf0c412b5c1eac852ff`.

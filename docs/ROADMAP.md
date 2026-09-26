@@ -66,20 +66,29 @@ The owner accepted CT109 schema, backfill, durable integrity, raw-vs-durable, ac
 unchanged prior-contract evidence. PR #8 is merged to `main` at
 `8c3bccbcf6ba305bbf547c59ef3f6167471442e8`.
 
-### 4D — Reports and product analytics projections (CURRENT)
+### 4D — Reports and product analytics projections (DONE)
 
 Compose day, week, month and custom-period outputs from the existing energy, paired COP and
 coverage algebra plus 4C activity truth. Use `rollup_1h` and `activity_segment_1h`; add no report
 storage. Expose one `GET /api/v1/report` resource for Warsaw calendar periods, with backend-owned
-facts rather than formulas per frontend panel. Checkpoints: A contract freeze (owner review), B
-pure report domain, C one-snapshot read model/API, D runtime and adversarial closeout before the
-owner merge decision. See `docs/ARCHITECTURE.md` §25.4.
+facts rather than formulas per frontend panel. Checkpoints A–D, CT109 validation and whole-PR
+review are complete. PR #9 is merged to `main` at `890e4b0b882248130dbdecf0c412b5c1eac852ff`.
+See `docs/ARCHITECTURE.md` §25.4.
 
-### 4E — SET/control backend, final API freeze and runtime validation
+### 4E — SET/control backend, final API freeze and runtime validation (CURRENT)
 
-Use known SET metadata to validate explicit user commands and publish through an isolated write
-path. Decide whether command persistence is actually needed. Freeze the complete product API and
-validate the backend on CT109 before frontend work.
+Expose the complete evidenced HeishaMon command surface as backend-validated semantic controls:
+48 heat-pump commands and 14 Optional PCB commands, as 64 controls. Publish through an isolated
+QoS 0, non-retained, connected-only path that makes at most one publish per request. Report
+factual readback, with no command persistence. Freeze the complete product API and validate the
+backend on CT109 before frontend work. Checkpoints:
+
+- A: research and contract freeze (current);
+- B: reference refresh and pure control domain;
+- C: publish path and `/api/v1/controls`;
+- D: CT109 validation, API freeze, whole-stage review and the owner merge.
+
+See `docs/ARCHITECTURE.md` §25.5.
 
 ## Stage 5 — Frontend
 
