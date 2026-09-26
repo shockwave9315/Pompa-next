@@ -321,7 +321,7 @@ bucket.
 | `400` | Malformed parameters: missing `from`/`to`, unparseable or naive timestamps, non-minute alignment, `from >= to`, unknown bucket, unknown or duplicate series, invalid or repeated `include`. |
 | `422` | Well-formed but unrepresentable: more than 3000 history buckets, a history range or partial edge hour whose raw minutes were provably purged, an optional mean/energy bucket whose known-value sum cannot fit in binary DOUBLE, instants outside 1970–2100, an activity range longer than 31 days and one hour, or activity-unavailable history. Stage 4D report-specific cases are below. |
 | `500` | `/api/v1/activity`: stored durable activity is inconsistent. A row may be invalid or not in its exact canonical persisted form, or an hour's durable segment minutes may differ from its recorded canonical minutes. This applies to widened evidence too. It is never answered from raw instead. Stage 4D report consistency cases are below. |
-| `503` | The database is unavailable for a DB-backed resource (`/history`, optional-history selection/series, `/activity`, or the Stage 4D report once implemented). |
+| `503` | The database is unavailable for a DB-backed resource (`/history`, optional-history selection/series, `/activity`, or `/report`). |
 
 The body is `{"detail": "…"}`. `422` for purged raw means the backend knows the minutes existed and
 were physically deleted — it is never a consequence of a range simply being old. A range that was
@@ -422,9 +422,9 @@ paths remain unchanged. `/status` keeps its Stage 3 shape and `uncatalogued_topi
 still list known non-core capability topics. Default `/history` remains canonical; explicit
 Stage 4B selectors are documented below.
 
-Report implementation and commands belong to later Stage 4 checkpoints. The frozen future report
-contract is below. The frontend starts only after the complete product-backend contract is
-documented.
+Stage 4D-C-B implements `GET /api/v1/report`; its frozen contract is below. Commands belong to
+later Stage 4 checkpoints. The frontend starts only after the complete product-backend contract
+is documented.
 
 ## Stage 4B optional-history selection
 

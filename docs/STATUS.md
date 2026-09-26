@@ -7,7 +7,8 @@ contract freeze is owner-accepted. Checkpoint 4D-B's pure report domain and targ
 are owner accepted and closed at `5de43b88f632a7069a4f579ff7a26302624e2855`.
 Checkpoint 4D-C-A's behavior-preserving extraction refactor is owner accepted and closed at
 `33b1e0472d818502079bea20fb7034b7cdc1c33c`. Checkpoint 4D-C-B's report read model and API are
-implemented and await owner review. Stage 4D-D has not started. Stage 4C is DONE and merged to `main`
+implemented, independently adversarially reviewed and await owner acceptance. Stage 4D-D has not
+started. Stage 4C is DONE and merged to `main`
 in PR #8 (merge commit `8c3bccbcf6ba305bbf547c59ef3f6167471442e8`). Its A–D
 checkpoints and whole-PR review are complete. Frontend work starts after Stage 4.
 
@@ -330,7 +331,7 @@ compressor behavior and its asymmetric midnight continuation are deliberately no
 ## Next
 
 Stage 4E — isolated SET/control and final backend API, after Stage 4D. Within Stage 4D, owner
-review of the 4D-C-B report read model precedes 4D-D runtime/adversarial closeout (§25.4).
+acceptance of the 4D-C-B report read model precedes 4D-D runtime/adversarial closeout (§25.4).
 
 ## Stage 4D checkpoints
 
@@ -370,7 +371,7 @@ review of the 4D-C-B report read model precedes 4D-D runtime/adversarial closeou
   production behavior was already correct. An HTTP regression with recorded activity starting
   at timestamp 0 now pins `evidence.from` and the first event/run's `outside_evidence` boundary.
   Removing the wrapper's `left_floor=0` argument in scratch makes that regression fail.
-- **4D-C-B — report read model + API (implemented; awaiting owner review):**
+- **4D-C-B — report read model + API (implemented; awaiting owner acceptance):**
   `report_read.py` extracts the 13 required canonical series and one widened Stage 4C timeline in
   the same consistent snapshot, proves recorded-minute equality per UTC hour/partial hour,
   closes the session and invokes the unchanged pure composer. `GET /api/v1/report` validates the
@@ -381,7 +382,10 @@ review of the 4D-C-B report read model precedes 4D-D runtime/adversarial closeou
   gaps; unavailable detail, corrupt durable evidence and per-hour mismatches fail closed.
   Integration tests cover calendar forms, knownness, events, current/unacknowledged tails,
   source/purge equality, errors, bounded range reads and a deterministic two-connection MariaDB
-  snapshot race. Stage 4D-C as a whole is not yet closed.
+  snapshot race. Independent 4D-C-B adversarial review found 0 blocker / 0 important / 1 minor.
+  The sole MINOR was stale API documentation describing the already-implemented report route as
+  future/unimplemented. The stale wording is corrected; no production code changed.
+  Stage 4D-C as a whole is not yet closed. Stage 4D-D has not started.
 - **4D-D — runtime/adversarial closeout (not started):** raw/rollup, raw/durable and post-purge equality; DST,
   F2 current tail, snapshot races, bounded performance, CT109 smoke and whole-PR adversarial
   review. This deployment also first delivers F2. Gate: owner-accepted runtime evidence,
